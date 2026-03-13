@@ -1,0 +1,22 @@
+app = "hemp-dispensary-api"
+primary_region = "sjc"
+
+[build]
+
+[env]
+  DB_PATH = "/data/app.db"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[mounts]
+  source = "app_data"
+  destination = "/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1024mb"

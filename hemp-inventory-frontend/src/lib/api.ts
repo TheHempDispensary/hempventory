@@ -1,0 +1,274 @@
+import axios from "axios";
+
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+
+const api = axios.create({
+  baseURL: API_URL,
+});
+
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem("token");
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401) {
+      localStorage.removeItem("token");
+      window.location.href = "/login";
+    }
+    return Promise.reject(error);
+  }
+);
+
+// Auth
+export const login = (username: string, password: string) =>
+  api.post("/api/auth/login", { username, password });
+
+export const getMe = () => api.get("/api/auth/me");
+
+export const changePassword = (currentPassword: string, newPassword: string) =>
+  api.post("/api/auth/change-password", {
+    current_password: currentPassword,
+    new_password: newPassword,
+  });
+
+// Locations
+export const getLocations = () => api.get("/api/locations/");
+
+export const addLocation = (data: {
+  name: string;
+  merchant_id: string;
+  api_token: string;
+  is_virtual?: boolean;
+}) => api.post("/api/locations/", data);
+
+export const deleteLocation = (id: number) =>
+  api.delete(`/api/locations/${id}`);
+
+// Inventory
+export const syncInventory = () => api.get("/api/inventory/sync");
+
+export const createItem = (data: {
+  name: string;
+  price: number;
+  sku?: string;
+  category?: string;
+  initial_stock?: number;
+  locations?: number[];
+  stock_per_location?: { location_id: number; quantity: number }[];
+  par_per_location?: { location_id: number; par_level: number }[];
+  price_type?: string;
+  cost?: number;
+  product_code?: string;
+  alternate_name?: string;
+  description?: string;
+  color_code?: string;
+  is_revenue?: boolean;
+  is_age_restricted?: boolean;
+  age_restriction_type?: string;
+  age_restriction_min_age?: number;
+  available?: boolean;
+  hidden?: boolean;
+  auto_manage?: boolean;
+  default_tax_rates?: boolean;
+  image_description?: string;
+}) => api.post("/api/inventory/items", data);
+
+export const getAgeRestrictionTypes = () =>
+  api.get("/api/inventory/age-restriction-types");
+
+export const deleteItem = (sku: string) =>
+  api.delete(`/api/inventory/items/${sku}`);
+
+export const bulkDeleteItems = (skus: string[]) =>
+  api.post("/api/inventory/items/bulk-delete", { skus });
+
+export const bulkAutoManage = (enable: boolean = true, skus?: string[]) =>
+  api.post("/api/inventory/bulk-auto-manage", { enable, skus: skus || null });
+
+export const pushItemToLocation = (sku: string, locationId: number, initialStock: number = 0) =>
+  api.post(`/api/inventory/items/${sku}/push-to-location`, { location_id: locationId, initial_stock: initialStock });
+
+export const fixPosScanning = () => api.post("/api/inventory/fix-pos");
+
+export const transferStock = (sku: string, fromLocationId: number, toLocationId: number, quantity: number) =>
+  api.post("/api/inventory/transfer-stock", { sku, from_location_id: fromLocationId, to_location_id: toLocationId, quantity });
+
+export const bulkAssignImages = (keyword: string, imageData: string, contentType: string = "image/png", skus?: string[]) =>
+  api.post("/api/inventory/bulk-assign-images", { keyword, image_data: imageData, content_type: contentType, skus: skus || null });
+
+export const syncRefunds = () => api.post("/api/inventory/sync-refunds");
+
+export const getRefundHistory = () => api.get("/api/inventory/refund-history");
+
+export const resetLoyaltySync = () => api.post("/api/loyalty/sync-reset");
+
+export const updateItem = (
+  sku: string,
+  data: {
+    name?: string;
+    price?: number;
+    sku?: string;
+    stock_updates?: { location_id: number; quantity: number }[];
+  }
+) => api.put(`/api/inventory/items/${sku}`, data);
+
+// PAR Levels
+export const getParLevels = () => api.get("/api/par/");
+
+export const setParLevel = (
+  sku: string,
+  locationId: number,
+  parLevel: number
+) => api.put(`/api/par/${sku}/${locationId}`, { par_level: parLevel });
+
+export const setBulkParLevels = (
+  levels: { sku: string; location_id: number; par_level: number }[]
+) => api.post("/api/par/bulk", levels);
+
+export const getParAlerts = () => api.get("/api/par/alerts");
+
+// Alerts
+export const getAlertHistory = (limit?: number) =>
+  api.get("/api/alerts/history", { params: { limit } });
+
+export const checkAndNotify = () => api.post("/api/alerts/check");
+
+export const getAlertSettings = () => api.get("/api/alerts/settings");
+
+export const updateAlertSettings = (data: {
+  notification_email: string;
+  smtp_host?: string;
+  smtp_port?: number;
+  smtp_user?: string;
+  smtp_password?: string;
+}) => api.post("/api/alerts/settings", data);
+
+// Product Images
+export const uploadImage = (sku: string, imageData: string, contentType: string = "image/png", productName?: string) =>
+  api.post(`/api/inventory/images/${sku}`, { image_data: imageData, content_type: contentType, product_name: productName });
+
+export const getImageUrl = (sku: string) =>
+  `${API_URL}/api/inventory/images/${sku}`;
+
+export const deleteImage = (sku: string) =>
+  api.delete(`/api/inventory/images/${sku}`);
+
+export const generateImage = (sku: string, description: string, productName: string, category?: string) =>
+  api.post(`/api/inventory/images/${sku}/generate`, { description, product_name: productName, category });
+
+// Loyalty Program
+export const getLoyaltyDashboard = () => api.get("/api/loyalty/dashboard");
+
+export const getLoyaltyCustomers = (search?: string, page?: number) =>
+  api.get("/api/loyalty/customers", { params: { search, page } });
+
+export const createLoyaltyCustomer = (data: {
+  first_name: string;
+  last_name?: string;
+  phone?: string;
+  email?: string;
+  birthday?: string;
+  notes?: string;
+}) => api.post("/api/loyalty/customers", data);
+
+export const getLoyaltyCustomer = (id: number) =>
+  api.get(`/api/loyalty/customers/${id}`);
+
+export const updateLoyaltyCustomer = (id: number, data: {
+  first_name?: string;
+  last_name?: string;
+  phone?: string;
+  email?: string;
+  birthday?: string;
+  notes?: string;
+}) => api.put(`/api/loyalty/customers/${id}`, data);
+
+export const deleteLoyaltyCustomer = (id: number) =>
+  api.delete(`/api/loyalty/customers/${id}`);
+
+export const awardLoyaltyPoints = (customerId: number, data: {
+  points: number;
+  description?: string;
+  order_id?: string;
+  location_name?: string;
+}) => api.post(`/api/loyalty/customers/${customerId}/award`, data);
+
+export const deductLoyaltyPoints = (customerId: number, data: {
+  points: number;
+  description?: string;
+  location_name?: string;
+}) => api.post(`/api/loyalty/customers/${customerId}/deduct`, data);
+
+export const redeemLoyaltyReward = (customerId: number, data: {
+  reward_id: number;
+  location_name?: string;
+}) => api.post(`/api/loyalty/customers/${customerId}/redeem`, data);
+
+export const getLoyaltyRewards = () => api.get("/api/loyalty/rewards");
+
+export const createLoyaltyReward = (data: {
+  name: string;
+  points_required: number;
+  reward_type?: string;
+  reward_value: number;
+  description?: string;
+}) => api.post("/api/loyalty/rewards", data);
+
+export const updateLoyaltyReward = (id: number, data: {
+  name?: string;
+  points_required?: number;
+  reward_type?: string;
+  reward_value?: number;
+  description?: string;
+  is_active?: boolean;
+}) => api.put(`/api/loyalty/rewards/${id}`, data);
+
+export const deleteLoyaltyReward = (id: number) =>
+  api.delete(`/api/loyalty/rewards/${id}`);
+
+export const getLoyaltySettings = () => api.get("/api/loyalty/settings");
+
+export const syncLoyaltyOrders = () => api.post("/api/loyalty/sync-orders");
+
+export const bulkImportLoyaltyCustomers = () => api.post("/api/loyalty/bulk-import");
+
+export const getLoyaltySyncStatus = () => api.get("/api/loyalty/sync-status");
+
+export const updateLoyaltySettings = (data: {
+  points_per_dollar?: string;
+  signup_bonus?: string;
+  birthday_bonus?: string;
+  program_name?: string;
+}) => api.put("/api/loyalty/settings", data);
+
+// Item Groups / Variants
+export const getItemGroups = () => api.get("/api/inventory/item-groups");
+
+export const getAttributes = () => api.get("/api/inventory/attributes");
+
+export const createItemGroup = (data: {
+  name: string;
+  price: number;
+  sku_prefix?: string;
+  category?: string;
+  variants: { attribute_name: string; option_names: string[] }[];
+  price_type?: string;
+  cost?: number;
+  description?: string;
+  is_revenue?: boolean;
+  is_age_restricted?: boolean;
+  age_restriction_type?: string;
+  age_restriction_min_age?: number;
+  available?: boolean;
+  hidden?: boolean;
+  auto_manage?: boolean;
+  default_tax_rates?: boolean;
+}) => api.post("/api/inventory/item-groups", data);
+
+export default api;
