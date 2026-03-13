@@ -1,4 +1,4 @@
-app = "hemp-dispensary-api"
+app = "thd-inventory-api"
 primary_region = "sjc"
 
 [build]
