@@ -76,7 +76,6 @@ export const createItem = (data: {
   hidden?: boolean;
   auto_manage?: boolean;
   default_tax_rates?: boolean;
-  image_description?: string;
 }) => api.post("/api/inventory/items", data);
 
 export const getAgeRestrictionTypes = () =>
@@ -158,9 +157,6 @@ export const getImageUrl = (sku: string) =>
 
 export const deleteImage = (sku: string) =>
   api.delete(`/api/inventory/images/${sku}`);
-
-export const generateImage = (sku: string, description: string, productName: string, category?: string) =>
-  api.post(`/api/inventory/images/${sku}/generate`, { description, product_name: productName, category });
 
 // Loyalty Program
 export const getLoyaltyDashboard = () => api.get("/api/loyalty/dashboard");

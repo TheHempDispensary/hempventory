@@ -47,7 +47,6 @@ class ItemCreate(BaseModel):
     hidden: Optional[bool] = False  # hidden from POS
     auto_manage: Optional[bool] = True  # auto manage stock
     default_tax_rates: Optional[bool] = True
-    image_description: Optional[str] = None  # Description for AI image generation
 
 
 class StockUpdate(BaseModel):
@@ -246,14 +245,6 @@ async def create_item(
     else:
         item_data["isAgeRestricted"] = False
 
-    # Generate AI image if description provided
-    generated_image_url: Optional[str] = None
-    if item.image_description:
-        try:
-            generated_image_url = await _generate_product_image(item.image_description, item.name, item.category)
-        except Exception as img_err:
-            print(f"Error generating AI image: {img_err}")
-
     first_created_sku = None
     for loc in locations:
         loc_id, loc_name, merchant_id, api_token = loc[0], loc[1], loc[2], loc[3]
@@ -312,8 +303,6 @@ async def create_item(
                 "clover_id": clover_id,
                 "status": "created",
             }
-            if generated_image_url:
-                result_entry["generated_image_url"] = generated_image_url
             results.append(result_entry)
         except httpx.HTTPStatusError as e:
             # Capture the actual Clover error response body
@@ -334,29 +323,6 @@ async def create_item(
                 "status": "error",
                 "error": str(e),
             })
-
-    # If AI image was generated, download and store it
-    if generated_image_url and first_created_sku:
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as dl_client:
-                img_resp = await dl_client.get(generated_image_url)
-                img_resp.raise_for_status()
-                image_bytes = img_resp.content
-                content_type = img_resp.headers.get("content-type", "image/png")
-                image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-            await db.execute(
-                """INSERT INTO product_images (sku, image_data, content_type, product_name, updated_at)
-                   VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-                   ON CONFLICT(sku) DO UPDATE SET
-                     image_data = excluded.image_data,
-                     content_type = excluded.content_type,
-                     product_name = COALESCE(excluded.product_name, product_images.product_name),
-                     updated_at = CURRENT_TIMESTAMP""",
-                (first_created_sku, image_b64, content_type, item.name),
-            )
-            await db.commit()
-        except Exception as store_err:
-            print(f"Error storing generated image: {store_err}")
 
     return {"results": results, "sku": first_created_sku}
 
@@ -399,33 +365,6 @@ async def get_age_restriction_types(
             for name, type_id in AGE_RESTRICTION_TYPE_IDS.items()
         ]
     }
-
-
-async def _generate_product_image(image_description: str, product_name: str, category: Optional[str] = None) -> str:
-    """Generate a product image using OpenAI DALL-E and return the URL."""
-    openai_key = os.environ.get("OPENAI_API_KEY", "")
-    if not openai_key:
-        raise ValueError("OPENAI_API_KEY not set")
-
-    prompt = f"Professional product photo: {image_description}. Product: {product_name}"
-    if category:
-        prompt += f", category: {category}"
-    prompt += ". Clean white background, high quality commercial product photography, centered, well-lit, no text or watermarks"
-
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.post(
-            "https://api.openai.com/v1/images/generations",
-            headers={"Authorization": f"Bearer {openai_key}"},
-            json={
-                "model": "dall-e-3",
-                "prompt": prompt,
-                "n": 1,
-                "size": "1024x1024",
-                "response_format": "url",
-            },
-        )
-        resp.raise_for_status()
-        return resp.json()["data"][0]["url"]
 
 
 class BulkAutoManageRequest(BaseModel):
@@ -914,12 +853,6 @@ class ImageUpload(BaseModel):
     product_name: Optional[str] = None
 
 
-class ImageGenerate(BaseModel):
-    description: str
-    product_name: str
-    category: Optional[str] = None
-
-
 @router.post("/images/{sku}")
 async def upload_image(
     sku: str,
@@ -1111,48 +1044,6 @@ async def delete_image(
     await db.execute("DELETE FROM product_images WHERE sku = ?", (sku,))
     await db.commit()
     return {"status": "ok", "sku": sku}
-
-
-@router.post("/images/{sku}/generate")
-async def generate_image(
-    sku: str,
-    data: ImageGenerate,
-    user: dict = Depends(get_current_user),
-    db: aiosqlite.Connection = Depends(get_db),
-):
-    """Generate an AI product image and store it."""
-    try:
-        image_url = await _generate_product_image(
-            data.description, data.product_name, data.category
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Image generation failed: {e}")
-
-    # Download the generated image and store as base64
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(image_url)
-            resp.raise_for_status()
-            image_bytes = resp.content
-            content_type = resp.headers.get("content-type", "image/png")
-            image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to download generated image: {e}")
-
-    await db.execute(
-        """INSERT INTO product_images (sku, image_data, content_type, product_name, updated_at)
-           VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-           ON CONFLICT(sku) DO UPDATE SET
-             image_data = excluded.image_data,
-             content_type = excluded.content_type,
-             product_name = COALESCE(excluded.product_name, product_images.product_name),
-             updated_at = CURRENT_TIMESTAMP""",
-        (sku, image_b64, content_type, data.product_name),
-    )
-    await db.commit()
-    return {"status": "ok", "sku": sku, "generated_url": image_url}
 
 
 @router.post("/sync-refunds")

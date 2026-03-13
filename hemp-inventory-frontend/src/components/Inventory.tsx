@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo } from "react";
-import { syncInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, bulkAssignImages, syncRefunds, getAgeRestrictionTypes, uploadImage, getImageUrl, deleteImage as deleteProductImage, generateImage, createItemGroup } from "../lib/api";
-import { RefreshCw, Search, Plus, ChevronDown, ChevronUp, X, Save, Package, Trash2, CheckSquare, Square, Minus, Image, Download, Upload, Wand2, Settings, ArrowRightLeft, Images, Layers } from "lucide-react";
+import { syncInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, bulkAssignImages, syncRefunds, getAgeRestrictionTypes, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup } from "../lib/api";
+import { RefreshCw, Search, Plus, ChevronDown, ChevronUp, X, Save, Package, Trash2, CheckSquare, Square, Minus, Image, Download, Upload, Settings, ArrowRightLeft, Images, Layers } from "lucide-react";
 
 interface LocationStock {
   location_id: number;
@@ -77,14 +77,12 @@ export default function Inventory() {
     hidden: boolean;
     auto_manage: boolean;
     default_tax_rates: boolean;
-    image_description: string;
   }>({
     name: "", price: "", sku: "", category: "", stocks: {}, pars: {},
     price_type: "FIXED", cost: "", product_code: "", alternate_name: "",
     description: "", color_code: "", is_revenue: true, is_age_restricted: false,
     age_restriction_type: "Vitamin & Supplements", age_restriction_min_age: "21",
     available: true, hidden: false, auto_manage: true, default_tax_rates: true,
-    image_description: "",
   });
   const [ageRestrictionTypes, setAgeRestrictionTypes] = useState<{id?: string; name: string; minimumAge: number}[]>([]);
   const [addItemTab, setAddItemTab] = useState("details");
@@ -140,8 +138,6 @@ export default function Inventory() {
   const [editImageFile, setEditImageFile] = useState<File | null>(null);
   const [editImagePreview, setEditImagePreview] = useState<string | null>(null);
   const [imageUploading, setImageUploading] = useState(false);
-  const [generatingImage, setGeneratingImage] = useState(false);
-  const [editImageDescription, setEditImageDescription] = useState("");
 
   // Variant state
   const [hasVariants, setHasVariants] = useState(false);
@@ -204,10 +200,9 @@ export default function Inventory() {
         price_type: "FIXED", cost: "", product_code: "", alternate_name: "",
         description: "", color_code: "", is_revenue: true, is_age_restricted: false,
         age_restriction_type: "Vitamin & Supplements", age_restriction_min_age: "21",
-        available: true, hidden: false, auto_manage: true, default_tax_rates: true,
-        image_description: "",
-      });
-      setHasVariants(false);
+          available: true, hidden: false, auto_manage: true, default_tax_rates: true,
+        });
+        setHasVariants(false);
       setVariantAttributes([{ attribute_name: "", option_names: [""] }]);
       setAddItemTab("details");
       setAddItemMessage(null);
@@ -365,26 +360,6 @@ export default function Inventory() {
     }
   };
 
-  const handleGenerateEditImage = async () => {
-    if (!editItem || !editImageDescription) return;
-    setGeneratingImage(true);
-    try {
-      await generateImage(
-        editItem.sku,
-        editImageDescription,
-        editItem.name,
-        editItem.categories[0]
-      );
-      setSaveMessage({ type: "success", text: "AI image generated and saved!" });
-      await loadData();
-    } catch (err) {
-      console.error("Error generating image:", err);
-      setSaveMessage({ type: "error", text: "Failed to generate image. Make sure OPENAI_API_KEY is set." });
-    } finally {
-      setGeneratingImage(false);
-    }
-  };
-
   const handleDeleteEditImage = async () => {
     if (!editItem) return;
     setImageUploading(true);
@@ -447,7 +422,6 @@ export default function Inventory() {
         hidden: newItem.hidden,
         auto_manage: newItem.auto_manage,
         default_tax_rates: newItem.default_tax_rates,
-        image_description: newItem.image_description || undefined,
       });
       // Check if any locations had errors
       const results = response.data?.results || [];
@@ -466,25 +440,15 @@ export default function Inventory() {
           console.error("Error uploading image:", imgErr);
         }
       }
-      // Generate AI image if description was provided and no file uploaded
-      if (itemSku && newItem.image_description && !newItemImageFile) {
-        try {
-          await generateImage(itemSku, newItem.image_description, newItem.name, newItem.category || undefined);
-        } catch (imgErr) {
-          console.error("Error generating image:", imgErr);
-        }
-      }
-
       setShowAddItem(false);
       setNewItem({
         name: "", price: "", sku: "", category: "", stocks: {}, pars: {},
         price_type: "FIXED", cost: "", product_code: "", alternate_name: "",
         description: "", color_code: "", is_revenue: true, is_age_restricted: false,
         age_restriction_type: "Vitamin & Supplements", age_restriction_min_age: "21",
-        available: true, hidden: false, auto_manage: true, default_tax_rates: true,
-        image_description: "",
-      });
-      setNewItemImageFile(null);
+          available: true, hidden: false, auto_manage: true, default_tax_rates: true,
+        });
+        setNewItemImageFile(null);
       setNewItemImagePreview(null);
       setAddItemTab("details");
       setAddItemMessage(null);
@@ -551,7 +515,6 @@ export default function Inventory() {
     setSaveMessage(null);
     setEditImageFile(null);
     setEditImagePreview(item.has_image ? getImageUrl(item.sku) : null);
-    setEditImageDescription("");
     setEditItem(item);
   };
 
@@ -1627,27 +1590,6 @@ export default function Inventory() {
                     )}
                   </div>
 
-                  <div className="border-t border-gray-200 my-4" />
-
-                  {/* AI Generation Section */}
-                  <div>
-                    <div className="flex items-center gap-2 mb-2">
-                      <Wand2 className="w-5 h-5 text-purple-600" />
-                      <span className="text-sm font-medium text-gray-700">AI Image Generation</span>
-                    </div>
-                    <p className="text-xs text-gray-500 mb-3">
-                      Or describe what the image should look like and we&apos;ll generate one. Only used if no file is uploaded.
-                    </p>
-                    <textarea
-                      value={newItem.image_description}
-                      onChange={(e) => setNewItem({ ...newItem, image_description: e.target.value })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 outline-none"
-                      placeholder="e.g. A jar of colorful gummy bears with a green label, hemp leaf logo..."
-                      rows={3}
-                    />
-                    <p className="text-xs text-gray-400 mt-1">Be specific about colors, packaging, labels, and style.</p>
-                  </div>
-
                   <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mt-3">
                     <p className="text-xs text-blue-700">
                       <strong>For e-commerce:</strong> Images are stored in our app and available for your online store. They won&apos;t appear in Clover POS.
@@ -1672,7 +1614,7 @@ export default function Inventory() {
                 {addingItem ? (
                   <>
                     <RefreshCw className="w-4 h-4 animate-spin" />
-                    {hasVariants ? "Creating Variants..." : newItem.image_description ? "Creating & Generating Image..." : "Creating..."}
+                    {hasVariants ? "Creating Variants..." : "Creating..."}
                   </>
                 ) : (
                   <>
@@ -2122,7 +2064,7 @@ export default function Inventory() {
                     <div className="flex flex-col items-center justify-center py-6 text-center mb-4 bg-gray-50 rounded-lg border border-dashed border-gray-300">
                       <Image className="w-10 h-10 text-gray-300 mb-2" />
                       <p className="text-sm text-gray-500 font-medium">No image</p>
-                      <p className="text-xs text-gray-400">Upload or generate an image below</p>
+                      <p className="text-xs text-gray-400">Upload an image below</p>
                     </div>
                   ) : null}
 
@@ -2168,31 +2110,6 @@ export default function Inventory() {
                         </div>
                       </div>
                     )}
-                  </div>
-
-                  <div className="border-t border-gray-200 my-4" />
-
-                  {/* AI Generation Section */}
-                  <div>
-                    <div className="flex items-center gap-2 mb-2">
-                      <Wand2 className="w-5 h-5 text-purple-600" />
-                      <span className="text-sm font-medium text-gray-700">Generate AI Image</span>
-                    </div>
-                    <textarea
-                      value={editImageDescription}
-                      onChange={(e) => setEditImageDescription(e.target.value)}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 outline-none"
-                      placeholder="Describe the product image..."
-                      rows={2}
-                    />
-                    <button
-                      onClick={handleGenerateEditImage}
-                      disabled={generatingImage || !editImageDescription}
-                      className="mt-2 flex items-center gap-1 px-3 py-1.5 bg-purple-600 text-white rounded-lg text-xs hover:bg-purple-700 disabled:opacity-50"
-                    >
-                      {generatingImage ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Wand2 className="w-3 h-3" />}
-                      {generatingImage ? "Generating..." : "Generate Image"}
-                    </button>
                   </div>
 
                   <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mt-3">
