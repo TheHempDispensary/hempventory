@@ -96,7 +96,8 @@ async def get_products(
             current_offset += 1000
 
     # Get image map from our database
-    image_base_url = f"{request.base_url}api/inventory/images".rstrip('/')
+    base_url = str(request.base_url).replace('http://', 'https://')
+    image_base_url = f"{base_url}api/inventory/images".rstrip('/')
     cursor = await db.execute("SELECT sku, product_name FROM product_images")
     image_rows = await cursor.fetchall()
     image_by_sku = {row[0]: f"{image_base_url}/{row[0]}" for row in image_rows}
@@ -565,7 +566,8 @@ async def get_product_detail(
     stock = stock_info.get("quantity", 0) if stock_info else 0
 
     # Find image URL
-    image_base_url = f"{request.base_url}api/inventory/images".rstrip('/')
+    base_url = str(request.base_url).replace('http://', 'https://')
+    image_base_url = f"{base_url}api/inventory/images".rstrip('/')
     cursor = await db.execute(
         "SELECT sku FROM product_images WHERE sku = ? OR UPPER(product_name) = ?",
         (sku, name.upper()),

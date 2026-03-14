@@ -1000,7 +1000,7 @@ async def get_images_map(
     """Return a mapping of product names to image URLs.
     Public endpoint for e-commerce sites to know which products have custom images.
     Falls back to Clover API to resolve SKU -> product name if not stored locally."""
-    base_url = f"{request.base_url}api/inventory/images".rstrip('/')
+    base_url = f"{str(request.base_url).replace('http://', 'https://')}api/inventory/images".rstrip('/')
 
     # Get all images with their product names
     cursor = await db.execute(
