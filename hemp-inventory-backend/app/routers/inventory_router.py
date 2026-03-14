@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import Optional
@@ -994,12 +994,13 @@ async def list_all_images(
 
 @router.get("/images-map")
 async def get_images_map(
+    request: Request,
     db: aiosqlite.Connection = Depends(get_db),
 ):
     """Return a mapping of product names to image URLs.
     Public endpoint for e-commerce sites to know which products have custom images.
     Falls back to Clover API to resolve SKU -> product name if not stored locally."""
-    base_url = "https://hemp-dispensary-api.fly.dev/api/inventory/images"
+    base_url = f"{request.base_url}api/inventory/images".rstrip('/')
 
     # Get all images with their product names
     cursor = await db.execute(

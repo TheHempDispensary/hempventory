@@ -60,6 +60,7 @@ CLOVER_CHARGES_URL = "https://scl.clover.com/v1/charges"
 
 @router.get("/products")
 async def get_products(
+    request: Request,
     category: Optional[str] = None,
     search: Optional[str] = None,
     limit: int = 100,
@@ -95,7 +96,7 @@ async def get_products(
             current_offset += 1000
 
     # Get image map from our database
-    image_base_url = "https://hemp-dispensary-api.fly.dev/api/inventory/images"
+    image_base_url = f"{request.base_url}api/inventory/images".rstrip('/')
     cursor = await db.execute("SELECT sku, product_name FROM product_images")
     image_rows = await cursor.fetchall()
     image_by_sku = {row[0]: f"{image_base_url}/{row[0]}" for row in image_rows}
@@ -542,6 +543,7 @@ async def _send_order_emails(
 @router.get("/products/{product_id}")
 async def get_product_detail(
     product_id: str,
+    request: Request,
     db: aiosqlite.Connection = Depends(get_db),
 ):
     """Public endpoint: Get a single product detail by Clover item ID."""
@@ -563,7 +565,7 @@ async def get_product_detail(
     stock = stock_info.get("quantity", 0) if stock_info else 0
 
     # Find image URL
-    image_base_url = "https://hemp-dispensary-api.fly.dev/api/inventory/images"
+    image_base_url = f"{request.base_url}api/inventory/images".rstrip('/')
     cursor = await db.execute(
         "SELECT sku FROM product_images WHERE sku = ? OR UPPER(product_name) = ?",
         (sku, name.upper()),
