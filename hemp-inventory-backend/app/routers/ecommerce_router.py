@@ -57,6 +57,46 @@ WEST_ECOMM_TOKEN = "2d8433db-1e3e-4e94-9510-1a62a120eb6b"
 CLOVER_BASE_URL = "https://api.clover.com/v3"
 CLOVER_CHARGES_URL = "https://scl.clover.com/v1/charges"
 
+# In-memory cache for Clover API responses (avoid hitting Clover on every request)
+_clover_cache: dict = {"items": None, "timestamp": 0}
+CLOVER_CACHE_TTL = 300  # 5 minutes
+
+
+async def _fetch_clover_items() -> list:
+    """Fetch all items from Clover API, using cache when available."""
+    now = time.time()
+    if _clover_cache["items"] is not None and (now - _clover_cache["timestamp"]) < CLOVER_CACHE_TTL:
+        return _clover_cache["items"]
+
+    base = f"{CLOVER_BASE_URL}/merchants/{WEST_MERCHANT_ID}"
+    headers = {"Authorization": f"Bearer {WEST_ECOMM_TOKEN}"}
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        all_items = []
+        current_offset = 0
+        while True:
+            resp = await client.get(
+                f"{base}/items",
+                headers=headers,
+                params={
+                    "expand": "categories,itemStock",
+                    "limit": 1000,
+                    "offset": current_offset,
+                    "filter": "deleted=false",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            elements = data.get("elements", [])
+            all_items.extend(elements)
+            if len(elements) < 1000:
+                break
+            current_offset += 1000
+
+    _clover_cache["items"] = all_items
+    _clover_cache["timestamp"] = now
+    return all_items
+
 
 @router.get("/products")
 async def get_products(
@@ -69,31 +109,7 @@ async def get_products(
 ):
     """Public endpoint: Get products from Clover eCommerce catalog (West location).
     Returns products with categories, stock, and image URLs from inventory backend."""
-    base = f"{CLOVER_BASE_URL}/merchants/{WEST_MERCHANT_ID}"
-    headers = {"Authorization": f"Bearer {WEST_ECOMM_TOKEN}"}
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        # Fetch all items with categories and stock
-        all_items = []
-        current_offset = offset
-        while True:
-            resp = await client.get(
-                f"{base}/items",
-                headers=headers,
-                params={
-                    "expand": "categories,itemStock",
-                    "limit": min(limit, 1000),
-                    "offset": current_offset,
-                    "filter": "deleted=false",
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            elements = data.get("elements", [])
-            all_items.extend(elements)
-            if len(elements) < 1000 or len(all_items) >= limit:
-                break
-            current_offset += 1000
+    all_items = await _fetch_clover_items()
 
     # Get image map from our database
     base_url = str(request.base_url).replace('http://', 'https://')
@@ -548,17 +564,21 @@ async def get_product_detail(
     db: aiosqlite.Connection = Depends(get_db),
 ):
     """Public endpoint: Get a single product detail by Clover item ID."""
-    base = f"{CLOVER_BASE_URL}/merchants/{WEST_MERCHANT_ID}"
-    headers = {"Authorization": f"Bearer {WEST_ECOMM_TOKEN}"}
+    # Try cache first, fall back to direct API call
+    all_items = await _fetch_clover_items()
+    item = next((i for i in all_items if i.get("id") == product_id), None)
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.get(
-            f"{base}/items/{product_id}",
-            headers=headers,
-            params={"expand": "categories,itemStock"},
-        )
-        resp.raise_for_status()
-        item = resp.json()
+    if not item:
+        base = f"{CLOVER_BASE_URL}/merchants/{WEST_MERCHANT_ID}"
+        headers = {"Authorization": f"Bearer {WEST_ECOMM_TOKEN}"}
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(
+                f"{base}/items/{product_id}",
+                headers=headers,
+                params={"expand": "categories,itemStock"},
+            )
+            resp.raise_for_status()
+            item = resp.json()
 
     name = item.get("name", "")
     sku = item.get("sku", "") or item.get("id", "")
