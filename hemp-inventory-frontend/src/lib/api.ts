@@ -274,4 +274,41 @@ export const createItemGroup = (data: {
   default_tax_rates?: boolean;
 }) => api.post("/api/inventory/item-groups", data);
 
+// Time Clock
+export const getEmployees = () => api.get("/api/timeclock/employees");
+
+export const createEmployee = (data: { name: string; pin?: string }) =>
+  api.post("/api/timeclock/employees", data);
+
+export const updateEmployee = (id: number, data: { name?: string; pin?: string; active?: boolean }) =>
+  api.put(`/api/timeclock/employees/${id}`, data);
+
+export const deleteEmployee = (id: number) =>
+  api.delete(`/api/timeclock/employees/${id}`);
+
+export const clockIn = (employeeId: number) =>
+  api.post("/api/timeclock/clock-in", { employee_id: employeeId });
+
+export const clockOut = (employeeId: number) =>
+  api.post("/api/timeclock/clock-out", { employee_id: employeeId });
+
+export const getActiveClocks = () => api.get("/api/timeclock/active");
+
+export const getTimeEntries = (params?: { start_date?: string; end_date?: string; employee_id?: number }) =>
+  api.get("/api/timeclock/entries", { params });
+
+export const updateTimeEntry = (id: number, data: { clock_in?: string; clock_out?: string }) =>
+  api.put(`/api/timeclock/entries/${id}`, data);
+
+export const deleteTimeEntry = (id: number) =>
+  api.delete(`/api/timeclock/entries/${id}`);
+
+export const getTimeclockExportUrl = (params?: { start_date?: string; end_date?: string; employee_id?: number }) => {
+  const url = new URL(`${API_URL}/api/timeclock/export`);
+  if (params?.start_date) url.searchParams.set("start_date", params.start_date);
+  if (params?.end_date) url.searchParams.set("end_date", params.end_date);
+  if (params?.employee_id) url.searchParams.set("employee_id", params.employee_id.toString());
+  return url.toString();
+};
+
 export default api;

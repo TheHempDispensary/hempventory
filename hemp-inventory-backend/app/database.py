@@ -235,6 +235,27 @@ async def init_db():
             )
         """)
 
+        # Time clock tables
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS employees (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                pin TEXT,
+                active INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS time_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                employee_id INTEGER NOT NULL,
+                clock_in TEXT NOT NULL,
+                clock_out TEXT,
+                hours REAL,
+                FOREIGN KEY (employee_id) REFERENCES employees(id)
+            )
+        """)
+
         # Seed default loyalty settings if empty
         cursor = await db.execute("SELECT COUNT(*) FROM loyalty_settings")
         count = (await cursor.fetchone())[0]

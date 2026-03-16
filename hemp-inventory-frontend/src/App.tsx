@@ -7,6 +7,7 @@ import Alerts from "./components/Alerts";
 import Locations from "./components/Locations";
 import SettingsPage from "./components/SettingsPage";
 import Loyalty from "./components/Loyalty";
+import TimeClock from "./components/TimeClock";
 
 function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -47,6 +48,8 @@ function App() {
         return <SettingsPage />;
       case "loyalty":
         return <Loyalty />;
+      case "timeclock":
+        return <TimeClock />;
       default:
         return <Inventory />;
     }
