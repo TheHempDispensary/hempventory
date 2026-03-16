@@ -128,7 +128,7 @@ async def _do_sync(db: aiosqlite.Connection) -> dict:
         for item in items:
             raw_sku = item.get("sku", "") or ""
             clover_id = item.get("id", "")
-            item_name = item.get("name", "")
+            item_name = " ".join((item.get("name", "") or "").split())  # normalize whitespace
             display_sku = raw_sku or clover_id
             merge_key = f"{display_sku}::{item_name}"
 
