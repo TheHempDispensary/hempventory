@@ -8,6 +8,7 @@ import Locations from "./components/Locations";
 import SettingsPage from "./components/SettingsPage";
 import Loyalty from "./components/Loyalty";
 import TimeClock from "./components/TimeClock";
+import SalesReport from "./components/SalesReport";
 
 function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -50,6 +51,8 @@ function App() {
         return <Loyalty />;
       case "timeclock":
         return <TimeClock />;
+      case "sales":
+        return <SalesReport />;
       default:
         return <Inventory />;
     }

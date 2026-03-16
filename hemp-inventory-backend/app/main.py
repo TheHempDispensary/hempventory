@@ -9,7 +9,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 load_dotenv()
 
 from app.database import init_db, get_db, DB_PATH
-from app.routers import auth_router, locations_router, inventory_router, par_router, alerts_router, ecommerce_router, loyalty_router, timeclock_router
+from app.routers import auth_router, locations_router, inventory_router, par_router, alerts_router, ecommerce_router, loyalty_router, timeclock_router, sales_router
 from app.routers.inventory_router import _do_sync
 from app.routers.loyalty_router import _do_bulk_import_customers, _do_sync_orders
 
@@ -144,6 +144,7 @@ app.include_router(alerts_router.router)
 app.include_router(ecommerce_router.router)
 app.include_router(loyalty_router.router)
 app.include_router(timeclock_router.router)
+app.include_router(sales_router.router)
 
 
 @app.get("/healthz")

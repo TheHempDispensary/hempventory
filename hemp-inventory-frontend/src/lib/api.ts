@@ -314,4 +314,8 @@ export const getTimeclockExportUrl = (params?: { start_date?: string; end_date?:
   return url.toString();
 };
 
+// Sales Report
+export const getSalesReport = (params?: { start_date?: string; end_date?: string }) =>
+  api.get("/api/sales/report", { params });
+
 export default api;
