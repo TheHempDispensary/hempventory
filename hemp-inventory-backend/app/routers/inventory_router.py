@@ -24,6 +24,12 @@ _inventory_cache: dict = {"items": [], "locations": [], "updated_at": 0}
 _cache_lock = asyncio.Lock()
 
 
+async def _invalidate_cache():
+    """Clear inventory cache so next /cached call triggers a fresh sync."""
+    async with _cache_lock:
+        _inventory_cache["updated_at"] = 0
+
+
 class LocationStockInput(BaseModel):
     location_id: int
     quantity: float
@@ -371,6 +377,7 @@ async def create_item(
                 "error": str(e),
             })
 
+    await _invalidate_cache()
     return {"results": results, "sku": first_created_sku}
 
 
@@ -767,6 +774,7 @@ async def bulk_assign_category(
         except Exception as e:
             results.append({"location": loc_name, "assigned": 0, "status": "error", "error": str(e)})
 
+    await _invalidate_cache()
     return {"category": req.category_name, "total_assigned": total_assigned, "results": results}
 
 
@@ -830,6 +838,7 @@ async def bulk_stock_update(
         except Exception as e:
             results.append({"sku": upd.sku, "location": loc_name, "status": "error", "error": str(e)})
 
+    await _invalidate_cache()
     return {"results": results, "total_updated": sum(1 for r in results if r.get("status") == "updated")}
 
 
@@ -872,6 +881,7 @@ async def bulk_delete_items(
         await db.commit()
         all_results.append({"sku": sku, "results": sku_results})
 
+    await _invalidate_cache()
     return {"results": all_results}
 
 
@@ -908,6 +918,7 @@ async def delete_item(
     await db.execute("DELETE FROM par_levels WHERE sku = ?", (sku,))
     await db.commit()
 
+    await _invalidate_cache()
     return {"results": results}
 
 
@@ -1016,6 +1027,7 @@ async def update_item(
         except Exception as e:
             results.append({"location": loc_name, "status": "error", "error": str(e)})
 
+    await _invalidate_cache()
     return {"results": results}
 
 
@@ -1443,6 +1455,8 @@ async def transfer_stock(
         "to_stock_before": dest_stock,
         "to_stock_after": new_to_stock,
     }
+    await _invalidate_cache()
+    return result
 
 
 def _remove_white_background(image_bytes: bytes, threshold: int = 240, edge_softness: int = 20) -> tuple[bytes, str]:
