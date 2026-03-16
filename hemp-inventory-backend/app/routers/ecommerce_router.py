@@ -3,6 +3,7 @@ from typing import Optional, List
 from pydantic import BaseModel
 import httpx
 import aiosqlite
+import os
 import time
 import smtplib
 import asyncio
@@ -57,17 +58,16 @@ WEST_ECOMM_TOKEN = "2d8433db-1e3e-4e94-9510-1a62a120eb6b"
 CLOVER_BASE_URL = "https://api.clover.com/v3"
 CLOVER_CHARGES_URL = "https://scl.clover.com/v1/charges"
 
+# Public base URL for constructing image URLs (avoids reverse-proxy issues with request.base_url)
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://thd-inventory-api.fly.dev/")
+
 # In-memory cache for Clover API responses (avoid hitting Clover on every request)
-_clover_cache: dict = {"items": None, "timestamp": 0}
-CLOVER_CACHE_TTL = 300  # 5 minutes
+_clover_cache: dict = {"items": None, "timestamp": 0, "refreshing": False}
+CLOVER_CACHE_TTL = 1800  # 30 minutes
 
 
-async def _fetch_clover_items() -> list:
-    """Fetch all items from Clover API, using cache when available."""
-    now = time.time()
-    if _clover_cache["items"] is not None and (now - _clover_cache["timestamp"]) < CLOVER_CACHE_TTL:
-        return _clover_cache["items"]
-
+async def _do_clover_fetch() -> list:
+    """Actually fetch all items from the Clover API."""
     base = f"{CLOVER_BASE_URL}/merchants/{WEST_MERCHANT_ID}"
     headers = {"Authorization": f"Bearer {WEST_ECOMM_TOKEN}"}
 
@@ -94,8 +94,29 @@ async def _fetch_clover_items() -> list:
             current_offset += 1000
 
     _clover_cache["items"] = all_items
-    _clover_cache["timestamp"] = now
+    _clover_cache["timestamp"] = time.time()
+    _clover_cache["refreshing"] = False
     return all_items
+
+
+async def _fetch_clover_items() -> list:
+    """Fetch items with stale-while-revalidate: return stale cache immediately
+    while refreshing in the background if the TTL has expired."""
+    now = time.time()
+    cache_age = now - _clover_cache["timestamp"]
+
+    # Cache is fresh — return it
+    if _clover_cache["items"] is not None and cache_age < CLOVER_CACHE_TTL:
+        return _clover_cache["items"]
+
+    # Cache is stale but exists — return stale data and refresh in background
+    if _clover_cache["items"] is not None and not _clover_cache["refreshing"]:
+        _clover_cache["refreshing"] = True
+        asyncio.create_task(_do_clover_fetch())
+        return _clover_cache["items"]
+
+    # No cache at all — must wait for first fetch
+    return await _do_clover_fetch()
 
 
 @router.get("/products")
@@ -112,8 +133,7 @@ async def get_products(
     all_items = await _fetch_clover_items()
 
     # Get image map from our database
-    base_url = str(request.base_url).replace('http://', 'https://')
-    image_base_url = f"{base_url}api/inventory/images".rstrip('/')
+    image_base_url = f"{PUBLIC_BASE_URL.rstrip('/')}/api/inventory/images"
     cursor = await db.execute("SELECT sku, product_name FROM product_images")
     image_rows = await cursor.fetchall()
     image_by_sku = {row[0]: f"{image_base_url}/{row[0]}" for row in image_rows}
@@ -586,8 +606,7 @@ async def get_product_detail(
     stock = stock_info.get("quantity", 0) if stock_info else 0
 
     # Find image URL
-    base_url = str(request.base_url).replace('http://', 'https://')
-    image_base_url = f"{base_url}api/inventory/images".rstrip('/')
+    image_base_url = f"{PUBLIC_BASE_URL.rstrip('/')}/api/inventory/images"
     cursor = await db.execute(
         "SELECT sku FROM product_images WHERE sku = ? OR UPPER(product_name) = ?",
         (sku, name.upper()),

@@ -13,6 +13,9 @@ from app.routers import auth_router, locations_router, inventory_router, par_rou
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    # Pre-warm Clover API cache so the first request is fast
+    import asyncio
+    asyncio.create_task(ecommerce_router._do_clover_fetch())
     yield
 
 
