@@ -10,6 +10,7 @@ import {
   getTimeEntries,
   deleteTimeEntry,
   getTimeclockExportUrl,
+  syncEmployeesFromClover,
 } from "../lib/api";
 import {
   Clock,
@@ -26,6 +27,7 @@ import {
   ChevronRight,
   Edit2,
   Check,
+  RefreshCw,
 } from "lucide-react";
 
 interface Employee {
@@ -82,6 +84,9 @@ export default function TimeClock() {
   // Pagination for timesheet
   const [page, setPage] = useState(1);
   const perPage = 25;
+
+  // Sync
+  const [syncing, setSyncing] = useState(false);
 
   // Toast
   const [toast, setToast] = useState<{ type: "success" | "error"; text: string } | null>(null);
@@ -193,6 +198,24 @@ export default function TimeClock() {
       await loadEmployees();
     } catch (err) {
       console.error(err);
+    }
+  };
+
+  const handleSyncFromClover = async () => {
+    setSyncing(true);
+    try {
+      const res = await syncEmployeesFromClover();
+      const { imported, skipped, errors } = res.data;
+      let msg = `Imported ${imported} employee(s)`;
+      if (skipped > 0) msg += `, ${skipped} already existed`;
+      if (errors.length > 0) msg += `. Errors: ${errors.map((e: { location: string; error: string }) => e.location).join(", ")}`;
+      showToast(errors.length > 0 ? "error" : "success", msg);
+      await loadEmployees();
+    } catch (err) {
+      console.error(err);
+      showToast("error", "Failed to sync employees from Clover");
+    } finally {
+      setSyncing(false);
     }
   };
 
@@ -621,13 +644,23 @@ export default function TimeClock() {
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <p className="text-sm text-gray-500">{employees.length} employee{employees.length !== 1 ? "s" : ""}</p>
-            <button
-              onClick={() => setShowAddEmployee(true)}
-              className="px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 transition-colors flex items-center gap-2"
-            >
-              <UserPlus className="w-4 h-4" />
-              Add Employee
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleSyncFromClover}
+                disabled={syncing}
+                className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2 disabled:opacity-50"
+              >
+                <RefreshCw className={`w-4 h-4 ${syncing ? "animate-spin" : ""}`} />
+                {syncing ? "Syncing..." : "Sync from Clover"}
+              </button>
+              <button
+                onClick={() => setShowAddEmployee(true)}
+                className="px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 transition-colors flex items-center gap-2"
+              >
+                <UserPlus className="w-4 h-4" />
+                Add Employee
+              </button>
+            </div>
           </div>
 
           {/* Add Employee Form */}

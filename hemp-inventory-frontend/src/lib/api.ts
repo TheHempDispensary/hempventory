@@ -303,6 +303,9 @@ export const updateTimeEntry = (id: number, data: { clock_in?: string; clock_out
 export const deleteTimeEntry = (id: number) =>
   api.delete(`/api/timeclock/entries/${id}`);
 
+export const syncEmployeesFromClover = () =>
+  api.post("/api/timeclock/sync-employees");
+
 export const getTimeclockExportUrl = (params?: { start_date?: string; end_date?: string; employee_id?: number }) => {
   const url = new URL(`${API_URL}/api/timeclock/export`);
   if (params?.start_date) url.searchParams.set("start_date", params.start_date);

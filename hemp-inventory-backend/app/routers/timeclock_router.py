@@ -9,8 +9,14 @@ from datetime import datetime, timezone
 
 from app.auth import get_current_user
 from app.database import get_db
+from app.clover_client import CloverClient
 
 router = APIRouter(prefix="/api/timeclock", tags=["timeclock"])
+
+
+async def _get_locations(db: aiosqlite.Connection):
+    cursor = await db.execute("SELECT id, name, merchant_id, api_token FROM locations")
+    return await cursor.fetchall()
 
 
 # ---------- Models ----------
@@ -360,3 +366,50 @@ async def export_csv(
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=timesheet.csv"},
     )
+
+
+# ---------- Sync from Clover ----------
+
+@router.post("/sync-employees")
+async def sync_employees_from_clover(
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Import employees from all Clover locations. Skips duplicates by name."""
+    locations = await _get_locations(db)
+    if not locations:
+        raise HTTPException(status_code=400, detail="No locations configured")
+
+    imported = 0
+    skipped = 0
+    errors = []
+
+    # Get existing employee names for dedup
+    cursor = await db.execute("SELECT LOWER(name) FROM employees")
+    existing_names = {r[0] for r in await cursor.fetchall()}
+
+    seen_names = set()
+    for loc in locations:
+        loc_name, merchant_id, api_token = loc[1], loc[2], loc[3]
+        try:
+            client = CloverClient(merchant_id, api_token)
+            data = await client.get_employees()
+            for emp in data.get("elements", []):
+                name = emp.get("name", "").strip()
+                if not name:
+                    continue
+                name_lower = name.lower()
+                if name_lower in existing_names or name_lower in seen_names:
+                    skipped += 1
+                    continue
+                seen_names.add(name_lower)
+                await db.execute(
+                    "INSERT INTO employees (name, pin, active) VALUES (?, ?, 1)",
+                    (name, None),
+                )
+                imported += 1
+        except Exception as e:
+            errors.append({"location": loc_name, "error": str(e)})
+
+    await db.commit()
+    return {"imported": imported, "skipped": skipped, "errors": errors}
