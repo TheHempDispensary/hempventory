@@ -780,37 +780,80 @@ export default function Inventory() {
 
   // Transfer stock state
   const [showTransfer, setShowTransfer] = useState(false);
-  const [transferForm, setTransferForm] = useState({ sku: "", fromLocationId: 0, toLocationId: 0, quantity: "" });
+  const [transferSearch, setTransferSearch] = useState("");
+  const [transferItems, setTransferItems] = useState<Map<string, { item: InventoryItem; quantity: string }>>(new Map());
+  const [transferFromId, setTransferFromId] = useState(0);
+  const [transferToId, setTransferToId] = useState(0);
   const [transferring, setTransferring] = useState(false);
+  const [transferResults, setTransferResults] = useState<{ name: string; status: string }[]>([]);
+
+  const transferSearchResults = useMemo(() => {
+    if (!transferSearch || transferSearch.length < 2) return [];
+    const q = transferSearch.toLowerCase();
+    return items.filter(i =>
+      i.name.toLowerCase().includes(q) || i.sku.toLowerCase().includes(q)
+    ).slice(0, 50);
+  }, [transferSearch, items]);
+
+  const toggleTransferItem = (item: InventoryItem) => {
+    const next = new Map(transferItems);
+    if (next.has(item.id)) {
+      next.delete(item.id);
+    } else {
+      next.set(item.id, { item, quantity: "1" });
+    }
+    setTransferItems(next);
+  };
+
+  const setTransferQuantity = (id: string, qty: string) => {
+    const next = new Map(transferItems);
+    const entry = next.get(id);
+    if (entry) {
+      next.set(id, { ...entry, quantity: qty });
+      setTransferItems(next);
+    }
+  };
 
   const handleTransferStock = async () => {
-    if (!transferForm.sku || !transferForm.fromLocationId || !transferForm.toLocationId || !transferForm.quantity) return;
-    if (transferForm.fromLocationId === transferForm.toLocationId) {
+    if (transferItems.size === 0 || !transferFromId || !transferToId) return;
+    if (transferFromId === transferToId) {
       setToast({ type: "error", text: "Source and destination must be different locations" });
       setTimeout(() => setToast(null), 4000);
       return;
     }
     setTransferring(true);
-    try {
-      const resp = await transferStock(
-        transferForm.sku,
-        transferForm.fromLocationId,
-        transferForm.toLocationId,
-        parseFloat(transferForm.quantity)
-      );
-      const d = resp.data;
-      setToast({ type: "success", text: `Transferred ${d.quantity} of "${d.item_name}" from ${d.from_location} to ${d.to_location}` });
-      setTimeout(() => setToast(null), 6000);
-      setShowTransfer(false);
-      setTransferForm({ sku: "", fromLocationId: 0, toLocationId: 0, quantity: "" });
-      await loadData();
-    } catch (err) {
-      const axiosError = err as { response?: { data?: { detail?: string } } };
-      setToast({ type: "error", text: axiosError?.response?.data?.detail || "Transfer failed" });
-      setTimeout(() => setToast(null), 5000);
-    } finally {
-      setTransferring(false);
+    setTransferResults([]);
+    const results: { name: string; status: string }[] = [];
+    for (const [, { item, quantity }] of transferItems) {
+      const qty = parseFloat(quantity);
+      if (!qty || qty <= 0) {
+        results.push({ name: item.name, status: "Skipped (invalid quantity)" });
+        continue;
+      }
+      try {
+        const resp = await transferStock(item.sku, transferFromId, transferToId, qty);
+        const d = resp.data;
+        results.push({ name: d.item_name, status: `Transferred ${d.quantity}` });
+      } catch (err) {
+        const axiosError = err as { response?: { data?: { detail?: string } } };
+        results.push({ name: item.name, status: axiosError?.response?.data?.detail || "Failed" });
+      }
     }
+    setTransferResults(results);
+    const successCount = results.filter(r => r.status.startsWith("Transferred")).length;
+    setToast({ type: successCount > 0 ? "success" : "error", text: `${successCount} of ${results.length} items transferred` });
+    setTimeout(() => setToast(null), 6000);
+    setTransferring(false);
+    if (successCount > 0) await loadData();
+  };
+
+  const resetTransferModal = () => {
+    setShowTransfer(false);
+    setTransferSearch("");
+    setTransferItems(new Map());
+    setTransferFromId(0);
+    setTransferToId(0);
+    setTransferResults([]);
   };
 
   // Bulk image assignment state
@@ -2625,37 +2668,24 @@ export default function Inventory() {
       {/* Transfer Stock Modal */}
       {showTransfer && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6">
+          <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full p-6 max-h-[90vh] flex flex-col">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-semibold flex items-center gap-2">
                 <ArrowRightLeft className="w-5 h-5 text-purple-600" />
                 Transfer Stock
               </h3>
-              <button onClick={() => setShowTransfer(false)}>
+              <button onClick={resetTransferModal}>
                 <X className="w-5 h-5 text-gray-400" />
               </button>
             </div>
-            <div className="space-y-3">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Product</label>
-                <select
-                  value={transferForm.sku}
-                  onChange={(e) => setTransferForm({ ...transferForm, sku: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none"
-                >
-                  <option value="">Select a product...</option>
-                  {items.map((item) => (
-                    <option key={item.sku} value={item.sku}>
-                      {item.name} {item.sku ? `(${item.sku})` : ""}
-                    </option>
-                  ))}
-                </select>
-              </div>
+
+            {/* Location selectors */}
+            <div className="grid grid-cols-2 gap-3 mb-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">From Location</label>
                 <select
-                  value={transferForm.fromLocationId}
-                  onChange={(e) => setTransferForm({ ...transferForm, fromLocationId: parseInt(e.target.value) })}
+                  value={transferFromId}
+                  onChange={(e) => setTransferFromId(parseInt(e.target.value))}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none"
                 >
                   <option value={0}>Select source...</option>
@@ -2667,8 +2697,8 @@ export default function Inventory() {
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">To Location</label>
                 <select
-                  value={transferForm.toLocationId}
-                  onChange={(e) => setTransferForm({ ...transferForm, toLocationId: parseInt(e.target.value) })}
+                  value={transferToId}
+                  onChange={(e) => setTransferToId(parseInt(e.target.value))}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none"
                 >
                   <option value={0}>Select destination...</option>
@@ -2677,32 +2707,119 @@ export default function Inventory() {
                   ))}
                 </select>
               </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Quantity</label>
+            </div>
+
+            {/* Search to add items */}
+            <div className="mb-3">
+              <label className="block text-sm font-medium text-gray-700 mb-1">Search Items to Add</label>
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                 <input
-                  type="number"
-                  min="1"
-                  value={transferForm.quantity}
-                  onChange={(e) => setTransferForm({ ...transferForm, quantity: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none"
-                  placeholder="Enter quantity to transfer"
+                  type="text"
+                  value={transferSearch}
+                  onChange={(e) => setTransferSearch(e.target.value)}
+                  className="w-full pl-9 pr-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none"
+                  placeholder="Search by name or SKU..."
                 />
               </div>
+              {/* Search results dropdown */}
+              {transferSearch.length >= 2 && transferSearchResults.length > 0 && (
+                <div className="mt-1 border border-gray-200 rounded-lg max-h-40 overflow-y-auto bg-white shadow-sm">
+                  {transferSearchResults.map((item) => {
+                    const isAdded = transferItems.has(item.id);
+                    return (
+                      <button
+                        key={item.id}
+                        onClick={() => toggleTransferItem(item)}
+                        className={`w-full text-left px-3 py-2 text-sm hover:bg-purple-50 flex items-center justify-between border-b border-gray-100 last:border-0 ${isAdded ? "bg-purple-50" : ""}`}
+                      >
+                        <div className="flex-1 min-w-0">
+                          <span className="truncate block">{item.name}</span>
+                          <span className="text-xs text-gray-400">{item.sku}</span>
+                        </div>
+                        {isAdded ? (
+                          <span className="text-xs text-purple-600 font-medium ml-2 shrink-0">Added</span>
+                        ) : (
+                          <Plus className="w-4 h-4 text-gray-400 ml-2 shrink-0" />
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {transferSearch.length >= 2 && transferSearchResults.length === 0 && (
+                <p className="mt-1 text-xs text-gray-400">No items found</p>
+              )}
             </div>
-            <div className="flex gap-3 mt-5">
+
+            {/* Selected items with quantities */}
+            {transferItems.size > 0 && (
+              <div className="flex-1 min-h-0 overflow-y-auto mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Items to Transfer ({transferItems.size})
+                </label>
+                <div className="space-y-2">
+                  {Array.from(transferItems.entries()).map(([id, { item, quantity }]) => (
+                    <div key={id} className="flex items-center gap-2 p-2 bg-gray-50 rounded-lg">
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-gray-900 truncate">{item.name}</p>
+                        <p className="text-xs text-gray-400">{item.sku}</p>
+                      </div>
+                      <input
+                        type="number"
+                        min="1"
+                        value={quantity}
+                        onChange={(e) => setTransferQuantity(id, e.target.value)}
+                        className="w-20 px-2 py-1 border border-gray-300 rounded text-sm text-center focus:ring-2 focus:ring-purple-500 outline-none"
+                        placeholder="Qty"
+                      />
+                      <button
+                        onClick={() => toggleTransferItem(item)}
+                        className="p-1 text-gray-400 hover:text-red-500"
+                        title="Remove"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {transferItems.size === 0 && (
+              <div className="flex-1 flex items-center justify-center text-sm text-gray-400 py-8">
+                Search and add items above to start a transfer
+              </div>
+            )}
+
+            {/* Transfer results */}
+            {transferResults.length > 0 && (
+              <div className="mb-4 p-3 bg-gray-50 border border-gray-200 rounded-lg max-h-32 overflow-y-auto">
+                <p className="text-sm font-medium text-gray-700 mb-1">Results:</p>
+                {transferResults.map((r, i) => (
+                  <p key={i} className={`text-xs ${r.status.startsWith("Transferred") ? "text-green-700" : "text-red-600"}`}>
+                    {r.name}: {r.status}
+                  </p>
+                ))}
+              </div>
+            )}
+
+            <div className="flex gap-3">
               <button
-                onClick={() => setShowTransfer(false)}
+                onClick={resetTransferModal}
                 className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50"
               >
-                Cancel
+                {transferResults.length > 0 ? "Close" : "Cancel"}
               </button>
-              <button
-                onClick={handleTransferStock}
-                disabled={transferring || !transferForm.sku || !transferForm.fromLocationId || !transferForm.toLocationId || !transferForm.quantity}
-                className="flex-1 px-4 py-2 bg-purple-600 text-white rounded-lg text-sm hover:bg-purple-700 disabled:opacity-50"
-              >
-                {transferring ? "Transferring..." : "Transfer"}
-              </button>
+              {transferResults.length === 0 && (
+                <button
+                  onClick={handleTransferStock}
+                  disabled={transferring || transferItems.size === 0 || !transferFromId || !transferToId}
+                  className="flex-1 px-4 py-2 bg-purple-600 text-white rounded-lg text-sm hover:bg-purple-700 disabled:opacity-50"
+                >
+                  {transferring ? "Transferring..." : `Transfer ${transferItems.size} Item${transferItems.size !== 1 ? "s" : ""}`}
+                </button>
+              )}
             </div>
           </div>
         </div>
