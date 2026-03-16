@@ -111,15 +111,12 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(_scheduled_refund_sync, "interval", minutes=15, id="refund_sync", replace_existing=True)
     scheduler.add_job(_scheduled_loyalty_sync, "interval", minutes=10, id="loyalty_sync", replace_existing=True)
     scheduler.start()
-    # Run initial syncs on startup
+    # Run initial inventory sync on startup (loyalty sync will run on its scheduled interval
+    # to avoid memory spike from running all syncs simultaneously on startup)
     try:
         await _scheduled_inventory_sync()
     except Exception as e:
         print(f"[startup] Initial inventory sync failed: {e}")
-    try:
-        await _scheduled_loyalty_sync()
-    except Exception as e:
-        print(f"[startup] Initial loyalty sync failed: {e}")
     yield
     scheduler.shutdown()
 
