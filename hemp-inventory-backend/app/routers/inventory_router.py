@@ -125,19 +125,25 @@ async def sync_inventory(
             continue
 
         for item in items:
-            sku = item.get("sku", "") or item.get("id", "")
+            raw_sku = item.get("sku", "") or ""
+            clover_id = item.get("id", "")
+            item_name = item.get("name", "")
+            display_sku = raw_sku or clover_id
+            # Use composite key to distinguish different products sharing the same SKU
+            merge_key = f"{display_sku}::{item_name}"
+
             item_stock = item.get("itemStock", {})
             quantity = item_stock.get("quantity", 0) if item_stock else 0
 
             categories = item.get("categories", {}).get("elements", [])
             category_names = [c.get("name", "") for c in categories]
 
-            par = par_levels.get((sku, loc_id), None)
+            par = par_levels.get((display_sku, loc_id), None)
 
-            if sku not in inventory:
-                inventory[sku] = {
-                    "sku": sku,
-                    "name": item.get("name", ""),
+            if merge_key not in inventory:
+                inventory[merge_key] = {
+                    "sku": display_sku,
+                    "name": item_name,
                     "price": item.get("price", 0),
                     "categories": category_names,
                     "locations": {},
@@ -159,21 +165,21 @@ async def sync_inventory(
                     "default_tax_rates": item.get("defaultTaxRates", True),
                 }
 
-            inventory[sku]["locations"][loc_name] = {
+            inventory[merge_key]["locations"][loc_name] = {
                 "location_id": loc_id,
                 "stock": quantity,
                 "par_level": par,
                 "status": _stock_status(quantity, par),
-                "clover_item_id": item.get("id", ""),
+                "clover_item_id": clover_id,
             }
-            inventory[sku]["clover_ids"][loc_name] = item.get("id", "")
+            inventory[merge_key]["clover_ids"][loc_name] = clover_id
 
     # Attach stored product images
     cursor = await db.execute("SELECT sku, image_data, content_type FROM product_images")
     image_rows = await cursor.fetchall()
     image_map = {row[0]: {"has_image": True, "content_type": row[2]} for row in image_rows}
-    for sku, item_data in inventory.items():
-        if sku in image_map:
+    for _key, item_data in inventory.items():
+        if item_data["sku"] in image_map:
             item_data["has_image"] = True
         else:
             item_data["has_image"] = False
