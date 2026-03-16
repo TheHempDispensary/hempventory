@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo } from "react";
-import { syncInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, bulkAssignImages, syncRefunds, getAgeRestrictionTypes, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup } from "../lib/api";
-import { RefreshCw, Search, Plus, ChevronDown, ChevronUp, X, Save, Package, Trash2, CheckSquare, Square, Minus, Image, Download, Upload, Settings, ArrowRightLeft, Images, Layers } from "lucide-react";
+import { syncInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, bulkAssignCategory, bulkAssignImages, syncRefunds, getAgeRestrictionTypes, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup } from "../lib/api";
+import { RefreshCw, Search, Plus, ChevronDown, ChevronUp, X, Save, Package, Trash2, CheckSquare, Square, Minus, Image, Download, Upload, Settings, ArrowRightLeft, Images, Layers, Tag } from "lucide-react";
 
 interface LocationStock {
   location_id: number;
@@ -99,6 +99,11 @@ export default function Inventory() {
   const [autoManaging, setAutoManaging] = useState(false);
   const [pushingToLocation, setPushingToLocation] = useState<number | null>(null);
   const [syncingRefunds, setSyncingRefunds] = useState(false);
+
+  // Bulk category state
+  const [showBulkCategory, setShowBulkCategory] = useState(false);
+  const [bulkCategoryName, setBulkCategoryName] = useState("");
+  const [assigningCategory, setAssigningCategory] = useState(false);
 
   // Edit modal state
   const [editItem, setEditItem] = useState<InventoryItem | null>(null);
@@ -687,6 +692,28 @@ export default function Inventory() {
       console.error("Error bulk deleting:", err);
     } finally {
       setBulkDeleting(false);
+    }
+  };
+
+  const handleBulkAssignCategory = async () => {
+    if (!bulkCategoryName.trim()) return;
+    setAssigningCategory(true);
+    try {
+      const resp = await bulkAssignCategory(Array.from(selectedItems), bulkCategoryName.trim());
+      const data = resp.data;
+      setToast({ type: "success", text: `Category "${data.category}" assigned to ${data.total_assigned} item(s) across ${data.results?.length || 0} location(s)` });
+      setTimeout(() => setToast(null), 6000);
+      setShowBulkCategory(false);
+      setBulkCategoryName("");
+      setSelectedItems(new Set());
+      await loadData();
+    } catch (err) {
+      console.error("Error assigning category:", err);
+      const axiosError = err as { response?: { data?: { detail?: string } } };
+      setToast({ type: "error", text: axiosError?.response?.data?.detail || "Failed to assign category" });
+      setTimeout(() => setToast(null), 5000);
+    } finally {
+      setAssigningCategory(false);
     }
   };
 
@@ -2232,12 +2259,79 @@ export default function Inventory() {
               Download CSV
             </button>
             <button
+              onClick={() => { setShowBulkCategory(true); setBulkCategoryName(""); }}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"
+            >
+              <Tag className="w-3.5 h-3.5" />
+              Assign Category
+            </button>
+            <button
               onClick={() => setShowBulkConfirm(true)}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-lg text-sm hover:bg-red-700"
             >
               <Trash2 className="w-3.5 h-3.5" />
               Delete Selected
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk Assign Category Modal */}
+      {showBulkCategory && (
+        <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="p-2 bg-blue-100 rounded-lg">
+                <Tag className="w-5 h-5 text-blue-600" />
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900">Assign Category</h3>
+                <p className="text-xs text-gray-400">Assign a category to {selectedItems.size} selected item{selectedItems.size !== 1 ? "s" : ""}</p>
+              </div>
+            </div>
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-1">Category Name</label>
+              <input
+                list="category-suggestions"
+                type="text"
+                value={bulkCategoryName}
+                onChange={(e) => setBulkCategoryName(e.target.value)}
+                placeholder="Select existing or type new category..."
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                autoFocus
+              />
+              <datalist id="category-suggestions">
+                {categories.map((c) => (
+                  <option key={c} value={c} />
+                ))}
+              </datalist>
+              <p className="text-xs text-gray-400 mt-1">Choose an existing category or type a new name to create one</p>
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowBulkCategory(false)}
+                className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg text-sm hover:bg-gray-50 font-medium"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleBulkAssignCategory}
+                disabled={assigningCategory || !bulkCategoryName.trim()}
+                className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50 font-medium"
+              >
+                {assigningCategory ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    Assigning...
+                  </>
+                ) : (
+                  <>
+                    <Tag className="w-4 h-4" />
+                    Assign
+                  </>
+                )}
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -98,6 +98,9 @@ export const fixPosScanning = () => api.post("/api/inventory/fix-pos");
 export const transferStock = (sku: string, fromLocationId: number, toLocationId: number, quantity: number) =>
   api.post("/api/inventory/transfer-stock", { sku, from_location_id: fromLocationId, to_location_id: toLocationId, quantity });
 
+export const bulkAssignCategory = (skus: string[], categoryName: string) =>
+  api.post("/api/inventory/bulk-assign-category", { skus, category_name: categoryName });
+
 export const bulkAssignImages = (keyword: string, imageData: string, contentType: string = "image/png", skus?: string[]) =>
   api.post("/api/inventory/bulk-assign-images", { keyword, image_data: imageData, content_type: contentType, skus: skus || null });
 

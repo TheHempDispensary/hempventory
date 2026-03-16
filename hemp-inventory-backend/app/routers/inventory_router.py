@@ -667,6 +667,68 @@ async def push_item_to_location(
         raise HTTPException(status_code=500, detail=f"Failed to create item at {target_loc_name}: {str(e)}")
 
 
+class BulkCategoryRequest(BaseModel):
+    skus: list[str]
+    category_name: str
+
+
+@router.post("/bulk-assign-category")
+async def bulk_assign_category(
+    req: BulkCategoryRequest,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Assign a category to multiple items across all Clover locations."""
+    locations = await _get_locations(db)
+    if not locations:
+        raise HTTPException(status_code=400, detail="No locations configured")
+
+    results: list[dict] = []
+    total_assigned = 0
+
+    for loc in locations:
+        loc_id, loc_name, merchant_id, api_token = loc[0], loc[1], loc[2], loc[3]
+        try:
+            client = CloverClient(merchant_id, api_token)
+
+            # Get or create the category in this merchant account
+            cat_data = await client.get_categories()
+            cat_elements = cat_data.get("elements", [])
+            existing = [c for c in cat_elements if c.get("name", "").lower() == req.category_name.lower()]
+            if existing:
+                cat_id = existing[0]["id"]
+            else:
+                new_cat = await client.create_category(req.category_name)
+                cat_id = new_cat["id"]
+
+            # Get all items to find matching ones
+            all_items_data = await client.get_items()
+            all_items = all_items_data.get("elements", [])
+
+            assigned_count = 0
+            for sku in req.skus:
+                # Match by SKU or by Clover item ID (for items with no SKU)
+                matching = [i for i in all_items if i.get("sku") == sku or i.get("id") == sku]
+                for item in matching:
+                    # Check if category is already assigned
+                    item_cats = item.get("categories", {}).get("elements", [])
+                    already_has = any(c.get("id") == cat_id for c in item_cats)
+                    if already_has:
+                        continue
+                    try:
+                        await client.assign_category(item["id"], cat_id)
+                        assigned_count += 1
+                    except Exception:
+                        pass  # skip individual failures
+
+            total_assigned += assigned_count
+            results.append({"location": loc_name, "assigned": assigned_count, "status": "ok"})
+        except Exception as e:
+            results.append({"location": loc_name, "assigned": 0, "status": "error", "error": str(e)})
+
+    return {"category": req.category_name, "total_assigned": total_assigned, "results": results}
+
+
 class BulkDeleteRequest(BaseModel):
     skus: list[str]
 
