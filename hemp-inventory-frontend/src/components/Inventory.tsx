@@ -309,7 +309,7 @@ export default function Inventory() {
   // Reset to page 1 when filters change
   useEffect(() => {
     setCurrentPage(1);
-  }, [search, categoryFilter, locationFilter, sortField, sortDir]);
+  }, [search, categoryFilter, locationFilter, sortField, sortDir, sortLocation]);
 
   const totalPages = Math.max(1, Math.ceil(filteredItems.length / itemsPerPage));
   const paginatedItems = useMemo(() => {
