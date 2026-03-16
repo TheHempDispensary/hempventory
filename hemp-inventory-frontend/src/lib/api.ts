@@ -19,7 +19,8 @@ api.interceptors.response.use(
   (error) => {
     if (error.response?.status === 401) {
       localStorage.removeItem("token");
-      window.location.href = "/login";
+      localStorage.removeItem("userRole");
+      window.location.href = "/";
     }
     return Promise.reject(error);
   }
@@ -317,5 +318,20 @@ export const getTimeclockExportUrl = (params?: { start_date?: string; end_date?:
 // Sales Report
 export const getSalesReport = (params?: { start_date?: string; end_date?: string }) =>
   api.get("/api/sales/report", { params });
+
+// Employee Auth
+export const employeeLogin = (username: string, pin: string) =>
+  api.post("/api/auth/employee-login", { username, pin });
+
+// Employee Self-Service
+export const getMyProfile = () => api.get("/api/timeclock/my-profile");
+export const myClockIn = () => api.post("/api/timeclock/my-clock-in");
+export const myClockOut = () => api.post("/api/timeclock/my-clock-out");
+export const getMyClockStatus = () => api.get("/api/timeclock/my-status");
+export const getMyEntries = (params?: { start_date?: string; end_date?: string }) =>
+  api.get("/api/timeclock/my-entries", { params });
+
+// Seed employees
+export const seedEmployees = () => api.post("/api/timeclock/seed-employees");
 
 export default api;

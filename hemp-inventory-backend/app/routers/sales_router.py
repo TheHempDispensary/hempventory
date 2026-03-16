@@ -13,7 +13,9 @@ router = APIRouter(prefix="/api/sales", tags=["sales"])
 
 
 async def _get_locations(db: aiosqlite.Connection):
-    cursor = await db.execute("SELECT id, name, merchant_id, api_token FROM locations")
+    cursor = await db.execute(
+        "SELECT id, name, merchant_id, api_token FROM locations WHERE LOWER(name) NOT LIKE '%virtual%' AND LOWER(name) NOT LIKE '%central%'"
+    )
     return await cursor.fetchall()
 
 
@@ -135,15 +137,14 @@ async def get_sales_report(
                 by_item[item_key]["quantity"] += item_qty
                 by_item[item_key]["revenue"] += item_price
 
-            # Recent orders (keep last 50)
-            if len(recent_orders) < 50:
-                recent_orders.append({
-                    "id": order.get("id"),
-                    "total": order_total,
-                    "location": loc_name,
-                    "time": order_dt.isoformat(),
-                    "items": len(line_items),
-                })
+            # Recent orders (collect all, sort later)
+            recent_orders.append({
+                "id": order.get("id"),
+                "total": order_total,
+                "location": loc_name,
+                "time": order_dt.isoformat(),
+                "items": len(line_items),
+            })
 
         avg_order = round(loc_revenue / loc_orders) if loc_orders > 0 else 0
         by_location[loc_name] = {
@@ -151,6 +152,10 @@ async def get_sales_report(
             "orders": loc_orders,
             "avg_order": avg_order,
         }
+
+    # Sort recent orders by time descending, keep last 50
+    recent_orders.sort(key=lambda x: x["time"], reverse=True)
+    recent_orders = recent_orders[:50]
 
     # Sort top items by revenue
     top_items = sorted(by_item.values(), key=lambda x: x["revenue"], reverse=True)[:25]

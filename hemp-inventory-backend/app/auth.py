@@ -33,6 +33,16 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
+def create_employee_token(employee_id: int, username: str, name: str) -> str:
+    """Create a JWT token for employee login (time clock access only)."""
+    return create_access_token(data={
+        "sub": username,
+        "role": "employee",
+        "employee_id": employee_id,
+        "name": name,
+    })
+
+
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
     token = credentials.credentials
     try:
@@ -43,7 +53,12 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid token",
             )
-        return {"username": username}
+        return {
+            "username": username,
+            "role": payload.get("role", "admin"),
+            "employee_id": payload.get("employee_id"),
+            "name": payload.get("name"),
+        }
     except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
