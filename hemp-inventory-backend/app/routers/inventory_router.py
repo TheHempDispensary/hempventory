@@ -183,6 +183,10 @@ async def _do_sync(db: aiosqlite.Connection) -> dict:
         else:
             item_data["has_image"] = False
 
+    # Add a unique id to each item for frontend selection
+    for key, item_data in inventory.items():
+        item_data["id"] = key  # composite key "sku::name"
+
     items_list = sorted(inventory.values(), key=lambda x: x["name"])
     result = {"items": items_list, "locations": location_list}
 

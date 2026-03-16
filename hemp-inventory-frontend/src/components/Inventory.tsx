@@ -11,6 +11,7 @@ interface LocationStock {
 }
 
 interface InventoryItem {
+  id: string;
   sku: string;
   name: string;
   price: number;
@@ -615,7 +616,7 @@ export default function Inventory() {
   };
 
   const handleDownloadExcel = () => {
-    const selectedData = filteredItems.filter((i) => selectedItems.has(i.sku));
+    const selectedData = filteredItems.filter((i) => selectedItems.has(i.id));
     const dataToExport = selectedData.length > 0 ? selectedData : filteredItems;
     const headers = ["Product Name", "SKU", "Price", "Category"];
     locations.forEach((loc) => { headers.push(`${loc.name} Stock`); headers.push(`${loc.name} PAR`); });
@@ -670,21 +671,22 @@ export default function Inventory() {
     if (selectedItems.size === filteredItems.length) {
       setSelectedItems(new Set());
     } else {
-      setSelectedItems(new Set(filteredItems.map((i) => i.sku)));
+      setSelectedItems(new Set(filteredItems.map((i) => i.id)));
     }
   };
 
-  const toggleSelectItem = (sku: string) => {
+  const toggleSelectItem = (id: string) => {
     const next = new Set(selectedItems);
-    if (next.has(sku)) next.delete(sku);
-    else next.add(sku);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
     setSelectedItems(next);
   };
 
   const handleBulkDelete = async () => {
     setBulkDeleting(true);
     try {
-      await bulkDeleteItems(Array.from(selectedItems));
+      const skusToDelete = items.filter(i => selectedItems.has(i.id)).map(i => i.sku);
+      await bulkDeleteItems([...new Set(skusToDelete)]);
       setSelectedItems(new Set());
       setShowBulkConfirm(false);
       await loadData();
@@ -699,7 +701,8 @@ export default function Inventory() {
     if (!bulkCategoryName.trim()) return;
     setAssigningCategory(true);
     try {
-      const resp = await bulkAssignCategory(Array.from(selectedItems), bulkCategoryName.trim());
+      const skusToAssign = items.filter(i => selectedItems.has(i.id)).map(i => i.sku);
+      const resp = await bulkAssignCategory([...new Set(skusToAssign)], bulkCategoryName.trim());
       const data = resp.data;
       setToast({ type: "success", text: `Category "${data.category}" assigned to ${data.total_assigned} item(s) across ${data.results?.length || 0} location(s)` });
       setTimeout(() => setToast(null), 6000);
@@ -2453,7 +2456,7 @@ export default function Inventory() {
               {filteredItems.map((item, idx) => (
                 <tr
                   key={`${item.sku}::${item.name}::${idx}`}
-                  className={`hover:bg-green-50 cursor-pointer transition-colors ${selectedItems.has(item.sku) ? "bg-green-50/50" : ""}`}
+                  className={`hover:bg-green-50 cursor-pointer transition-colors ${selectedItems.has(item.id) ? "bg-green-50/50" : ""}`}
                   onClick={(e) => {
                     const target = e.target as HTMLElement;
                     if (target.closest("button") || target.closest("input") || target.tagName === "BUTTON" || target.tagName === "INPUT") return;
@@ -2462,10 +2465,10 @@ export default function Inventory() {
                 >
                   <td className="px-3 py-3 w-10">
                     <button
-                      onClick={(e) => { e.stopPropagation(); toggleSelectItem(item.sku); }}
+                      onClick={(e) => { e.stopPropagation(); toggleSelectItem(item.id); }}
                       className="text-gray-400 hover:text-green-600 transition-colors"
                     >
-                      {selectedItems.has(item.sku) ? (
+                      {selectedItems.has(item.id) ? (
                         <CheckSquare className="w-4 h-4 text-green-600" />
                       ) : (
                         <Square className="w-4 h-4" />
