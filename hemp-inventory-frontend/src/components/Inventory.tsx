@@ -496,9 +496,11 @@ export default function Inventory() {
       await deleteItem(item.sku);
       setConfirmDelete(null);
       setEditItem(null);
-      await loadData();
+      // Optimistically remove from state immediately
+      setItems(prev => prev.filter(i => i.sku !== item.sku));
     } catch (err) {
       console.error("Error deleting item:", err);
+      await loadData();
     } finally {
       setDeleting(null);
     }
@@ -700,12 +702,16 @@ export default function Inventory() {
     setBulkDeleting(true);
     try {
       const skusToDelete = items.filter(i => selectedItems.has(i.id)).map(i => i.sku);
-      await bulkDeleteItems([...new Set(skusToDelete)]);
+      const uniqueSkus = [...new Set(skusToDelete)];
+      await bulkDeleteItems(uniqueSkus);
+      // Optimistically remove from state immediately
+      const deletedSkuSet = new Set(uniqueSkus);
+      setItems(prev => prev.filter(i => !deletedSkuSet.has(i.sku)));
       setSelectedItems(new Set());
       setShowBulkConfirm(false);
-      await loadData();
     } catch (err) {
       console.error("Error bulk deleting:", err);
+      await loadData();
     } finally {
       setBulkDeleting(false);
     }

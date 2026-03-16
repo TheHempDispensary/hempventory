@@ -30,6 +30,18 @@ async def _invalidate_cache():
         _inventory_cache["updated_at"] = 0
 
 
+async def _remove_from_cache(skus: list):
+    """Remove items with given SKUs directly from cache (no re-sync needed)."""
+    async with _cache_lock:
+        if _inventory_cache["items"]:
+            sku_set = set(skus)
+            _inventory_cache["items"] = [
+                item for item in _inventory_cache["items"]
+                if item["sku"] not in sku_set
+            ]
+            _inventory_cache["updated_at"] = time.time()
+
+
 class LocationStockInput(BaseModel):
     location_id: int
     quantity: float
@@ -881,7 +893,7 @@ async def bulk_delete_items(
         await db.commit()
         all_results.append({"sku": sku, "results": sku_results})
 
-    await _invalidate_cache()
+    await _remove_from_cache(req.skus)
     return {"results": all_results}
 
 
@@ -918,7 +930,7 @@ async def delete_item(
     await db.execute("DELETE FROM par_levels WHERE sku = ?", (sku,))
     await db.commit()
 
-    await _invalidate_cache()
+    await _remove_from_cache([sku])
     return {"results": results}
 
 
