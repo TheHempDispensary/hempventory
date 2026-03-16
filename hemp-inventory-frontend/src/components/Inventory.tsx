@@ -257,7 +257,7 @@ export default function Inventory() {
   }, [items]);
 
   const filteredItems = useMemo(() => {
-    let filtered = items;
+    let filtered = [...items];
 
     if (search) {
       const s = search.toLowerCase();
