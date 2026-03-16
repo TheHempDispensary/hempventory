@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Package, AlertTriangle, Settings, MapPin, LayoutDashboard, LogOut, Menu, X, Star } from "lucide-react";
+import { Package, AlertTriangle, Settings, MapPin, LogOut, Menu, X, Star } from "lucide-react";
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -9,7 +9,6 @@ interface LayoutProps {
 }
 
 const navItems = [
-  { id: "dashboard", label: "Low Stock", icon: LayoutDashboard },
   { id: "inventory", label: "Inventory", icon: Package },
   { id: "loyalty", label: "Loyalty", icon: Star },
   { id: "alerts", label: "Alerts", icon: AlertTriangle },

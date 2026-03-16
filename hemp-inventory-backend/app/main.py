@@ -10,6 +10,7 @@ load_dotenv()
 from app.database import init_db, get_db, DB_PATH
 from app.routers import auth_router, locations_router, inventory_router, par_router, alerts_router, ecommerce_router, loyalty_router
 from app.routers.inventory_router import _do_sync
+from app.routers.loyalty_router import _do_bulk_import_customers, _do_sync_orders
 
 import aiosqlite
 
@@ -28,6 +29,22 @@ async def _scheduled_inventory_sync():
             await db.close()
     except Exception as e:
         print(f"[auto-sync] Inventory sync failed: {e}")
+
+
+async def _scheduled_loyalty_sync():
+    """Background job: import new Clover customers and sync POS orders for loyalty points."""
+    try:
+        db = await aiosqlite.connect(DB_PATH)
+        db.row_factory = aiosqlite.Row
+        try:
+            result = await _do_bulk_import_customers(db)
+            print(f"[auto-sync] Loyalty customers imported: {result.get('imported', 0)} new, {result.get('skipped', 0)} skipped")
+            orders_result = await _do_sync_orders(db)
+            print(f"[auto-sync] Loyalty orders synced: {orders_result.get('orders_processed', 0)} processed, {orders_result.get('points_awarded', 0)} pts awarded")
+        finally:
+            await db.close()
+    except Exception as e:
+        print(f"[auto-sync] Loyalty sync failed: {e}")
 
 
 async def _scheduled_refund_sync():
@@ -92,12 +109,17 @@ async def lifespan(app: FastAPI):
     # Schedule automatic syncs
     scheduler.add_job(_scheduled_inventory_sync, "interval", minutes=5, id="inventory_sync", replace_existing=True)
     scheduler.add_job(_scheduled_refund_sync, "interval", minutes=15, id="refund_sync", replace_existing=True)
+    scheduler.add_job(_scheduled_loyalty_sync, "interval", minutes=10, id="loyalty_sync", replace_existing=True)
     scheduler.start()
-    # Run initial sync on startup
+    # Run initial syncs on startup
     try:
         await _scheduled_inventory_sync()
     except Exception as e:
-        print(f"[startup] Initial sync failed: {e}")
+        print(f"[startup] Initial inventory sync failed: {e}")
+    try:
+        await _scheduled_loyalty_sync()
+    except Exception as e:
+        print(f"[startup] Initial loyalty sync failed: {e}")
     yield
     scheduler.shutdown()
 

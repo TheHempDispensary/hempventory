@@ -10,7 +10,7 @@ import Loyalty from "./components/Loyalty";
 
 function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [currentPage, setCurrentPage] = useState("dashboard");
+  const [currentPage, setCurrentPage] = useState("inventory");
 
   useEffect(() => {
     const token = localStorage.getItem("token");
@@ -21,7 +21,7 @@ function App() {
 
   const handleLogin = () => {
     setIsLoggedIn(true);
-    setCurrentPage("dashboard");
+    setCurrentPage("inventory");
   };
 
   const handleLogout = () => {
@@ -48,7 +48,7 @@ function App() {
       case "loyalty":
         return <Loyalty />;
       default:
-        return <Dashboard onNavigate={setCurrentPage} />;
+        return <Inventory />;
     }
   };
 
