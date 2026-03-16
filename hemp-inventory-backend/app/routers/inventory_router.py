@@ -770,6 +770,69 @@ async def bulk_assign_category(
     return {"category": req.category_name, "total_assigned": total_assigned, "results": results}
 
 
+class BulkStockUpdateItem(BaseModel):
+    sku: str
+    location_id: int
+    quantity: float
+
+
+class BulkStockUpdateRequest(BaseModel):
+    updates: list[BulkStockUpdateItem]
+
+
+@router.post("/items/bulk-stock-update")
+async def bulk_stock_update(
+    req: BulkStockUpdateRequest,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Update stock for multiple items across locations in one call."""
+    locations = await _get_locations(db)
+    if not locations:
+        raise HTTPException(status_code=400, detail="No locations configured")
+
+    # Build lookup: location_id -> (merchant_id, api_token, name)
+    loc_map: dict[int, tuple] = {}
+    for loc in locations:
+        loc_map[loc[0]] = (loc[2], loc[3], loc[1])
+
+    # Cache Clover items per location to avoid repeated API calls
+    items_cache: dict[int, list] = {}
+    results = []
+
+    for upd in req.updates:
+        if upd.location_id not in loc_map:
+            results.append({"sku": upd.sku, "location_id": upd.location_id, "status": "location_not_found"})
+            continue
+
+        merchant_id, api_token, loc_name = loc_map[upd.location_id]
+        client = CloverClient(merchant_id, api_token)
+
+        # Fetch and cache items for this location
+        if upd.location_id not in items_cache:
+            try:
+                data = await client.get_items(expand="itemStock")
+                items_cache[upd.location_id] = data.get("elements", [])
+            except Exception as e:
+                results.append({"sku": upd.sku, "location": loc_name, "status": "error", "error": str(e)})
+                continue
+
+        clover_items = items_cache[upd.location_id]
+        matching = [i for i in clover_items if (i.get("sku") or i.get("id", "")) == upd.sku]
+        if not matching:
+            results.append({"sku": upd.sku, "location": loc_name, "status": "not_found"})
+            continue
+
+        try:
+            for match in matching:
+                await client.update_item_stock(match["id"], int(upd.quantity))
+            results.append({"sku": upd.sku, "location": loc_name, "status": "updated", "quantity": upd.quantity})
+        except Exception as e:
+            results.append({"sku": upd.sku, "location": loc_name, "status": "error", "error": str(e)})
+
+    return {"results": results, "total_updated": sum(1 for r in results if r.get("status") == "updated")}
+
+
 class BulkDeleteRequest(BaseModel):
     skus: list[str]
 

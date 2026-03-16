@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo } from "react";
-import { syncInventory, getCachedInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, bulkAssignCategory, bulkAssignImages, syncRefunds, getAgeRestrictionTypes, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup } from "../lib/api";
+import { syncInventory, getCachedInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, bulkAssignCategory, bulkAssignImages, syncRefunds, getAgeRestrictionTypes, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup, bulkStockUpdate } from "../lib/api";
 import { RefreshCw, Search, Plus, ChevronDown, ChevronUp, X, Save, Package, Trash2, CheckSquare, Square, Minus, Image, Download, Upload, Settings, ArrowRightLeft, Images, Layers, Tag, ChevronsLeft, ChevronsRight, ChevronLeft, ChevronRight } from "lucide-react";
 
 interface LocationStock {
@@ -56,8 +56,9 @@ export default function Inventory() {
   const [itemsPerPage, setItemsPerPage] = useState(50);
   const [editingPar, setEditingPar] = useState<{ sku: string; locName: string } | null>(null);
   const [parValue, setParValue] = useState("");
-  const [editingStock, setEditingStock] = useState<{ sku: string; locName: string } | null>(null);
-  const [stockValue, setStockValue] = useState("");
+  // Batch stock editing: key = "sku::locName", value = string (edited value)
+  const [pendingStockChanges, setPendingStockChanges] = useState<Map<string, { sku: string; locationId: number; locName: string; value: string; originalValue: number }>>(new Map());
+  const [savingStock, setSavingStock] = useState(false);
   const [showAddItem, setShowAddItem] = useState(false);
   const [newItem, setNewItem] = useState<{
     name: string;
@@ -961,6 +962,39 @@ export default function Inventory() {
     }
   };
 
+  const handleBatchStockSave = async () => {
+    // Filter to only changes where value actually changed
+    const changedEntries = Array.from(pendingStockChanges.values()).filter(
+      (c) => parseFloat(c.value) !== c.originalValue && !isNaN(parseFloat(c.value))
+    );
+    if (changedEntries.length === 0) {
+      setPendingStockChanges(new Map());
+      setToast({ type: "success", text: "No changes to save." });
+      setTimeout(() => setToast(null), 3000);
+      return;
+    }
+    setSavingStock(true);
+    try {
+      const updates = changedEntries.map((c) => ({
+        sku: c.sku,
+        location_id: c.locationId,
+        quantity: parseFloat(c.value),
+      }));
+      const resp = await bulkStockUpdate(updates);
+      const data = resp.data;
+      setPendingStockChanges(new Map());
+      setToast({ type: "success", text: `${data.total_updated} stock update(s) saved!` });
+      setTimeout(() => setToast(null), 4000);
+      await loadData();
+    } catch (err) {
+      console.error("Batch stock save error:", err);
+      setToast({ type: "error", text: "Failed to save stock changes" });
+      setTimeout(() => setToast(null), 5000);
+    } finally {
+      setSavingStock(false);
+    }
+  };
+
   const handleSyncRefunds = async () => {
     setSyncingRefunds(true);
     try {
@@ -995,6 +1029,29 @@ export default function Inventory() {
       {toast && (
         <div className={`fixed top-4 right-4 z-[60] px-4 py-3 rounded-lg shadow-lg text-sm font-medium transition-all ${toast.type === "success" ? "bg-green-600 text-white" : "bg-red-600 text-white"}`}>
           {toast.text}
+        </div>
+      )}
+      {/* Floating Save Bar for batch stock edits */}
+      {pendingStockChanges.size > 0 && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[60] bg-amber-600 text-white px-6 py-3 rounded-xl shadow-2xl flex items-center gap-4 animate-bounce-once">
+          <span className="text-sm font-medium">
+            {pendingStockChanges.size} stock edit{pendingStockChanges.size > 1 ? "s" : ""} pending
+          </span>
+          <button
+            onClick={handleBatchStockSave}
+            disabled={savingStock}
+            className="flex items-center gap-2 px-4 py-1.5 bg-white text-amber-700 rounded-lg text-sm font-bold hover:bg-amber-50 disabled:opacity-50 transition-colors"
+          >
+            <Save className="w-4 h-4" />
+            {savingStock ? "Saving..." : "Save All"}
+          </button>
+          <button
+            onClick={() => setPendingStockChanges(new Map())}
+            disabled={savingStock}
+            className="text-amber-200 hover:text-white text-sm disabled:opacity-50"
+          >
+            Discard
+          </button>
         </div>
       )}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
@@ -2554,55 +2611,60 @@ export default function Inventory() {
                   </td>
                   {locations.map((loc) => {
                     const locData = item.locations[loc.name];
-                    const isEditingStock =
-                      editingStock?.sku === item.sku && editingStock?.locName === loc.name;
+                    const changeKey = `${item.sku}::${loc.name}`;
+                    const pendingChange = pendingStockChanges.get(changeKey);
+                    const isEditing = !!pendingChange;
                     return (
                       <td key={loc.id} className="px-4 py-3 text-center">
                         {!locData ? (
                           <span className="text-gray-300 text-sm">—</span>
-                        ) : isEditingStock ? (
+                        ) : isEditing ? (
                           <div
                             className="flex items-center gap-1 justify-center"
                             onClick={(e) => e.stopPropagation()}
                           >
                             <input
                               type="number"
-                              value={stockValue}
-                              onChange={(e) => setStockValue(e.target.value)}
-                              className="w-16 px-2 py-1 border border-green-300 rounded text-sm text-center focus:ring-1 focus:ring-green-500 outline-none"
-                              autoFocus
+                              value={pendingChange.value}
+                              onChange={(e) => {
+                                const next = new Map(pendingStockChanges);
+                                next.set(changeKey, { ...pendingChange, value: e.target.value });
+                                setPendingStockChanges(next);
+                              }}
+                              className="w-16 px-2 py-1 border border-amber-400 rounded text-sm text-center focus:ring-1 focus:ring-amber-500 outline-none bg-amber-50"
                               onKeyDown={(e) => {
-                                if (e.key === "Enter") {
-                                  const val = parseFloat(stockValue);
-                                  if (!isNaN(val)) {
-                                    updateItem(item.sku, { stock_updates: [{ location_id: locData.location_id, quantity: val }] })
-                                      .then(() => { setEditingStock(null); setStockValue(""); loadData(); })
-                                      .catch((err) => console.error("Error updating stock:", err));
-                                  }
+                                if (e.key === "Escape") {
+                                  const next = new Map(pendingStockChanges);
+                                  next.delete(changeKey);
+                                  setPendingStockChanges(next);
                                 }
-                                if (e.key === "Escape") setEditingStock(null);
                               }}
                             />
                             <button
                               onClick={() => {
-                                const val = parseFloat(stockValue);
-                                if (!isNaN(val)) {
-                                  updateItem(item.sku, { stock_updates: [{ location_id: locData.location_id, quantity: val }] })
-                                    .then(() => { setEditingStock(null); setStockValue(""); loadData(); })
-                                    .catch((err) => console.error("Error updating stock:", err));
-                                }
+                                const next = new Map(pendingStockChanges);
+                                next.delete(changeKey);
+                                setPendingStockChanges(next);
                               }}
-                              className="text-green-600 hover:text-green-700 text-xs font-medium"
+                              className="text-gray-400 hover:text-red-500 text-xs"
+                              title="Cancel edit"
                             >
-                              Save
+                              <X className="w-3 h-3" />
                             </button>
                           </div>
                         ) : (
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
-                              setEditingStock({ sku: item.sku, locName: loc.name });
-                              setStockValue(locData.stock.toString());
+                              const next = new Map(pendingStockChanges);
+                              next.set(changeKey, {
+                                sku: item.sku,
+                                locationId: locData.location_id,
+                                locName: loc.name,
+                                value: locData.stock.toString(),
+                                originalValue: locData.stock,
+                              });
+                              setPendingStockChanges(next);
                             }}
                             className={`inline-block px-2.5 py-1 rounded-lg text-sm font-semibold cursor-pointer hover:ring-2 hover:ring-green-300 transition-all ${stockColor(
                               locData.stock,
