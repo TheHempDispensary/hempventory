@@ -52,6 +52,7 @@ export const deleteLocation = (id: number) =>
 
 // Inventory
 export const syncInventory = () => api.get("/api/inventory/sync");
+export const getCachedInventory = () => api.get("/api/inventory/cached");
 
 export const createItem = (data: {
   name: string;

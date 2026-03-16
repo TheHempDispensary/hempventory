@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo } from "react";
-import { syncInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, bulkAssignCategory, bulkAssignImages, syncRefunds, getAgeRestrictionTypes, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup } from "../lib/api";
+import { syncInventory, getCachedInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, bulkAssignCategory, bulkAssignImages, syncRefunds, getAgeRestrictionTypes, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup } from "../lib/api";
 import { RefreshCw, Search, Plus, ChevronDown, ChevronUp, X, Save, Package, Trash2, CheckSquare, Square, Minus, Image, Download, Upload, Settings, ArrowRightLeft, Images, Layers, Tag } from "lucide-react";
 
 interface LocationStock {
@@ -224,9 +224,9 @@ export default function Inventory() {
     }
   };
 
-  const loadData = async () => {
+  const loadData = async (forceSync = false) => {
     try {
-      const res = await syncInventory();
+      const res = forceSync ? await syncInventory() : await getCachedInventory();
       setItems(res.data.items);
       setLocations(res.data.locations);
     } catch (err) {
@@ -238,7 +238,7 @@ export default function Inventory() {
 
   const handleSync = async () => {
     setSyncing(true);
-    await loadData();
+    await loadData(true);
     setSyncing(false);
   };
 
@@ -2450,9 +2450,9 @@ export default function Inventory() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {filteredItems.map((item) => (
+              {filteredItems.map((item, idx) => (
                 <tr
-                  key={item.sku}
+                  key={`${item.sku}::${item.name}::${idx}`}
                   className={`hover:bg-green-50 cursor-pointer transition-colors ${selectedItems.has(item.sku) ? "bg-green-50/50" : ""}`}
                   onClick={(e) => {
                     const target = e.target as HTMLElement;

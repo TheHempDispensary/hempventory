@@ -2,12 +2,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import Optional
+import asyncio
 import aiosqlite
 import base64
 import os
 import json
 import io
 import itertools
+import time
 import httpx
 from PIL import Image as PILImage
 
@@ -16,6 +18,10 @@ from app.database import get_db
 from app.clover_client import CloverClient
 
 router = APIRouter(prefix="/api/inventory", tags=["inventory"])
+
+# In-memory cache for inventory data
+_inventory_cache: dict = {"items": [], "locations": [], "updated_at": 0}
+_cache_lock = asyncio.Lock()
 
 
 class LocationStockInput(BaseModel):
@@ -95,19 +101,15 @@ async def _get_par_levels(db: aiosqlite.Connection) -> dict:
     return {(row[0], row[1]): row[2] for row in rows}
 
 
-@router.get("/sync")
-async def sync_inventory(
-    user: dict = Depends(get_current_user),
-    db: aiosqlite.Connection = Depends(get_db),
-):
-    """Pull latest inventory from all Clover locations."""
+async def _do_sync(db: aiosqlite.Connection) -> dict:
+    """Core sync logic: pull latest inventory from all Clover locations."""
     locations = await _get_locations(db)
     if not locations:
         return {"items": [], "locations": []}
 
     par_levels = await _get_par_levels(db)
 
-    # Build a unified inventory keyed by SKU
+    # Build a unified inventory keyed by composite key
     inventory: dict[str, dict] = {}
     location_list = []
 
@@ -120,7 +122,6 @@ async def sync_inventory(
             data = await client.get_items(expand="itemStock,categories,ageRestricted,itemGroup")
             items = data.get("elements", [])
         except Exception as e:
-            # Skip location if API fails, log error
             print(f"Error syncing {loc_name}: {e}")
             continue
 
@@ -129,7 +130,6 @@ async def sync_inventory(
             clover_id = item.get("id", "")
             item_name = item.get("name", "")
             display_sku = raw_sku or clover_id
-            # Use composite key to distinguish different products sharing the same SKU
             merge_key = f"{display_sku}::{item_name}"
 
             item_stock = item.get("itemStock", {})
@@ -148,7 +148,6 @@ async def sync_inventory(
                     "categories": category_names,
                     "locations": {},
                     "clover_ids": {},
-                    # Extended Clover fields
                     "price_type": item.get("priceType", "FIXED"),
                     "cost": item.get("cost", 0),
                     "product_code": item.get("code", ""),
@@ -185,7 +184,45 @@ async def sync_inventory(
             item_data["has_image"] = False
 
     items_list = sorted(inventory.values(), key=lambda x: x["name"])
-    return {"items": items_list, "locations": location_list}
+    result = {"items": items_list, "locations": location_list}
+
+    # Update cache
+    async with _cache_lock:
+        _inventory_cache["items"] = result["items"]
+        _inventory_cache["locations"] = result["locations"]
+        _inventory_cache["updated_at"] = time.time()
+
+    return result
+
+
+@router.get("/sync")
+async def sync_inventory(
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Pull latest inventory from all Clover locations (full sync)."""
+    return await _do_sync(db)
+
+
+@router.get("/cached")
+async def get_cached_inventory(
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Return cached inventory if available, otherwise do a full sync."""
+    async with _cache_lock:
+        if _inventory_cache["updated_at"] > 0 and _inventory_cache["items"]:
+            return {
+                "items": _inventory_cache["items"],
+                "locations": _inventory_cache["locations"],
+                "cached": True,
+                "updated_at": _inventory_cache["updated_at"],
+            }
+    # No cache yet, do a full sync
+    result = await _do_sync(db)
+    result["cached"] = False
+    result["updated_at"] = _inventory_cache["updated_at"]
+    return result
 
 
 def _stock_status(stock: float, par: Optional[float]) -> str:
