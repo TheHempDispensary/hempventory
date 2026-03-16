@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo } from "react";
 import { syncInventory, getCachedInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, bulkAssignCategory, bulkAssignImages, syncRefunds, getAgeRestrictionTypes, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup } from "../lib/api";
-import { RefreshCw, Search, Plus, ChevronDown, ChevronUp, X, Save, Package, Trash2, CheckSquare, Square, Minus, Image, Download, Upload, Settings, ArrowRightLeft, Images, Layers, Tag } from "lucide-react";
+import { RefreshCw, Search, Plus, ChevronDown, ChevronUp, X, Save, Package, Trash2, CheckSquare, Square, Minus, Image, Download, Upload, Settings, ArrowRightLeft, Images, Layers, Tag, ChevronsLeft, ChevronsRight, ChevronLeft, ChevronRight } from "lucide-react";
 
 interface LocationStock {
   location_id: number;
@@ -52,6 +52,8 @@ export default function Inventory() {
   const [sortField, setSortField] = useState<"name" | "sku" | "stock" | "price" | "category" | "par">("name");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [sortLocation, setSortLocation] = useState<string>("");
+  const [currentPage, setCurrentPage] = useState(1);
+  const [itemsPerPage, setItemsPerPage] = useState(50);
   const [editingPar, setEditingPar] = useState<{ sku: string; locName: string } | null>(null);
   const [parValue, setParValue] = useState("");
   const [editingStock, setEditingStock] = useState<{ sku: string; locName: string } | null>(null);
@@ -302,6 +304,17 @@ export default function Inventory() {
 
     return filtered;
   }, [items, search, categoryFilter, locationFilter, sortField, sortDir, sortLocation]);
+
+  // Reset to page 1 when filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [search, categoryFilter, locationFilter, sortField, sortDir]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredItems.length / itemsPerPage));
+  const paginatedItems = useMemo(() => {
+    const start = (currentPage - 1) * itemsPerPage;
+    return filteredItems.slice(start, start + itemsPerPage);
+  }, [filteredItems, currentPage, itemsPerPage]);
 
   const handleSetPar = async (sku: string, locationId: number) => {
     const val = parseFloat(parValue);
@@ -2496,7 +2509,7 @@ export default function Inventory() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {filteredItems.map((item, idx) => (
+              {paginatedItems.map((item, idx) => (
                 <tr
                   key={`${item.sku}::${item.name}::${idx}`}
                   className={`hover:bg-green-50 cursor-pointer transition-colors ${selectedItems.has(item.id) ? "bg-green-50/50" : ""}`}
@@ -2661,6 +2674,62 @@ export default function Inventory() {
         {filteredItems.length === 0 && (
           <div className="text-center py-12 text-gray-500">
             No products found matching your filters.
+          </div>
+        )}
+        {/* Pagination Controls */}
+        {filteredItems.length > 0 && (
+          <div className="flex items-center justify-between px-4 py-3 border-t border-gray-200 bg-gray-50 rounded-b-xl">
+            <div className="flex items-center gap-2 text-sm text-gray-600">
+              <span>Show</span>
+              <select
+                value={itemsPerPage}
+                onChange={(e) => { setItemsPerPage(Number(e.target.value)); setCurrentPage(1); }}
+                className="px-2 py-1 border border-gray-300 rounded text-sm bg-white"
+              >
+                <option value={25}>25</option>
+                <option value={50}>50</option>
+                <option value={100}>100</option>
+                <option value={250}>250</option>
+              </select>
+              <span>of {filteredItems.length} items</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setCurrentPage(1)}
+                disabled={currentPage === 1}
+                className="p-1.5 rounded hover:bg-gray-200 disabled:opacity-30 disabled:cursor-not-allowed"
+                title="First page"
+              >
+                <ChevronsLeft className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                disabled={currentPage === 1}
+                className="p-1.5 rounded hover:bg-gray-200 disabled:opacity-30 disabled:cursor-not-allowed"
+                title="Previous page"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+              <span className="px-3 py-1 text-sm font-medium text-gray-700">
+                Page {currentPage} of {totalPages}
+              </span>
+              <button
+                onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                disabled={currentPage === totalPages}
+                className="p-1.5 rounded hover:bg-gray-200 disabled:opacity-30 disabled:cursor-not-allowed"
+                title="Next page"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => setCurrentPage(totalPages)}
+                disabled={currentPage === totalPages}
+                className="p-1.5 rounded hover:bg-gray-200 disabled:opacity-30 disabled:cursor-not-allowed"
+                title="Last page"
+              >
+                <ChevronsRight className="w-4 h-4" />
+              </button>
+            </div>
           </div>
         )}
       </div>

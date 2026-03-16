@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 load_dotenv()
@@ -122,6 +123,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Hemp Dispensary Inventory Manager", lifespan=lifespan)
+
+# Compress responses for faster transfer
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # Disable CORS. Do not remove this for full-stack development.
 app.add_middleware(
