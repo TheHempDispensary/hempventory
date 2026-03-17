@@ -1102,7 +1102,7 @@ async def get_image(
     return Response(
         content=image_bytes,
         media_type=row[1],
-        headers={"Cache-Control": "no-cache, must-revalidate", "ETag": str(row[2] or "")},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache"},
     )
 
 
