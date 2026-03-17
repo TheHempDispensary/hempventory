@@ -111,6 +111,7 @@ export default function EmployeeTimeClock() {
   const formatTime = (iso: string) => {
     const d = new Date(iso);
     return d.toLocaleString("en-US", {
+      timeZone: "America/New_York",
       month: "short", day: "numeric", year: "numeric",
       hour: "numeric", minute: "2-digit", hour12: true,
     });

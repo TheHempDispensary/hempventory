@@ -497,7 +497,7 @@ export default function Loyalty() {
                   <h3 className="font-semibold text-gray-900">POS Order Sync</h3>
                   <p className="text-xs text-gray-500">
                     {syncStatus?.last_sync
-                      ? `Last synced: ${new Date(syncStatus.last_sync).toLocaleString()}`
+                      ? `Last synced: ${new Date(syncStatus.last_sync).toLocaleString("en-US", { timeZone: "America/New_York" })}`
                       : "Never synced — click to sync POS orders and auto-award loyalty points"}
                   </p>
                 </div>
@@ -984,7 +984,7 @@ function CustomerDetail({
               ) : (
                 <h2 className="text-xl font-bold text-gray-900">{customer.first_name} {customer.last_name}</h2>
               )}
-              <p className="text-sm text-gray-500">Member since {new Date(customer.created_at).toLocaleDateString()}</p>
+              <p className="text-sm text-gray-500">Member since {new Date(customer.created_at).toLocaleDateString("en-US", { timeZone: "America/New_York" })}</p>
             </div>
           </div>
           <div className="flex gap-2">
@@ -1071,7 +1071,7 @@ function CustomerDetail({
             <div key={tx.id} className="px-5 py-3 flex items-center justify-between">
               <div>
                 <p className="text-sm text-gray-900">{tx.description}</p>
-                <p className="text-xs text-gray-400">{new Date(tx.created_at).toLocaleString()}{tx.location_name ? ` • ${tx.location_name}` : ""}</p>
+                <p className="text-xs text-gray-400">{new Date(tx.created_at).toLocaleString("en-US", { timeZone: "America/New_York" })}{tx.location_name ? ` • ${tx.location_name}` : ""}</p>
               </div>
               <span className={`text-sm font-semibold ${tx.points > 0 ? "text-green-600" : "text-red-500"}`}>
                 {tx.points > 0 ? "+" : ""}{tx.points}

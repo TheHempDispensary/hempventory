@@ -468,7 +468,7 @@ export default function SalesReport() {
                             return (
                               <tr key={order.id} className="border-b border-gray-50 hover:bg-gray-50">
                                 <td className="py-2 text-gray-900">
-                                  {dt.toLocaleDateString()} {dt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
+                                  {dt.toLocaleDateString("en-US", { timeZone: "America/New_York" })} {dt.toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit" })}
                                 </td>
                                 <td className="py-2 text-gray-600">{order.location}</td>
                                 <td className="py-2 text-right text-gray-600">{order.items}</td>

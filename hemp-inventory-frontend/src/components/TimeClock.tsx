@@ -264,6 +264,7 @@ export default function TimeClock() {
     if (!iso) return "---";
     const d = new Date(iso);
     return d.toLocaleString("en-US", {
+      timeZone: "America/New_York",
       month: "short",
       day: "numeric",
       hour: "numeric",
@@ -275,7 +276,7 @@ export default function TimeClock() {
   const formatDate = (iso: string | null) => {
     if (!iso) return "---";
     const d = new Date(iso);
-    return d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+    return d.toLocaleDateString("en-US", { timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric" });
   };
 
   const formatHours = (h: number | null) => {
