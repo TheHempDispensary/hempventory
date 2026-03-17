@@ -6,6 +6,7 @@ import aiosqlite
 import time
 import smtplib
 import asyncio
+import os
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -95,14 +96,14 @@ async def get_products(
             current_offset += 1000
 
     # Get image map from our database
-    image_base_url = "https://hemp-dispensary-api.fly.dev/api/inventory/images"
-    cursor = await db.execute("SELECT sku, product_name FROM product_images")
+    image_base_url = os.environ.get("BASE_URL", "https://thd-inventory-api.fly.dev") + "/api/inventory/images"
+    cursor = await db.execute("SELECT sku, product_name, updated_at FROM product_images")
     image_rows = await cursor.fetchall()
-    image_by_sku = {row[0]: f"{image_base_url}/{row[0]}" for row in image_rows}
+    image_by_sku = {row[0]: f"{image_base_url}/{row[0]}?t={row[2] or ''}" for row in image_rows}
     image_by_name = {}
     for row in image_rows:
         if row[1]:
-            image_by_name[row[1].upper()] = f"{image_base_url}/{row[0]}"
+            image_by_name[row[1].upper()] = f"{image_base_url}/{row[0]}?t={row[2] or ''}"
 
     # Build product list
     products = []
@@ -563,13 +564,13 @@ async def get_product_detail(
     stock = stock_info.get("quantity", 0) if stock_info else 0
 
     # Find image URL
-    image_base_url = "https://hemp-dispensary-api.fly.dev/api/inventory/images"
+    image_base_url = os.environ.get("BASE_URL", "https://thd-inventory-api.fly.dev") + "/api/inventory/images"
     cursor = await db.execute(
-        "SELECT sku FROM product_images WHERE sku = ? OR UPPER(product_name) = ?",
+        "SELECT sku, updated_at FROM product_images WHERE sku = ? OR UPPER(product_name) = ?",
         (sku, name.upper()),
     )
     row = await cursor.fetchone()
-    image_url = f"{image_base_url}/{row[0]}" if row else None
+    image_url = f"{image_base_url}/{row[0]}?t={row[1] or ''}" if row else None
 
     return {
         "id": item.get("id", ""),
