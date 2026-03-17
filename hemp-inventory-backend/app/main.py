@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
@@ -112,12 +113,8 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(_scheduled_refund_sync, "interval", minutes=15, id="refund_sync", replace_existing=True)
     scheduler.add_job(_scheduled_loyalty_sync, "interval", minutes=10, id="loyalty_sync", replace_existing=True)
     scheduler.start()
-    # Run initial inventory sync on startup (loyalty sync will run on its scheduled interval
-    # to avoid memory spike from running all syncs simultaneously on startup)
-    try:
-        await _scheduled_inventory_sync()
-    except Exception as e:
-        print(f"[startup] Initial inventory sync failed: {e}")
+    # Run initial inventory sync in background so server starts accepting requests immediately
+    asyncio.create_task(_scheduled_inventory_sync())
     yield
     scheduler.shutdown()
 

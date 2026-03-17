@@ -2596,9 +2596,19 @@ export default function Inventory() {
                     </button>
                   </td>
                   <td className="px-4 py-3">
-                    <p className="text-sm font-medium text-green-700 hover:text-green-800 underline decoration-green-200 hover:decoration-green-400" title={item.name}>
-                      {item.name}
-                    </p>
+                    <div className="flex items-center gap-2">
+                      {item.has_image && (
+                        <img
+                          src={getImageUrl(item.sku)}
+                          alt=""
+                          className="w-8 h-8 rounded object-cover border border-gray-200 flex-shrink-0"
+                          onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                        />
+                      )}
+                      <p className="text-sm font-medium text-green-700 hover:text-green-800 underline decoration-green-200 hover:decoration-green-400" title={item.name}>
+                        {item.name}
+                      </p>
+                    </div>
                   </td>
                   <td className="px-4 py-3 text-xs text-gray-500 font-mono">
                     {item.sku.length > 15 ? item.sku.slice(0, 15) + "..." : item.sku}
