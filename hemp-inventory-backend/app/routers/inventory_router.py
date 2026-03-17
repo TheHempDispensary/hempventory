@@ -191,10 +191,10 @@ async def _do_sync(db: aiosqlite.Connection) -> dict:
             }
             inventory[merge_key]["clover_ids"][loc_name] = clover_id
 
-    # Attach stored product images
-    cursor = await db.execute("SELECT sku, image_data, content_type FROM product_images")
+    # Attach stored product images (only fetch SKU, not the heavy image_data blob)
+    cursor = await db.execute("SELECT sku FROM product_images")
     image_rows = await cursor.fetchall()
-    image_map = {row[0]: {"has_image": True, "content_type": row[2]} for row in image_rows}
+    image_map = {row[0] for row in image_rows}
     for _key, item_data in inventory.items():
         if item_data["sku"] in image_map:
             item_data["has_image"] = True
