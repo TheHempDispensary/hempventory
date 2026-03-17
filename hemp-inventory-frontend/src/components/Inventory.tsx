@@ -104,6 +104,9 @@ export default function Inventory() {
   const [pushingToLocation, setPushingToLocation] = useState<number | null>(null);
   const [syncingRefunds, setSyncingRefunds] = useState(false);
 
+  // Cache-busting counter: incremented after image uploads to force browser to fetch fresh images
+  const [imageCacheBust, setImageCacheBust] = useState(() => Date.now());
+
   // Bulk category state
   const [showBulkCategory, setShowBulkCategory] = useState(false);
   const [bulkCategoryName, setBulkCategoryName] = useState("");
@@ -371,6 +374,7 @@ export default function Inventory() {
       setEditImageFile(null);
       setEditImagePreview(null);
       setSaveMessage({ type: "success", text: "Image uploaded successfully!" });
+      setImageCacheBust(Date.now());
       await loadData();
     } catch (err) {
       console.error("Error uploading image:", err);
@@ -387,6 +391,7 @@ export default function Inventory() {
       await deleteProductImage(editItem.sku);
       setEditImagePreview(null);
       setSaveMessage({ type: "success", text: "Image deleted." });
+      setImageCacheBust(Date.now());
       await loadData();
     } catch (err) {
       console.error("Error deleting image:", err);
@@ -536,7 +541,7 @@ export default function Inventory() {
     setEditTab("details");
     setSaveMessage(null);
     setEditImageFile(null);
-    setEditImagePreview(item.has_image ? getImageUrl(item.sku) : null);
+    setEditImagePreview(item.has_image ? getImageUrl(item.sku, imageCacheBust) : null);
     setEditItem(item);
   };
 
@@ -954,6 +959,7 @@ export default function Inventory() {
       if (d.assigned > 0) {
         setToast({ type: "success", text: `Image assigned to ${d.assigned} of ${bulkImageMatches.length} products` });
         setTimeout(() => setToast(null), 6000);
+        setImageCacheBust(Date.now());
         // Refresh data in background — don't block the UI
         loadData().catch(() => {});
       } else {
@@ -2252,7 +2258,7 @@ export default function Inventory() {
                             {imageUploading ? "Uploading..." : "Upload"}
                           </button>
                           <button
-                            onClick={() => { setEditImageFile(null); setEditImagePreview(editItem?.has_image ? getImageUrl(editItem.sku) : null); }}
+                            onClick={() => { setEditImageFile(null); setEditImagePreview(editItem?.has_image ? getImageUrl(editItem.sku, imageCacheBust) : null); }}
                             className="px-3 py-1.5 border border-gray-300 rounded-lg text-xs hover:bg-gray-50"
                           >
                             Cancel
@@ -2599,7 +2605,7 @@ export default function Inventory() {
                     <div className="flex items-center gap-2">
                       {item.has_image && (
                         <img
-                          src={getImageUrl(item.sku)}
+                          src={getImageUrl(item.sku, imageCacheBust)}
                           alt=""
                           className="w-8 h-8 rounded object-cover border border-gray-200 flex-shrink-0"
                           onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}

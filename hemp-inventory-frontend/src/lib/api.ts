@@ -160,8 +160,8 @@ export const updateAlertSettings = (data: {
 export const uploadImage = (sku: string, imageData: string, contentType: string = "image/png", productName?: string) =>
   api.post(`/api/inventory/images/${sku}`, { image_data: imageData, content_type: contentType, product_name: productName });
 
-export const getImageUrl = (sku: string) =>
-  `${API_URL}/api/inventory/images/${sku}`;
+export const getImageUrl = (sku: string, cacheBust?: number) =>
+  `${API_URL}/api/inventory/images/${sku}${cacheBust ? `?t=${cacheBust}` : ''}`;
 
 export const deleteImage = (sku: string) =>
   api.delete(`/api/inventory/images/${sku}`);

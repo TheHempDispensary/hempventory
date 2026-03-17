@@ -1092,14 +1092,18 @@ async def get_image(
 ):
     """Get a product image by SKU. Returns the raw image bytes."""
     cursor = await db.execute(
-        "SELECT image_data, content_type FROM product_images WHERE sku = ?", (sku,)
+        "SELECT image_data, content_type, updated_at FROM product_images WHERE sku = ?", (sku,)
     )
     row = await cursor.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="No image found for this SKU")
 
     image_bytes = base64.b64decode(row[0])
-    return Response(content=image_bytes, media_type=row[1])
+    return Response(
+        content=image_bytes,
+        media_type=row[1],
+        headers={"Cache-Control": "no-cache, must-revalidate", "ETag": str(row[2] or "")},
+    )
 
 
 @router.get("/images-list")
@@ -1133,7 +1137,7 @@ async def get_images_map(
     """Return a mapping of product names to image URLs.
     Public endpoint for e-commerce sites to know which products have custom images.
     Falls back to Clover API to resolve SKU -> product name if not stored locally."""
-    base_url = "https://hemp-dispensary-api.fly.dev/api/inventory/images"
+    base_url = "https://thd-inventory-api.fly.dev/api/inventory/images"
 
     # Get all images with their product names
     cursor = await db.execute(
