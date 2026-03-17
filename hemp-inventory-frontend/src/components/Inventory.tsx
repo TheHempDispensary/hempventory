@@ -56,7 +56,7 @@ export default function Inventory() {
   const [itemsPerPage, setItemsPerPage] = useState(50);
   const [editingPar, setEditingPar] = useState<{ sku: string; locName: string } | null>(null);
   const [parValue, setParValue] = useState("");
-  // Batch stock editing: key = "sku::locName", value = string (edited value)
+  // Batch stock editing: key = "itemId::locName", value = string (edited value)
   const [pendingStockChanges, setPendingStockChanges] = useState<Map<string, { sku: string; locationId: number; locName: string; value: string; originalValue: number }>>(new Map());
   const [savingStock, setSavingStock] = useState(false);
   const [showAddItem, setShowAddItem] = useState(false);
@@ -2634,7 +2634,7 @@ export default function Inventory() {
                   </td>
                   {locations.map((loc) => {
                     const locData = item.locations[loc.name];
-                    const changeKey = `${item.sku}::${loc.name}`;
+                    const changeKey = `${item.id}::${loc.name}`;
                     const pendingChange = pendingStockChanges.get(changeKey);
                     const isEditing = !!pendingChange;
                     return (

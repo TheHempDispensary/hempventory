@@ -313,11 +313,18 @@ async def create_item(
     first_created_sku = None
     for loc in locations:
         loc_id, loc_name, merchant_id, api_token = loc[0], loc[1], loc[2], loc[3]
+        # Skip locations without valid API tokens
+        if not api_token or not merchant_id:
+            results.append({"location": loc_name, "status": "skipped", "error": "No API credentials"})
+            continue
         try:
             client = CloverClient(merchant_id, api_token)
 
             # If age restricted, look up or create the ageRestrictedObj for this merchant
             loc_item_data = dict(item_data)
+            # If we already created at another location, set the same SKU so items merge during sync
+            if first_created_sku and "sku" not in loc_item_data:
+                loc_item_data["sku"] = first_created_sku
             if item.is_age_restricted and item.age_restriction_type:
                 age_obj = await _get_age_restriction_obj(
                     client, item.age_restriction_type,
@@ -331,9 +338,10 @@ async def create_item(
 
             created = await client.create_item(loc_item_data)
             clover_id = created.get("id", "")
-            # Track the first created SKU/ID for image storage
+            created_sku = created.get("sku", "") or item.sku or clover_id
+            # Track the first created SKU for merging across locations
             if not first_created_sku:
-                first_created_sku = item.sku or clover_id
+                first_created_sku = created_sku
 
             # Set stock: per-location amount takes priority, then initial_stock fallback
             loc_stock = stock_map.get(loc_id, item.initial_stock or 0)
@@ -998,6 +1006,9 @@ async def update_item(
     results = []
     for loc in locations:
         loc_id, loc_name, merchant_id, api_token = loc[0], loc[1], loc[2], loc[3]
+        # Skip locations without valid API tokens
+        if not api_token or not merchant_id:
+            continue
         try:
             client = CloverClient(merchant_id, api_token)
             # Find the item by SKU
