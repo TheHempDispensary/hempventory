@@ -954,7 +954,8 @@ export default function Inventory() {
       if (d.assigned > 0) {
         setToast({ type: "success", text: `Image assigned to ${d.assigned} of ${bulkImageMatches.length} products` });
         setTimeout(() => setToast(null), 6000);
-        await loadData();
+        // Refresh data in background — don't block the UI
+        loadData().catch(() => {});
       } else {
         setToast({ type: "error", text: `No products found matching "${bulkImageKeyword}"` });
         setTimeout(() => setToast(null), 4000);

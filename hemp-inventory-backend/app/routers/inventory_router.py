@@ -1077,7 +1077,11 @@ async def upload_image(
         (sku, data.image_data, data.content_type, data.product_name),
     )
     await db.commit()
-    await _invalidate_cache()
+    # Update cache in-place to reflect the new image without full re-sync
+    async with _cache_lock:
+        for item in _inventory_cache.get("items", []):
+            if item["sku"] == sku:
+                item["has_image"] = True
     return {"status": "ok", "sku": sku}
 
 
@@ -1583,9 +1587,13 @@ async def bulk_assign_images(
 
     await db.commit()
 
-    # Invalidate cache so the next inventory fetch picks up has_image changes
+    # Update cache in-place to reflect new images without full re-sync
     if assigned > 0:
-        await _invalidate_cache()
+        assigned_skus = set(matching_skus.keys())
+        async with _cache_lock:
+            for item in _inventory_cache.get("items", []):
+                if item["sku"] in assigned_skus:
+                    item["has_image"] = True
 
     return {
         "status": "done",
