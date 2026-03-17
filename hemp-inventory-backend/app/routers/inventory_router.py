@@ -1077,6 +1077,7 @@ async def upload_image(
         (sku, data.image_data, data.content_type, data.product_name),
     )
     await db.commit()
+    await _invalidate_cache()
     return {"status": "ok", "sku": sku}
 
 
@@ -1581,6 +1582,10 @@ async def bulk_assign_images(
             skipped += 1
 
     await db.commit()
+
+    # Invalidate cache so the next inventory fetch picks up has_image changes
+    if assigned > 0:
+        await _invalidate_cache()
 
     return {
         "status": "done",
