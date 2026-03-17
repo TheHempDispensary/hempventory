@@ -17,7 +17,6 @@ bcrypt = "^5.0.0"
 python-jose = {extras = ["cryptography"], version = "^3.5.0"}
 apscheduler = "^3.11.2"
 aiosmtplib = "^5.1.0"
-openai = "^2.26.0"
 pillow = "^12.1.1"
 
 

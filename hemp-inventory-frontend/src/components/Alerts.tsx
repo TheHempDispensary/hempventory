@@ -188,7 +188,7 @@ export default function Alerts() {
                       </span>
                     </td>
                     <td className="px-4 py-3 text-xs text-gray-500">
-                      {new Date(h.notified_at + "Z").toLocaleString()}
+                      {new Date(h.notified_at + "Z").toLocaleString("en-US", { timeZone: "America/New_York" })}
                     </td>
                   </tr>
                 ))}

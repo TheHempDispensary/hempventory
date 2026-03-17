@@ -256,6 +256,27 @@ class CloverClient:
                 current_offset += limit
             return {"elements": all_refunds}
 
+    async def get_employees(self, limit: int = 100) -> dict:
+        """Get all employees for this merchant."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            all_employees = []
+            current_offset = 0
+            while True:
+                resp = await self._request_with_retry(
+                    client, "get",
+                    f"{self.base_url}/employees",
+                    headers=self._headers(),
+                    params={"limit": limit, "offset": current_offset},
+                )
+                data = resp.json()
+                elements = data.get("elements", [])
+                all_employees.extend(elements)
+                if len(elements) < limit:
+                    break
+                current_offset += limit
+                await asyncio.sleep(0.3)
+            return {"elements": all_employees}
+
     async def get_merchant_info(self) -> dict:
         """Get merchant info."""
         async with httpx.AsyncClient(timeout=30.0) as client:

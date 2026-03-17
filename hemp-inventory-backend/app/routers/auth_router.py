@@ -6,6 +6,7 @@ from app.auth import (
     DEFAULT_PASSWORD,
     DEFAULT_USERNAME,
     create_access_token,
+    create_employee_token,
     get_current_user,
     hash_password,
     verify_password,
@@ -60,9 +61,47 @@ async def login(request: LoginRequest, db: aiosqlite.Connection = Depends(get_db
     return TokenResponse(access_token=access_token)
 
 
+class EmployeeLoginRequest(BaseModel):
+    username: str
+    pin: str
+
+
+@router.post("/employee-login", response_model=TokenResponse)
+async def employee_login(request: EmployeeLoginRequest, db: aiosqlite.Connection = Depends(get_db)):
+    """Login for employees using username + PIN. Only grants time clock access."""
+    cursor = await db.execute(
+        "SELECT id, name, pin, active, username FROM employees WHERE LOWER(username) = LOWER(?)",
+        (request.username,),
+    )
+    emp = await cursor.fetchone()
+    if not emp:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or PIN",
+        )
+    emp_id, emp_name, emp_pin, emp_active, emp_username = emp[0], emp[1], emp[2], emp[3], emp[4]
+    if not emp_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Account is inactive",
+        )
+    if emp_pin != request.pin:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or PIN",
+        )
+    access_token = create_employee_token(emp_id, emp_username, emp_name)
+    return TokenResponse(access_token=access_token)
+
+
 @router.get("/me")
 async def get_me(user: dict = Depends(get_current_user)):
-    return {"username": user["username"]}
+    return {
+        "username": user["username"],
+        "role": user.get("role", "admin"),
+        "employee_id": user.get("employee_id"),
+        "name": user.get("name"),
+    }
 
 
 @router.post("/change-password")

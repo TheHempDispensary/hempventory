@@ -2,12 +2,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import Optional
+import asyncio
 import aiosqlite
 import base64
 import os
 import json
 import io
 import itertools
+import time
 import httpx
 from PIL import Image as PILImage
 
@@ -16,6 +18,28 @@ from app.database import get_db
 from app.clover_client import CloverClient
 
 router = APIRouter(prefix="/api/inventory", tags=["inventory"])
+
+# In-memory cache for inventory data
+_inventory_cache: dict = {"items": [], "locations": [], "updated_at": 0}
+_cache_lock = asyncio.Lock()
+
+
+async def _invalidate_cache():
+    """Clear inventory cache so next /cached call triggers a fresh sync."""
+    async with _cache_lock:
+        _inventory_cache["updated_at"] = 0
+
+
+async def _remove_from_cache(skus: list):
+    """Remove items with given SKUs directly from cache (no re-sync needed)."""
+    async with _cache_lock:
+        if _inventory_cache["items"]:
+            sku_set = set(skus)
+            _inventory_cache["items"] = [
+                item for item in _inventory_cache["items"]
+                if item["sku"] not in sku_set
+            ]
+            _inventory_cache["updated_at"] = time.time()
 
 
 class LocationStockInput(BaseModel):
@@ -47,7 +71,6 @@ class ItemCreate(BaseModel):
     hidden: Optional[bool] = False  # hidden from POS
     auto_manage: Optional[bool] = True  # auto manage stock
     default_tax_rates: Optional[bool] = True
-    image_description: Optional[str] = None  # Description for AI image generation
 
 
 class StockUpdate(BaseModel):
@@ -96,19 +119,15 @@ async def _get_par_levels(db: aiosqlite.Connection) -> dict:
     return {(row[0], row[1]): row[2] for row in rows}
 
 
-@router.get("/sync")
-async def sync_inventory(
-    user: dict = Depends(get_current_user),
-    db: aiosqlite.Connection = Depends(get_db),
-):
-    """Pull latest inventory from all Clover locations."""
+async def _do_sync(db: aiosqlite.Connection) -> dict:
+    """Core sync logic: pull latest inventory from all Clover locations."""
     locations = await _get_locations(db)
     if not locations:
         return {"items": [], "locations": []}
 
     par_levels = await _get_par_levels(db)
 
-    # Build a unified inventory keyed by SKU
+    # Build a unified inventory keyed by composite key
     inventory: dict[str, dict] = {}
     location_list = []
 
@@ -121,29 +140,32 @@ async def sync_inventory(
             data = await client.get_items(expand="itemStock,categories,ageRestricted,itemGroup")
             items = data.get("elements", [])
         except Exception as e:
-            # Skip location if API fails, log error
             print(f"Error syncing {loc_name}: {e}")
             continue
 
         for item in items:
-            sku = item.get("sku", "") or item.get("id", "")
+            raw_sku = item.get("sku", "") or ""
+            clover_id = item.get("id", "")
+            item_name = " ".join((item.get("name", "") or "").split())  # normalize whitespace
+            display_sku = raw_sku or clover_id
+            merge_key = f"{display_sku}::{item_name}"
+
             item_stock = item.get("itemStock", {})
             quantity = item_stock.get("quantity", 0) if item_stock else 0
 
             categories = item.get("categories", {}).get("elements", [])
             category_names = [c.get("name", "") for c in categories]
 
-            par = par_levels.get((sku, loc_id), None)
+            par = par_levels.get((display_sku, loc_id), None)
 
-            if sku not in inventory:
-                inventory[sku] = {
-                    "sku": sku,
-                    "name": item.get("name", ""),
+            if merge_key not in inventory:
+                inventory[merge_key] = {
+                    "sku": display_sku,
+                    "name": item_name,
                     "price": item.get("price", 0),
                     "categories": category_names,
                     "locations": {},
                     "clover_ids": {},
-                    # Extended Clover fields
                     "price_type": item.get("priceType", "FIXED"),
                     "cost": item.get("cost", 0),
                     "product_code": item.get("code", ""),
@@ -160,27 +182,69 @@ async def sync_inventory(
                     "default_tax_rates": item.get("defaultTaxRates", True),
                 }
 
-            inventory[sku]["locations"][loc_name] = {
+            inventory[merge_key]["locations"][loc_name] = {
                 "location_id": loc_id,
                 "stock": quantity,
                 "par_level": par,
                 "status": _stock_status(quantity, par),
-                "clover_item_id": item.get("id", ""),
+                "clover_item_id": clover_id,
             }
-            inventory[sku]["clover_ids"][loc_name] = item.get("id", "")
+            inventory[merge_key]["clover_ids"][loc_name] = clover_id
 
-    # Attach stored product images
-    cursor = await db.execute("SELECT sku, image_data, content_type FROM product_images")
+    # Attach stored product images (only fetch SKU, not the heavy image_data blob)
+    cursor = await db.execute("SELECT sku FROM product_images")
     image_rows = await cursor.fetchall()
-    image_map = {row[0]: {"has_image": True, "content_type": row[2]} for row in image_rows}
-    for sku, item_data in inventory.items():
-        if sku in image_map:
+    image_map = {row[0] for row in image_rows}
+    for _key, item_data in inventory.items():
+        if item_data["sku"] in image_map:
             item_data["has_image"] = True
         else:
             item_data["has_image"] = False
 
+    # Add a unique id to each item for frontend selection
+    for key, item_data in inventory.items():
+        item_data["id"] = key  # composite key "sku::name"
+
     items_list = sorted(inventory.values(), key=lambda x: x["name"])
-    return {"items": items_list, "locations": location_list}
+    result = {"items": items_list, "locations": location_list}
+
+    # Update cache
+    async with _cache_lock:
+        _inventory_cache["items"] = result["items"]
+        _inventory_cache["locations"] = result["locations"]
+        _inventory_cache["updated_at"] = time.time()
+
+    return result
+
+
+@router.get("/sync")
+async def sync_inventory(
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Pull latest inventory from all Clover locations (full sync)."""
+    return await _do_sync(db)
+
+
+@router.get("/cached")
+async def get_cached_inventory(
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Return cached inventory if available, otherwise do a full sync."""
+    async with _cache_lock:
+        if _inventory_cache["updated_at"] > 0 and _inventory_cache["items"]:
+            return {
+                "items": _inventory_cache["items"],
+                "locations": _inventory_cache["locations"],
+                "cached": True,
+                "updated_at": _inventory_cache["updated_at"],
+            }
+    # No cache yet, do a full sync
+    result = await _do_sync(db)
+    result["cached"] = False
+    result["updated_at"] = _inventory_cache["updated_at"]
+    return result
 
 
 def _stock_status(stock: float, par: Optional[float]) -> str:
@@ -246,14 +310,6 @@ async def create_item(
     else:
         item_data["isAgeRestricted"] = False
 
-    # Generate AI image if description provided
-    generated_image_url: Optional[str] = None
-    if item.image_description:
-        try:
-            generated_image_url = await _generate_product_image(item.image_description, item.name, item.category)
-        except Exception as img_err:
-            print(f"Error generating AI image: {img_err}")
-
     first_created_sku = None
     for loc in locations:
         loc_id, loc_name, merchant_id, api_token = loc[0], loc[1], loc[2], loc[3]
@@ -312,8 +368,6 @@ async def create_item(
                 "clover_id": clover_id,
                 "status": "created",
             }
-            if generated_image_url:
-                result_entry["generated_image_url"] = generated_image_url
             results.append(result_entry)
         except httpx.HTTPStatusError as e:
             # Capture the actual Clover error response body
@@ -335,29 +389,7 @@ async def create_item(
                 "error": str(e),
             })
 
-    # If AI image was generated, download and store it
-    if generated_image_url and first_created_sku:
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as dl_client:
-                img_resp = await dl_client.get(generated_image_url)
-                img_resp.raise_for_status()
-                image_bytes = img_resp.content
-                content_type = img_resp.headers.get("content-type", "image/png")
-                image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-            await db.execute(
-                """INSERT INTO product_images (sku, image_data, content_type, product_name, updated_at)
-                   VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-                   ON CONFLICT(sku) DO UPDATE SET
-                     image_data = excluded.image_data,
-                     content_type = excluded.content_type,
-                     product_name = COALESCE(excluded.product_name, product_images.product_name),
-                     updated_at = CURRENT_TIMESTAMP""",
-                (first_created_sku, image_b64, content_type, item.name),
-            )
-            await db.commit()
-        except Exception as store_err:
-            print(f"Error storing generated image: {store_err}")
-
+    await _invalidate_cache()
     return {"results": results, "sku": first_created_sku}
 
 
@@ -399,33 +431,6 @@ async def get_age_restriction_types(
             for name, type_id in AGE_RESTRICTION_TYPE_IDS.items()
         ]
     }
-
-
-async def _generate_product_image(image_description: str, product_name: str, category: Optional[str] = None) -> str:
-    """Generate a product image using OpenAI DALL-E and return the URL."""
-    openai_key = os.environ.get("OPENAI_API_KEY", "")
-    if not openai_key:
-        raise ValueError("OPENAI_API_KEY not set")
-
-    prompt = f"Professional product photo: {image_description}. Product: {product_name}"
-    if category:
-        prompt += f", category: {category}"
-    prompt += ". Clean white background, high quality commercial product photography, centered, well-lit, no text or watermarks"
-
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.post(
-            "https://api.openai.com/v1/images/generations",
-            headers={"Authorization": f"Bearer {openai_key}"},
-            json={
-                "model": "dall-e-3",
-                "prompt": prompt,
-                "n": 1,
-                "size": "1024x1024",
-                "response_format": "url",
-            },
-        )
-        resp.raise_for_status()
-        return resp.json()["data"][0]["url"]
 
 
 class BulkAutoManageRequest(BaseModel):
@@ -722,6 +727,133 @@ async def push_item_to_location(
         raise HTTPException(status_code=500, detail=f"Failed to create item at {target_loc_name}: {str(e)}")
 
 
+class BulkCategoryRequest(BaseModel):
+    skus: list[str]
+    category_name: str
+
+
+@router.post("/bulk-assign-category")
+async def bulk_assign_category(
+    req: BulkCategoryRequest,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Assign a category to multiple items across all Clover locations."""
+    locations = await _get_locations(db)
+    if not locations:
+        raise HTTPException(status_code=400, detail="No locations configured")
+
+    results: list[dict] = []
+    total_assigned = 0
+
+    for loc in locations:
+        loc_id, loc_name, merchant_id, api_token = loc[0], loc[1], loc[2], loc[3]
+        try:
+            client = CloverClient(merchant_id, api_token)
+
+            # Get or create the category in this merchant account
+            cat_data = await client.get_categories()
+            cat_elements = cat_data.get("elements", [])
+            existing = [c for c in cat_elements if c.get("name", "").lower() == req.category_name.lower()]
+            if existing:
+                cat_id = existing[0]["id"]
+            else:
+                new_cat = await client.create_category(req.category_name)
+                cat_id = new_cat["id"]
+
+            # Get all items to find matching ones
+            all_items_data = await client.get_items()
+            all_items = all_items_data.get("elements", [])
+
+            assigned_count = 0
+            for sku in req.skus:
+                # Match by SKU or by Clover item ID (for items with no SKU)
+                matching = [i for i in all_items if i.get("sku") == sku or i.get("id") == sku]
+                for item in matching:
+                    # Check if category is already assigned
+                    item_cats = item.get("categories", {}).get("elements", [])
+                    already_has = any(c.get("id") == cat_id for c in item_cats)
+                    if already_has:
+                        continue
+                    try:
+                        await client.assign_category(item["id"], cat_id)
+                        assigned_count += 1
+                    except Exception:
+                        pass  # skip individual failures
+
+            total_assigned += assigned_count
+            results.append({"location": loc_name, "assigned": assigned_count, "status": "ok"})
+        except Exception as e:
+            results.append({"location": loc_name, "assigned": 0, "status": "error", "error": str(e)})
+
+    await _invalidate_cache()
+    return {"category": req.category_name, "total_assigned": total_assigned, "results": results}
+
+
+class BulkStockUpdateItem(BaseModel):
+    sku: str
+    location_id: int
+    quantity: float
+
+
+class BulkStockUpdateRequest(BaseModel):
+    updates: list[BulkStockUpdateItem]
+
+
+@router.post("/items/bulk-stock-update")
+async def bulk_stock_update(
+    req: BulkStockUpdateRequest,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Update stock for multiple items across locations in one call."""
+    locations = await _get_locations(db)
+    if not locations:
+        raise HTTPException(status_code=400, detail="No locations configured")
+
+    # Build lookup: location_id -> (merchant_id, api_token, name)
+    loc_map: dict[int, tuple] = {}
+    for loc in locations:
+        loc_map[loc[0]] = (loc[2], loc[3], loc[1])
+
+    # Cache Clover items per location to avoid repeated API calls
+    items_cache: dict[int, list] = {}
+    results = []
+
+    for upd in req.updates:
+        if upd.location_id not in loc_map:
+            results.append({"sku": upd.sku, "location_id": upd.location_id, "status": "location_not_found"})
+            continue
+
+        merchant_id, api_token, loc_name = loc_map[upd.location_id]
+        client = CloverClient(merchant_id, api_token)
+
+        # Fetch and cache items for this location
+        if upd.location_id not in items_cache:
+            try:
+                data = await client.get_items(expand="itemStock")
+                items_cache[upd.location_id] = data.get("elements", [])
+            except Exception as e:
+                results.append({"sku": upd.sku, "location": loc_name, "status": "error", "error": str(e)})
+                continue
+
+        clover_items = items_cache[upd.location_id]
+        matching = [i for i in clover_items if (i.get("sku") or i.get("id", "")) == upd.sku]
+        if not matching:
+            results.append({"sku": upd.sku, "location": loc_name, "status": "not_found"})
+            continue
+
+        try:
+            for match in matching:
+                await client.update_item_stock(match["id"], int(upd.quantity))
+            results.append({"sku": upd.sku, "location": loc_name, "status": "updated", "quantity": upd.quantity})
+        except Exception as e:
+            results.append({"sku": upd.sku, "location": loc_name, "status": "error", "error": str(e)})
+
+    await _invalidate_cache()
+    return {"results": results, "total_updated": sum(1 for r in results if r.get("status") == "updated")}
+
+
 class BulkDeleteRequest(BaseModel):
     skus: list[str]
 
@@ -761,6 +893,7 @@ async def bulk_delete_items(
         await db.commit()
         all_results.append({"sku": sku, "results": sku_results})
 
+    await _remove_from_cache(req.skus)
     return {"results": all_results}
 
 
@@ -797,6 +930,7 @@ async def delete_item(
     await db.execute("DELETE FROM par_levels WHERE sku = ?", (sku,))
     await db.commit()
 
+    await _remove_from_cache([sku])
     return {"results": results}
 
 
@@ -905,6 +1039,7 @@ async def update_item(
         except Exception as e:
             results.append({"location": loc_name, "status": "error", "error": str(e)})
 
+    await _invalidate_cache()
     return {"results": results}
 
 
@@ -912,12 +1047,6 @@ class ImageUpload(BaseModel):
     image_data: str  # base64 encoded image data
     content_type: str = "image/png"
     product_name: Optional[str] = None
-
-
-class ImageGenerate(BaseModel):
-    description: str
-    product_name: str
-    category: Optional[str] = None
 
 
 @router.post("/images/{sku}")
@@ -948,24 +1077,56 @@ async def upload_image(
         (sku, data.image_data, data.content_type, data.product_name),
     )
     await db.commit()
+    # Update cache in-place to reflect the new image without full re-sync
+    async with _cache_lock:
+        for item in _inventory_cache.get("items", []):
+            if item["sku"] == sku:
+                item["has_image"] = True
     return {"status": "ok", "sku": sku}
 
 
 @router.get("/images/{sku}")
 async def get_image(
     sku: str,
+    w: Optional[int] = None,
     db: aiosqlite.Connection = Depends(get_db),
 ):
-    """Get a product image by SKU. Returns the raw image bytes."""
+    """Get a product image by SKU. Returns the raw image bytes.
+    Optional ?w=300 parameter to get a resized thumbnail for faster loading."""
     cursor = await db.execute(
-        "SELECT image_data, content_type FROM product_images WHERE sku = ?", (sku,)
+        "SELECT image_data, content_type, updated_at FROM product_images WHERE sku = ?", (sku,)
     )
     row = await cursor.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="No image found for this SKU")
 
     image_bytes = base64.b64decode(row[0])
-    return Response(content=image_bytes, media_type=row[1])
+
+    # If width parameter provided, resize the image for faster loading
+    if w and 50 <= w <= 1200:
+        try:
+            img = PILImage.open(io.BytesIO(image_bytes))
+            ratio = w / img.width
+            new_height = int(img.height * ratio)
+            img = img.resize((w, new_height), PILImage.LANCZOS)
+            buf = io.BytesIO()
+            # Save as WebP for smaller file size, fall back to original format
+            try:
+                img.save(buf, format="WEBP", quality=80)
+                media_type = "image/webp"
+            except Exception:
+                fmt = "PNG" if row[1] == "image/png" else "JPEG"
+                img.save(buf, format=fmt, quality=85)
+                media_type = row[1]
+            image_bytes = buf.getvalue()
+        except Exception:
+            pass  # Fall back to original image if resize fails
+
+    return Response(
+        content=image_bytes,
+        media_type=row[1] if not w else media_type if w and 50 <= w <= 1200 else row[1],
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache"},
+    )
 
 
 @router.get("/images-list")
@@ -999,7 +1160,7 @@ async def get_images_map(
     """Return a mapping of product names to image URLs.
     Public endpoint for e-commerce sites to know which products have custom images.
     Falls back to Clover API to resolve SKU -> product name if not stored locally."""
-    base_url = "https://hemp-dispensary-api.fly.dev/api/inventory/images"
+    base_url = "https://thd-inventory-api.fly.dev/api/inventory/images"
 
     # Get all images with their product names
     cursor = await db.execute(
@@ -1111,48 +1272,6 @@ async def delete_image(
     await db.execute("DELETE FROM product_images WHERE sku = ?", (sku,))
     await db.commit()
     return {"status": "ok", "sku": sku}
-
-
-@router.post("/images/{sku}/generate")
-async def generate_image(
-    sku: str,
-    data: ImageGenerate,
-    user: dict = Depends(get_current_user),
-    db: aiosqlite.Connection = Depends(get_db),
-):
-    """Generate an AI product image and store it."""
-    try:
-        image_url = await _generate_product_image(
-            data.description, data.product_name, data.category
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Image generation failed: {e}")
-
-    # Download the generated image and store as base64
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(image_url)
-            resp.raise_for_status()
-            image_bytes = resp.content
-            content_type = resp.headers.get("content-type", "image/png")
-            image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to download generated image: {e}")
-
-    await db.execute(
-        """INSERT INTO product_images (sku, image_data, content_type, product_name, updated_at)
-           VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-           ON CONFLICT(sku) DO UPDATE SET
-             image_data = excluded.image_data,
-             content_type = excluded.content_type,
-             product_name = COALESCE(excluded.product_name, product_images.product_name),
-             updated_at = CURRENT_TIMESTAMP""",
-        (sku, image_b64, content_type, data.product_name),
-    )
-    await db.commit()
-    return {"status": "ok", "sku": sku, "generated_url": image_url}
 
 
 @router.post("/sync-refunds")
@@ -1380,6 +1499,8 @@ async def transfer_stock(
         "to_stock_before": dest_stock,
         "to_stock_after": new_to_stock,
     }
+    await _invalidate_cache()
+    return result
 
 
 def _remove_white_background(image_bytes: bytes, threshold: int = 240, edge_softness: int = 20) -> tuple[bytes, str]:
@@ -1492,6 +1613,14 @@ async def bulk_assign_images(
             skipped += 1
 
     await db.commit()
+
+    # Update cache in-place to reflect new images without full re-sync
+    if assigned > 0:
+        assigned_skus = set(matching_skus.keys())
+        async with _cache_lock:
+            for item in _inventory_cache.get("items", []):
+                if item["sku"] in assigned_skus:
+                    item["has_image"] = True
 
     return {
         "status": "done",

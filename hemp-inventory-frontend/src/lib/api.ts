@@ -19,7 +19,8 @@ api.interceptors.response.use(
   (error) => {
     if (error.response?.status === 401) {
       localStorage.removeItem("token");
-      window.location.href = "/login";
+      localStorage.removeItem("userRole");
+      window.location.href = "/";
     }
     return Promise.reject(error);
   }
@@ -52,6 +53,7 @@ export const deleteLocation = (id: number) =>
 
 // Inventory
 export const syncInventory = () => api.get("/api/inventory/sync");
+export const getCachedInventory = () => api.get("/api/inventory/cached");
 
 export const createItem = (data: {
   name: string;
@@ -76,7 +78,6 @@ export const createItem = (data: {
   hidden?: boolean;
   auto_manage?: boolean;
   default_tax_rates?: boolean;
-  image_description?: string;
 }) => api.post("/api/inventory/items", data);
 
 export const getAgeRestrictionTypes = () =>
@@ -98,6 +99,12 @@ export const fixPosScanning = () => api.post("/api/inventory/fix-pos");
 
 export const transferStock = (sku: string, fromLocationId: number, toLocationId: number, quantity: number) =>
   api.post("/api/inventory/transfer-stock", { sku, from_location_id: fromLocationId, to_location_id: toLocationId, quantity });
+
+export const bulkAssignCategory = (skus: string[], categoryName: string) =>
+  api.post("/api/inventory/bulk-assign-category", { skus, category_name: categoryName });
+
+export const bulkStockUpdate = (updates: { sku: string; location_id: number; quantity: number }[]) =>
+  api.post("/api/inventory/items/bulk-stock-update", { updates });
 
 export const bulkAssignImages = (keyword: string, imageData: string, contentType: string = "image/png", skus?: string[]) =>
   api.post("/api/inventory/bulk-assign-images", { keyword, image_data: imageData, content_type: contentType, skus: skus || null });
@@ -153,14 +160,11 @@ export const updateAlertSettings = (data: {
 export const uploadImage = (sku: string, imageData: string, contentType: string = "image/png", productName?: string) =>
   api.post(`/api/inventory/images/${sku}`, { image_data: imageData, content_type: contentType, product_name: productName });
 
-export const getImageUrl = (sku: string) =>
-  `${API_URL}/api/inventory/images/${sku}`;
+export const getImageUrl = (sku: string, cacheBust?: number) =>
+  `${API_URL}/api/inventory/images/${sku}${cacheBust ? `?t=${cacheBust}` : ''}`;
 
 export const deleteImage = (sku: string) =>
   api.delete(`/api/inventory/images/${sku}`);
-
-export const generateImage = (sku: string, description: string, productName: string, category?: string) =>
-  api.post(`/api/inventory/images/${sku}/generate`, { description, product_name: productName, category });
 
 // Loyalty Program
 export const getLoyaltyDashboard = () => api.get("/api/loyalty/dashboard");
@@ -270,5 +274,64 @@ export const createItemGroup = (data: {
   auto_manage?: boolean;
   default_tax_rates?: boolean;
 }) => api.post("/api/inventory/item-groups", data);
+
+// Time Clock
+export const getEmployees = () => api.get("/api/timeclock/employees");
+
+export const createEmployee = (data: { name: string; pin?: string }) =>
+  api.post("/api/timeclock/employees", data);
+
+export const updateEmployee = (id: number, data: { name?: string; pin?: string; active?: boolean }) =>
+  api.put(`/api/timeclock/employees/${id}`, data);
+
+export const deleteEmployee = (id: number) =>
+  api.delete(`/api/timeclock/employees/${id}`);
+
+export const clockIn = (employeeId: number) =>
+  api.post("/api/timeclock/clock-in", { employee_id: employeeId });
+
+export const clockOut = (employeeId: number) =>
+  api.post("/api/timeclock/clock-out", { employee_id: employeeId });
+
+export const getActiveClocks = () => api.get("/api/timeclock/active");
+
+export const getTimeEntries = (params?: { start_date?: string; end_date?: string; employee_id?: number }) =>
+  api.get("/api/timeclock/entries", { params });
+
+export const updateTimeEntry = (id: number, data: { clock_in?: string; clock_out?: string }) =>
+  api.put(`/api/timeclock/entries/${id}`, data);
+
+export const deleteTimeEntry = (id: number) =>
+  api.delete(`/api/timeclock/entries/${id}`);
+
+export const syncEmployeesFromClover = () =>
+  api.post("/api/timeclock/sync-employees");
+
+export const getTimeclockExportUrl = (params?: { start_date?: string; end_date?: string; employee_id?: number }) => {
+  const url = new URL(`${API_URL}/api/timeclock/export`);
+  if (params?.start_date) url.searchParams.set("start_date", params.start_date);
+  if (params?.end_date) url.searchParams.set("end_date", params.end_date);
+  if (params?.employee_id) url.searchParams.set("employee_id", params.employee_id.toString());
+  return url.toString();
+};
+
+// Sales Report
+export const getSalesReport = (params?: { start_date?: string; end_date?: string }) =>
+  api.get("/api/sales/report", { params });
+
+// Employee Auth
+export const employeeLogin = (username: string, pin: string) =>
+  api.post("/api/auth/employee-login", { username, pin });
+
+// Employee Self-Service
+export const getMyProfile = () => api.get("/api/timeclock/my-profile");
+export const myClockIn = () => api.post("/api/timeclock/my-clock-in");
+export const myClockOut = () => api.post("/api/timeclock/my-clock-out");
+export const getMyClockStatus = () => api.get("/api/timeclock/my-status");
+export const getMyEntries = (params?: { start_date?: string; end_date?: string }) =>
+  api.get("/api/timeclock/my-entries", { params });
+
+// Seed employees
+export const seedEmployees = () => api.post("/api/timeclock/seed-employees");
 
 export default api;

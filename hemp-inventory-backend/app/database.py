@@ -235,6 +235,50 @@ async def init_db():
             )
         """)
 
+        # Time clock tables
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS employees (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                nickname TEXT,
+                phone TEXT,
+                email TEXT,
+                role TEXT DEFAULT 'Employee',
+                pay_type TEXT DEFAULT 'Hourly',
+                pay_rate REAL,
+                pin TEXT,
+                username TEXT UNIQUE,
+                custom_id TEXT,
+                active INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        # Migration: add new employee columns if missing
+        for col, coldef in [
+            ("nickname", "TEXT"),
+            ("phone", "TEXT"),
+            ("email", "TEXT"),
+            ("role", "TEXT DEFAULT 'Employee'"),
+            ("pay_type", "TEXT DEFAULT 'Hourly'"),
+            ("pay_rate", "REAL"),
+            ("username", "TEXT"),
+            ("custom_id", "TEXT"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE employees ADD COLUMN {col} {coldef}")
+            except Exception:
+                pass
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS time_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                employee_id INTEGER NOT NULL,
+                clock_in TEXT NOT NULL,
+                clock_out TEXT,
+                hours REAL,
+                FOREIGN KEY (employee_id) REFERENCES employees(id)
+            )
+        """)
+
         # Seed default loyalty settings if empty
         cursor = await db.execute("SELECT COUNT(*) FROM loyalty_settings")
         count = (await cursor.fetchone())[0]

@@ -197,7 +197,7 @@ export default function Locations() {
               </div>
               <div className="mt-3 pt-3 border-t border-gray-100">
                 <p className="text-xs text-gray-400">
-                  Added {new Date(loc.created_at + "Z").toLocaleDateString()}
+                  Added {new Date(loc.created_at + "Z").toLocaleDateString("en-US", { timeZone: "America/New_York" })}
                 </p>
               </div>
             </div>

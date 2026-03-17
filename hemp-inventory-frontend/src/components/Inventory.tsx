@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo } from "react";
-import { syncInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, bulkAssignImages, syncRefunds, getAgeRestrictionTypes, uploadImage, getImageUrl, deleteImage as deleteProductImage, generateImage, createItemGroup } from "../lib/api";
-import { RefreshCw, Search, Plus, ChevronDown, ChevronUp, X, Save, Package, Trash2, CheckSquare, Square, Minus, Image, Download, Upload, Wand2, Settings, ArrowRightLeft, Images, Layers } from "lucide-react";
+import { syncInventory, getCachedInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, bulkAssignCategory, bulkAssignImages, syncRefunds, getAgeRestrictionTypes, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup, bulkStockUpdate } from "../lib/api";
+import { RefreshCw, Search, Plus, ChevronDown, ChevronUp, X, Save, Package, Trash2, CheckSquare, Square, Minus, Image, Download, Upload, Settings, ArrowRightLeft, Images, Layers, Tag, ChevronsLeft, ChevronsRight, ChevronLeft, ChevronRight } from "lucide-react";
 
 interface LocationStock {
   location_id: number;
@@ -11,6 +11,7 @@ interface LocationStock {
 }
 
 interface InventoryItem {
+  id: string;
   sku: string;
   name: string;
   price: number;
@@ -51,10 +52,13 @@ export default function Inventory() {
   const [sortField, setSortField] = useState<"name" | "sku" | "stock" | "price" | "category" | "par">("name");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [sortLocation, setSortLocation] = useState<string>("");
+  const [currentPage, setCurrentPage] = useState(1);
+  const [itemsPerPage, setItemsPerPage] = useState(50);
   const [editingPar, setEditingPar] = useState<{ sku: string; locName: string } | null>(null);
   const [parValue, setParValue] = useState("");
-  const [editingStock, setEditingStock] = useState<{ sku: string; locName: string } | null>(null);
-  const [stockValue, setStockValue] = useState("");
+  // Batch stock editing: key = "sku::locName", value = string (edited value)
+  const [pendingStockChanges, setPendingStockChanges] = useState<Map<string, { sku: string; locationId: number; locName: string; value: string; originalValue: number }>>(new Map());
+  const [savingStock, setSavingStock] = useState(false);
   const [showAddItem, setShowAddItem] = useState(false);
   const [newItem, setNewItem] = useState<{
     name: string;
@@ -77,14 +81,12 @@ export default function Inventory() {
     hidden: boolean;
     auto_manage: boolean;
     default_tax_rates: boolean;
-    image_description: string;
   }>({
     name: "", price: "", sku: "", category: "", stocks: {}, pars: {},
     price_type: "FIXED", cost: "", product_code: "", alternate_name: "",
     description: "", color_code: "", is_revenue: true, is_age_restricted: false,
     age_restriction_type: "Vitamin & Supplements", age_restriction_min_age: "21",
     available: true, hidden: false, auto_manage: true, default_tax_rates: true,
-    image_description: "",
   });
   const [ageRestrictionTypes, setAgeRestrictionTypes] = useState<{id?: string; name: string; minimumAge: number}[]>([]);
   const [addItemTab, setAddItemTab] = useState("details");
@@ -101,6 +103,14 @@ export default function Inventory() {
   const [autoManaging, setAutoManaging] = useState(false);
   const [pushingToLocation, setPushingToLocation] = useState<number | null>(null);
   const [syncingRefunds, setSyncingRefunds] = useState(false);
+
+  // Cache-busting counter: incremented after image uploads to force browser to fetch fresh images
+  const [imageCacheBust, setImageCacheBust] = useState(() => Date.now());
+
+  // Bulk category state
+  const [showBulkCategory, setShowBulkCategory] = useState(false);
+  const [bulkCategoryName, setBulkCategoryName] = useState("");
+  const [assigningCategory, setAssigningCategory] = useState(false);
 
   // Edit modal state
   const [editItem, setEditItem] = useState<InventoryItem | null>(null);
@@ -140,8 +150,6 @@ export default function Inventory() {
   const [editImageFile, setEditImageFile] = useState<File | null>(null);
   const [editImagePreview, setEditImagePreview] = useState<string | null>(null);
   const [imageUploading, setImageUploading] = useState(false);
-  const [generatingImage, setGeneratingImage] = useState(false);
-  const [editImageDescription, setEditImageDescription] = useState("");
 
   // Variant state
   const [hasVariants, setHasVariants] = useState(false);
@@ -204,10 +212,9 @@ export default function Inventory() {
         price_type: "FIXED", cost: "", product_code: "", alternate_name: "",
         description: "", color_code: "", is_revenue: true, is_age_restricted: false,
         age_restriction_type: "Vitamin & Supplements", age_restriction_min_age: "21",
-        available: true, hidden: false, auto_manage: true, default_tax_rates: true,
-        image_description: "",
-      });
-      setHasVariants(false);
+          available: true, hidden: false, auto_manage: true, default_tax_rates: true,
+        });
+        setHasVariants(false);
       setVariantAttributes([{ attribute_name: "", option_names: [""] }]);
       setAddItemTab("details");
       setAddItemMessage(null);
@@ -224,9 +231,9 @@ export default function Inventory() {
     }
   };
 
-  const loadData = async () => {
+  const loadData = async (forceSync = false) => {
     try {
-      const res = await syncInventory();
+      const res = forceSync ? await syncInventory() : await getCachedInventory();
       setItems(res.data.items);
       setLocations(res.data.locations);
     } catch (err) {
@@ -238,7 +245,7 @@ export default function Inventory() {
 
   const handleSync = async () => {
     setSyncing(true);
-    await loadData();
+    await loadData(true);
     setSyncing(false);
   };
 
@@ -253,7 +260,7 @@ export default function Inventory() {
   }, [items]);
 
   const filteredItems = useMemo(() => {
-    let filtered = items;
+    let filtered = [...items];
 
     if (search) {
       const s = search.toLowerCase();
@@ -301,6 +308,17 @@ export default function Inventory() {
 
     return filtered;
   }, [items, search, categoryFilter, locationFilter, sortField, sortDir, sortLocation]);
+
+  // Reset to page 1 when filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [search, categoryFilter, locationFilter, sortField, sortDir, sortLocation]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredItems.length / itemsPerPage));
+  const paginatedItems = useMemo(() => {
+    const start = (currentPage - 1) * itemsPerPage;
+    return filteredItems.slice(start, start + itemsPerPage);
+  }, [filteredItems, currentPage, itemsPerPage]);
 
   const handleSetPar = async (sku: string, locationId: number) => {
     const val = parseFloat(parValue);
@@ -356,32 +374,13 @@ export default function Inventory() {
       setEditImageFile(null);
       setEditImagePreview(null);
       setSaveMessage({ type: "success", text: "Image uploaded successfully!" });
+      setImageCacheBust(Date.now());
       await loadData();
     } catch (err) {
       console.error("Error uploading image:", err);
       setSaveMessage({ type: "error", text: "Failed to upload image." });
     } finally {
       setImageUploading(false);
-    }
-  };
-
-  const handleGenerateEditImage = async () => {
-    if (!editItem || !editImageDescription) return;
-    setGeneratingImage(true);
-    try {
-      await generateImage(
-        editItem.sku,
-        editImageDescription,
-        editItem.name,
-        editItem.categories[0]
-      );
-      setSaveMessage({ type: "success", text: "AI image generated and saved!" });
-      await loadData();
-    } catch (err) {
-      console.error("Error generating image:", err);
-      setSaveMessage({ type: "error", text: "Failed to generate image. Make sure OPENAI_API_KEY is set." });
-    } finally {
-      setGeneratingImage(false);
     }
   };
 
@@ -392,6 +391,7 @@ export default function Inventory() {
       await deleteProductImage(editItem.sku);
       setEditImagePreview(null);
       setSaveMessage({ type: "success", text: "Image deleted." });
+      setImageCacheBust(Date.now());
       await loadData();
     } catch (err) {
       console.error("Error deleting image:", err);
@@ -447,7 +447,6 @@ export default function Inventory() {
         hidden: newItem.hidden,
         auto_manage: newItem.auto_manage,
         default_tax_rates: newItem.default_tax_rates,
-        image_description: newItem.image_description || undefined,
       });
       // Check if any locations had errors
       const results = response.data?.results || [];
@@ -466,25 +465,15 @@ export default function Inventory() {
           console.error("Error uploading image:", imgErr);
         }
       }
-      // Generate AI image if description was provided and no file uploaded
-      if (itemSku && newItem.image_description && !newItemImageFile) {
-        try {
-          await generateImage(itemSku, newItem.image_description, newItem.name, newItem.category || undefined);
-        } catch (imgErr) {
-          console.error("Error generating image:", imgErr);
-        }
-      }
-
       setShowAddItem(false);
       setNewItem({
         name: "", price: "", sku: "", category: "", stocks: {}, pars: {},
         price_type: "FIXED", cost: "", product_code: "", alternate_name: "",
         description: "", color_code: "", is_revenue: true, is_age_restricted: false,
         age_restriction_type: "Vitamin & Supplements", age_restriction_min_age: "21",
-        available: true, hidden: false, auto_manage: true, default_tax_rates: true,
-        image_description: "",
-      });
-      setNewItemImageFile(null);
+          available: true, hidden: false, auto_manage: true, default_tax_rates: true,
+        });
+        setNewItemImageFile(null);
       setNewItemImagePreview(null);
       setAddItemTab("details");
       setAddItemMessage(null);
@@ -512,9 +501,11 @@ export default function Inventory() {
       await deleteItem(item.sku);
       setConfirmDelete(null);
       setEditItem(null);
-      await loadData();
+      // Optimistically remove from state immediately
+      setItems(prev => prev.filter(i => i.sku !== item.sku));
     } catch (err) {
       console.error("Error deleting item:", err);
+      await loadData();
     } finally {
       setDeleting(null);
     }
@@ -550,8 +541,7 @@ export default function Inventory() {
     setEditTab("details");
     setSaveMessage(null);
     setEditImageFile(null);
-    setEditImagePreview(item.has_image ? getImageUrl(item.sku) : null);
-    setEditImageDescription("");
+    setEditImagePreview(item.has_image ? getImageUrl(item.sku, imageCacheBust) : null);
     setEditItem(item);
   };
 
@@ -647,7 +637,7 @@ export default function Inventory() {
   };
 
   const handleDownloadExcel = () => {
-    const selectedData = filteredItems.filter((i) => selectedItems.has(i.sku));
+    const selectedData = filteredItems.filter((i) => selectedItems.has(i.id));
     const dataToExport = selectedData.length > 0 ? selectedData : filteredItems;
     const headers = ["Product Name", "SKU", "Price", "Category"];
     locations.forEach((loc) => { headers.push(`${loc.name} Stock`); headers.push(`${loc.name} PAR`); });
@@ -702,28 +692,56 @@ export default function Inventory() {
     if (selectedItems.size === filteredItems.length) {
       setSelectedItems(new Set());
     } else {
-      setSelectedItems(new Set(filteredItems.map((i) => i.sku)));
+      setSelectedItems(new Set(filteredItems.map((i) => i.id)));
     }
   };
 
-  const toggleSelectItem = (sku: string) => {
+  const toggleSelectItem = (id: string) => {
     const next = new Set(selectedItems);
-    if (next.has(sku)) next.delete(sku);
-    else next.add(sku);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
     setSelectedItems(next);
   };
 
   const handleBulkDelete = async () => {
     setBulkDeleting(true);
     try {
-      await bulkDeleteItems(Array.from(selectedItems));
+      const skusToDelete = items.filter(i => selectedItems.has(i.id)).map(i => i.sku);
+      const uniqueSkus = [...new Set(skusToDelete)];
+      await bulkDeleteItems(uniqueSkus);
+      // Optimistically remove from state immediately
+      const deletedSkuSet = new Set(uniqueSkus);
+      setItems(prev => prev.filter(i => !deletedSkuSet.has(i.sku)));
       setSelectedItems(new Set());
       setShowBulkConfirm(false);
-      await loadData();
     } catch (err) {
       console.error("Error bulk deleting:", err);
+      await loadData();
     } finally {
       setBulkDeleting(false);
+    }
+  };
+
+  const handleBulkAssignCategory = async () => {
+    if (!bulkCategoryName.trim()) return;
+    setAssigningCategory(true);
+    try {
+      const skusToAssign = items.filter(i => selectedItems.has(i.id)).map(i => i.sku);
+      const resp = await bulkAssignCategory([...new Set(skusToAssign)], bulkCategoryName.trim());
+      const data = resp.data;
+      setToast({ type: "success", text: `Category "${data.category}" assigned to ${data.total_assigned} item(s) across ${data.results?.length || 0} location(s)` });
+      setTimeout(() => setToast(null), 6000);
+      setShowBulkCategory(false);
+      setBulkCategoryName("");
+      setSelectedItems(new Set());
+      await loadData();
+    } catch (err) {
+      console.error("Error assigning category:", err);
+      const axiosError = err as { response?: { data?: { detail?: string } } };
+      setToast({ type: "error", text: axiosError?.response?.data?.detail || "Failed to assign category" });
+      setTimeout(() => setToast(null), 5000);
+    } finally {
+      setAssigningCategory(false);
     }
   };
 
@@ -787,37 +805,80 @@ export default function Inventory() {
 
   // Transfer stock state
   const [showTransfer, setShowTransfer] = useState(false);
-  const [transferForm, setTransferForm] = useState({ sku: "", fromLocationId: 0, toLocationId: 0, quantity: "" });
+  const [transferSearch, setTransferSearch] = useState("");
+  const [transferItems, setTransferItems] = useState<Map<string, { item: InventoryItem; quantity: string }>>(new Map());
+  const [transferFromId, setTransferFromId] = useState(0);
+  const [transferToId, setTransferToId] = useState(0);
   const [transferring, setTransferring] = useState(false);
+  const [transferResults, setTransferResults] = useState<{ name: string; status: string }[]>([]);
+
+  const transferSearchResults = useMemo(() => {
+    if (!transferSearch || transferSearch.length < 2) return [];
+    const q = transferSearch.toLowerCase();
+    return items.filter(i =>
+      i.name.toLowerCase().includes(q) || i.sku.toLowerCase().includes(q)
+    ).slice(0, 50);
+  }, [transferSearch, items]);
+
+  const toggleTransferItem = (item: InventoryItem) => {
+    const next = new Map(transferItems);
+    if (next.has(item.id)) {
+      next.delete(item.id);
+    } else {
+      next.set(item.id, { item, quantity: "1" });
+    }
+    setTransferItems(next);
+  };
+
+  const setTransferQuantity = (id: string, qty: string) => {
+    const next = new Map(transferItems);
+    const entry = next.get(id);
+    if (entry) {
+      next.set(id, { ...entry, quantity: qty });
+      setTransferItems(next);
+    }
+  };
 
   const handleTransferStock = async () => {
-    if (!transferForm.sku || !transferForm.fromLocationId || !transferForm.toLocationId || !transferForm.quantity) return;
-    if (transferForm.fromLocationId === transferForm.toLocationId) {
+    if (transferItems.size === 0 || !transferFromId || !transferToId) return;
+    if (transferFromId === transferToId) {
       setToast({ type: "error", text: "Source and destination must be different locations" });
       setTimeout(() => setToast(null), 4000);
       return;
     }
     setTransferring(true);
-    try {
-      const resp = await transferStock(
-        transferForm.sku,
-        transferForm.fromLocationId,
-        transferForm.toLocationId,
-        parseFloat(transferForm.quantity)
-      );
-      const d = resp.data;
-      setToast({ type: "success", text: `Transferred ${d.quantity} of "${d.item_name}" from ${d.from_location} to ${d.to_location}` });
-      setTimeout(() => setToast(null), 6000);
-      setShowTransfer(false);
-      setTransferForm({ sku: "", fromLocationId: 0, toLocationId: 0, quantity: "" });
-      await loadData();
-    } catch (err) {
-      const axiosError = err as { response?: { data?: { detail?: string } } };
-      setToast({ type: "error", text: axiosError?.response?.data?.detail || "Transfer failed" });
-      setTimeout(() => setToast(null), 5000);
-    } finally {
-      setTransferring(false);
+    setTransferResults([]);
+    const results: { name: string; status: string }[] = [];
+    for (const [, { item, quantity }] of transferItems) {
+      const qty = parseFloat(quantity);
+      if (!qty || qty <= 0) {
+        results.push({ name: item.name, status: "Skipped (invalid quantity)" });
+        continue;
+      }
+      try {
+        const resp = await transferStock(item.sku, transferFromId, transferToId, qty);
+        const d = resp.data;
+        results.push({ name: d.item_name, status: `Transferred ${d.quantity}` });
+      } catch (err) {
+        const axiosError = err as { response?: { data?: { detail?: string } } };
+        results.push({ name: item.name, status: axiosError?.response?.data?.detail || "Failed" });
+      }
     }
+    setTransferResults(results);
+    const successCount = results.filter(r => r.status.startsWith("Transferred")).length;
+    setToast({ type: successCount > 0 ? "success" : "error", text: `${successCount} of ${results.length} items transferred` });
+    setTimeout(() => setToast(null), 6000);
+    setTransferring(false);
+    if (successCount > 0) await loadData();
+  };
+
+  const resetTransferModal = () => {
+    setShowTransfer(false);
+    setTransferSearch("");
+    setTransferItems(new Map());
+    setTransferFromId(0);
+    setTransferToId(0);
+    setTransferResults([]);
   };
 
   // Bulk image assignment state
@@ -898,7 +959,9 @@ export default function Inventory() {
       if (d.assigned > 0) {
         setToast({ type: "success", text: `Image assigned to ${d.assigned} of ${bulkImageMatches.length} products` });
         setTimeout(() => setToast(null), 6000);
-        await loadData();
+        setImageCacheBust(Date.now());
+        // Refresh data in background — don't block the UI
+        loadData().catch(() => {});
       } else {
         setToast({ type: "error", text: `No products found matching "${bulkImageKeyword}"` });
         setTimeout(() => setToast(null), 4000);
@@ -909,6 +972,39 @@ export default function Inventory() {
       setTimeout(() => setToast(null), 5000);
     } finally {
       setAssigningImages(false);
+    }
+  };
+
+  const handleBatchStockSave = async () => {
+    // Filter to only changes where value actually changed
+    const changedEntries = Array.from(pendingStockChanges.values()).filter(
+      (c) => parseFloat(c.value) !== c.originalValue && !isNaN(parseFloat(c.value))
+    );
+    if (changedEntries.length === 0) {
+      setPendingStockChanges(new Map());
+      setToast({ type: "success", text: "No changes to save." });
+      setTimeout(() => setToast(null), 3000);
+      return;
+    }
+    setSavingStock(true);
+    try {
+      const updates = changedEntries.map((c) => ({
+        sku: c.sku,
+        location_id: c.locationId,
+        quantity: parseFloat(c.value),
+      }));
+      const resp = await bulkStockUpdate(updates);
+      const data = resp.data;
+      setPendingStockChanges(new Map());
+      setToast({ type: "success", text: `${data.total_updated} stock update(s) saved!` });
+      setTimeout(() => setToast(null), 4000);
+      await loadData();
+    } catch (err) {
+      console.error("Batch stock save error:", err);
+      setToast({ type: "error", text: "Failed to save stock changes" });
+      setTimeout(() => setToast(null), 5000);
+    } finally {
+      setSavingStock(false);
     }
   };
 
@@ -946,6 +1042,29 @@ export default function Inventory() {
       {toast && (
         <div className={`fixed top-4 right-4 z-[60] px-4 py-3 rounded-lg shadow-lg text-sm font-medium transition-all ${toast.type === "success" ? "bg-green-600 text-white" : "bg-red-600 text-white"}`}>
           {toast.text}
+        </div>
+      )}
+      {/* Floating Save Bar for batch stock edits */}
+      {pendingStockChanges.size > 0 && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[60] bg-amber-600 text-white px-6 py-3 rounded-xl shadow-2xl flex items-center gap-4 animate-bounce-once">
+          <span className="text-sm font-medium">
+            {pendingStockChanges.size} stock edit{pendingStockChanges.size > 1 ? "s" : ""} pending
+          </span>
+          <button
+            onClick={handleBatchStockSave}
+            disabled={savingStock}
+            className="flex items-center gap-2 px-4 py-1.5 bg-white text-amber-700 rounded-lg text-sm font-bold hover:bg-amber-50 disabled:opacity-50 transition-colors"
+          >
+            <Save className="w-4 h-4" />
+            {savingStock ? "Saving..." : "Save All"}
+          </button>
+          <button
+            onClick={() => setPendingStockChanges(new Map())}
+            disabled={savingStock}
+            className="text-amber-200 hover:text-white text-sm disabled:opacity-50"
+          >
+            Discard
+          </button>
         </div>
       )}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
@@ -1627,27 +1746,6 @@ export default function Inventory() {
                     )}
                   </div>
 
-                  <div className="border-t border-gray-200 my-4" />
-
-                  {/* AI Generation Section */}
-                  <div>
-                    <div className="flex items-center gap-2 mb-2">
-                      <Wand2 className="w-5 h-5 text-purple-600" />
-                      <span className="text-sm font-medium text-gray-700">AI Image Generation</span>
-                    </div>
-                    <p className="text-xs text-gray-500 mb-3">
-                      Or describe what the image should look like and we&apos;ll generate one. Only used if no file is uploaded.
-                    </p>
-                    <textarea
-                      value={newItem.image_description}
-                      onChange={(e) => setNewItem({ ...newItem, image_description: e.target.value })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 outline-none"
-                      placeholder="e.g. A jar of colorful gummy bears with a green label, hemp leaf logo..."
-                      rows={3}
-                    />
-                    <p className="text-xs text-gray-400 mt-1">Be specific about colors, packaging, labels, and style.</p>
-                  </div>
-
                   <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mt-3">
                     <p className="text-xs text-blue-700">
                       <strong>For e-commerce:</strong> Images are stored in our app and available for your online store. They won&apos;t appear in Clover POS.
@@ -1672,7 +1770,7 @@ export default function Inventory() {
                 {addingItem ? (
                   <>
                     <RefreshCw className="w-4 h-4 animate-spin" />
-                    {hasVariants ? "Creating Variants..." : newItem.image_description ? "Creating & Generating Image..." : "Creating..."}
+                    {hasVariants ? "Creating Variants..." : "Creating..."}
                   </>
                 ) : (
                   <>
@@ -2122,7 +2220,7 @@ export default function Inventory() {
                     <div className="flex flex-col items-center justify-center py-6 text-center mb-4 bg-gray-50 rounded-lg border border-dashed border-gray-300">
                       <Image className="w-10 h-10 text-gray-300 mb-2" />
                       <p className="text-sm text-gray-500 font-medium">No image</p>
-                      <p className="text-xs text-gray-400">Upload or generate an image below</p>
+                      <p className="text-xs text-gray-400">Upload an image below</p>
                     </div>
                   ) : null}
 
@@ -2160,7 +2258,7 @@ export default function Inventory() {
                             {imageUploading ? "Uploading..." : "Upload"}
                           </button>
                           <button
-                            onClick={() => { setEditImageFile(null); setEditImagePreview(editItem?.has_image ? getImageUrl(editItem.sku) : null); }}
+                            onClick={() => { setEditImageFile(null); setEditImagePreview(editItem?.has_image ? getImageUrl(editItem.sku, imageCacheBust) : null); }}
                             className="px-3 py-1.5 border border-gray-300 rounded-lg text-xs hover:bg-gray-50"
                           >
                             Cancel
@@ -2168,31 +2266,6 @@ export default function Inventory() {
                         </div>
                       </div>
                     )}
-                  </div>
-
-                  <div className="border-t border-gray-200 my-4" />
-
-                  {/* AI Generation Section */}
-                  <div>
-                    <div className="flex items-center gap-2 mb-2">
-                      <Wand2 className="w-5 h-5 text-purple-600" />
-                      <span className="text-sm font-medium text-gray-700">Generate AI Image</span>
-                    </div>
-                    <textarea
-                      value={editImageDescription}
-                      onChange={(e) => setEditImageDescription(e.target.value)}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 outline-none"
-                      placeholder="Describe the product image..."
-                      rows={2}
-                    />
-                    <button
-                      onClick={handleGenerateEditImage}
-                      disabled={generatingImage || !editImageDescription}
-                      className="mt-2 flex items-center gap-1 px-3 py-1.5 bg-purple-600 text-white rounded-lg text-xs hover:bg-purple-700 disabled:opacity-50"
-                    >
-                      {generatingImage ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Wand2 className="w-3 h-3" />}
-                      {generatingImage ? "Generating..." : "Generate Image"}
-                    </button>
                   </div>
 
                   <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mt-3">
@@ -2315,12 +2388,79 @@ export default function Inventory() {
               Download CSV
             </button>
             <button
+              onClick={() => { setShowBulkCategory(true); setBulkCategoryName(""); }}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"
+            >
+              <Tag className="w-3.5 h-3.5" />
+              Assign Category
+            </button>
+            <button
               onClick={() => setShowBulkConfirm(true)}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-lg text-sm hover:bg-red-700"
             >
               <Trash2 className="w-3.5 h-3.5" />
               Delete Selected
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk Assign Category Modal */}
+      {showBulkCategory && (
+        <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="p-2 bg-blue-100 rounded-lg">
+                <Tag className="w-5 h-5 text-blue-600" />
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900">Assign Category</h3>
+                <p className="text-xs text-gray-400">Assign a category to {selectedItems.size} selected item{selectedItems.size !== 1 ? "s" : ""}</p>
+              </div>
+            </div>
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-1">Category Name</label>
+              <input
+                list="category-suggestions"
+                type="text"
+                value={bulkCategoryName}
+                onChange={(e) => setBulkCategoryName(e.target.value)}
+                placeholder="Select existing or type new category..."
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                autoFocus
+              />
+              <datalist id="category-suggestions">
+                {categories.map((c) => (
+                  <option key={c} value={c} />
+                ))}
+              </datalist>
+              <p className="text-xs text-gray-400 mt-1">Choose an existing category or type a new name to create one</p>
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowBulkCategory(false)}
+                className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg text-sm hover:bg-gray-50 font-medium"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleBulkAssignCategory}
+                disabled={assigningCategory || !bulkCategoryName.trim()}
+                className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50 font-medium"
+              >
+                {assigningCategory ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    Assigning...
+                  </>
+                ) : (
+                  <>
+                    <Tag className="w-4 h-4" />
+                    Assign
+                  </>
+                )}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -2439,10 +2579,10 @@ export default function Inventory() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {filteredItems.map((item) => (
+              {paginatedItems.map((item, idx) => (
                 <tr
-                  key={item.sku}
-                  className={`hover:bg-green-50 cursor-pointer transition-colors ${selectedItems.has(item.sku) ? "bg-green-50/50" : ""}`}
+                  key={`${item.sku}::${item.name}::${idx}`}
+                  className={`hover:bg-green-50 cursor-pointer transition-colors ${selectedItems.has(item.id) ? "bg-green-50/50" : ""}`}
                   onClick={(e) => {
                     const target = e.target as HTMLElement;
                     if (target.closest("button") || target.closest("input") || target.tagName === "BUTTON" || target.tagName === "INPUT") return;
@@ -2451,10 +2591,10 @@ export default function Inventory() {
                 >
                   <td className="px-3 py-3 w-10">
                     <button
-                      onClick={(e) => { e.stopPropagation(); toggleSelectItem(item.sku); }}
+                      onClick={(e) => { e.stopPropagation(); toggleSelectItem(item.id); }}
                       className="text-gray-400 hover:text-green-600 transition-colors"
                     >
-                      {selectedItems.has(item.sku) ? (
+                      {selectedItems.has(item.id) ? (
                         <CheckSquare className="w-4 h-4 text-green-600" />
                       ) : (
                         <Square className="w-4 h-4" />
@@ -2462,9 +2602,19 @@ export default function Inventory() {
                     </button>
                   </td>
                   <td className="px-4 py-3">
-                    <p className="text-sm font-medium text-green-700 hover:text-green-800 underline decoration-green-200 hover:decoration-green-400" title={item.name}>
-                      {item.name}
-                    </p>
+                    <div className="flex items-center gap-2">
+                      {item.has_image && (
+                        <img
+                          src={getImageUrl(item.sku, imageCacheBust)}
+                          alt=""
+                          className="w-8 h-8 rounded object-cover border border-gray-200 flex-shrink-0"
+                          onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                        />
+                      )}
+                      <p className="text-sm font-medium text-green-700 hover:text-green-800 underline decoration-green-200 hover:decoration-green-400" title={item.name}>
+                        {item.name}
+                      </p>
+                    </div>
                   </td>
                   <td className="px-4 py-3 text-xs text-gray-500 font-mono">
                     {item.sku.length > 15 ? item.sku.slice(0, 15) + "..." : item.sku}
@@ -2484,55 +2634,60 @@ export default function Inventory() {
                   </td>
                   {locations.map((loc) => {
                     const locData = item.locations[loc.name];
-                    const isEditingStock =
-                      editingStock?.sku === item.sku && editingStock?.locName === loc.name;
+                    const changeKey = `${item.sku}::${loc.name}`;
+                    const pendingChange = pendingStockChanges.get(changeKey);
+                    const isEditing = !!pendingChange;
                     return (
                       <td key={loc.id} className="px-4 py-3 text-center">
                         {!locData ? (
                           <span className="text-gray-300 text-sm">—</span>
-                        ) : isEditingStock ? (
+                        ) : isEditing ? (
                           <div
                             className="flex items-center gap-1 justify-center"
                             onClick={(e) => e.stopPropagation()}
                           >
                             <input
                               type="number"
-                              value={stockValue}
-                              onChange={(e) => setStockValue(e.target.value)}
-                              className="w-16 px-2 py-1 border border-green-300 rounded text-sm text-center focus:ring-1 focus:ring-green-500 outline-none"
-                              autoFocus
+                              value={pendingChange.value}
+                              onChange={(e) => {
+                                const next = new Map(pendingStockChanges);
+                                next.set(changeKey, { ...pendingChange, value: e.target.value });
+                                setPendingStockChanges(next);
+                              }}
+                              className="w-16 px-2 py-1 border border-amber-400 rounded text-sm text-center focus:ring-1 focus:ring-amber-500 outline-none bg-amber-50"
                               onKeyDown={(e) => {
-                                if (e.key === "Enter") {
-                                  const val = parseFloat(stockValue);
-                                  if (!isNaN(val)) {
-                                    updateItem(item.sku, { stock_updates: [{ location_id: locData.location_id, quantity: val }] })
-                                      .then(() => { setEditingStock(null); setStockValue(""); loadData(); })
-                                      .catch((err) => console.error("Error updating stock:", err));
-                                  }
+                                if (e.key === "Escape") {
+                                  const next = new Map(pendingStockChanges);
+                                  next.delete(changeKey);
+                                  setPendingStockChanges(next);
                                 }
-                                if (e.key === "Escape") setEditingStock(null);
                               }}
                             />
                             <button
                               onClick={() => {
-                                const val = parseFloat(stockValue);
-                                if (!isNaN(val)) {
-                                  updateItem(item.sku, { stock_updates: [{ location_id: locData.location_id, quantity: val }] })
-                                    .then(() => { setEditingStock(null); setStockValue(""); loadData(); })
-                                    .catch((err) => console.error("Error updating stock:", err));
-                                }
+                                const next = new Map(pendingStockChanges);
+                                next.delete(changeKey);
+                                setPendingStockChanges(next);
                               }}
-                              className="text-green-600 hover:text-green-700 text-xs font-medium"
+                              className="text-gray-400 hover:text-red-500 text-xs"
+                              title="Cancel edit"
                             >
-                              Save
+                              <X className="w-3 h-3" />
                             </button>
                           </div>
                         ) : (
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
-                              setEditingStock({ sku: item.sku, locName: loc.name });
-                              setStockValue(locData.stock.toString());
+                              const next = new Map(pendingStockChanges);
+                              next.set(changeKey, {
+                                sku: item.sku,
+                                locationId: locData.location_id,
+                                locName: loc.name,
+                                value: locData.stock.toString(),
+                                originalValue: locData.stock,
+                              });
+                              setPendingStockChanges(next);
                             }}
                             className={`inline-block px-2.5 py-1 rounded-lg text-sm font-semibold cursor-pointer hover:ring-2 hover:ring-green-300 transition-all ${stockColor(
                               locData.stock,
@@ -2606,42 +2761,85 @@ export default function Inventory() {
             No products found matching your filters.
           </div>
         )}
+        {/* Pagination Controls */}
+        {filteredItems.length > 0 && (
+          <div className="flex items-center justify-between px-4 py-3 border-t border-gray-200 bg-gray-50 rounded-b-xl">
+            <div className="flex items-center gap-2 text-sm text-gray-600">
+              <span>Show</span>
+              <select
+                value={itemsPerPage}
+                onChange={(e) => { setItemsPerPage(Number(e.target.value)); setCurrentPage(1); }}
+                className="px-2 py-1 border border-gray-300 rounded text-sm bg-white"
+              >
+                <option value={25}>25</option>
+                <option value={50}>50</option>
+                <option value={100}>100</option>
+                <option value={250}>250</option>
+              </select>
+              <span>of {filteredItems.length} items</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setCurrentPage(1)}
+                disabled={currentPage === 1}
+                className="p-1.5 rounded hover:bg-gray-200 disabled:opacity-30 disabled:cursor-not-allowed"
+                title="First page"
+              >
+                <ChevronsLeft className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                disabled={currentPage === 1}
+                className="p-1.5 rounded hover:bg-gray-200 disabled:opacity-30 disabled:cursor-not-allowed"
+                title="Previous page"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+              <span className="px-3 py-1 text-sm font-medium text-gray-700">
+                Page {currentPage} of {totalPages}
+              </span>
+              <button
+                onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                disabled={currentPage === totalPages}
+                className="p-1.5 rounded hover:bg-gray-200 disabled:opacity-30 disabled:cursor-not-allowed"
+                title="Next page"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => setCurrentPage(totalPages)}
+                disabled={currentPage === totalPages}
+                className="p-1.5 rounded hover:bg-gray-200 disabled:opacity-30 disabled:cursor-not-allowed"
+                title="Last page"
+              >
+                <ChevronsRight className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Transfer Stock Modal */}
       {showTransfer && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6">
+          <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full p-6 max-h-[90vh] flex flex-col">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-semibold flex items-center gap-2">
                 <ArrowRightLeft className="w-5 h-5 text-purple-600" />
                 Transfer Stock
               </h3>
-              <button onClick={() => setShowTransfer(false)}>
+              <button onClick={resetTransferModal}>
                 <X className="w-5 h-5 text-gray-400" />
               </button>
             </div>
-            <div className="space-y-3">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Product</label>
-                <select
-                  value={transferForm.sku}
-                  onChange={(e) => setTransferForm({ ...transferForm, sku: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none"
-                >
-                  <option value="">Select a product...</option>
-                  {items.map((item) => (
-                    <option key={item.sku} value={item.sku}>
-                      {item.name} {item.sku ? `(${item.sku})` : ""}
-                    </option>
-                  ))}
-                </select>
-              </div>
+
+            {/* Location selectors */}
+            <div className="grid grid-cols-2 gap-3 mb-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">From Location</label>
                 <select
-                  value={transferForm.fromLocationId}
-                  onChange={(e) => setTransferForm({ ...transferForm, fromLocationId: parseInt(e.target.value) })}
+                  value={transferFromId}
+                  onChange={(e) => setTransferFromId(parseInt(e.target.value))}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none"
                 >
                   <option value={0}>Select source...</option>
@@ -2653,8 +2851,8 @@ export default function Inventory() {
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">To Location</label>
                 <select
-                  value={transferForm.toLocationId}
-                  onChange={(e) => setTransferForm({ ...transferForm, toLocationId: parseInt(e.target.value) })}
+                  value={transferToId}
+                  onChange={(e) => setTransferToId(parseInt(e.target.value))}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none"
                 >
                   <option value={0}>Select destination...</option>
@@ -2663,32 +2861,119 @@ export default function Inventory() {
                   ))}
                 </select>
               </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Quantity</label>
+            </div>
+
+            {/* Search to add items */}
+            <div className="mb-3">
+              <label className="block text-sm font-medium text-gray-700 mb-1">Search Items to Add</label>
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                 <input
-                  type="number"
-                  min="1"
-                  value={transferForm.quantity}
-                  onChange={(e) => setTransferForm({ ...transferForm, quantity: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none"
-                  placeholder="Enter quantity to transfer"
+                  type="text"
+                  value={transferSearch}
+                  onChange={(e) => setTransferSearch(e.target.value)}
+                  className="w-full pl-9 pr-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none"
+                  placeholder="Search by name or SKU..."
                 />
               </div>
+              {/* Search results dropdown */}
+              {transferSearch.length >= 2 && transferSearchResults.length > 0 && (
+                <div className="mt-1 border border-gray-200 rounded-lg max-h-40 overflow-y-auto bg-white shadow-sm">
+                  {transferSearchResults.map((item) => {
+                    const isAdded = transferItems.has(item.id);
+                    return (
+                      <button
+                        key={item.id}
+                        onClick={() => toggleTransferItem(item)}
+                        className={`w-full text-left px-3 py-2 text-sm hover:bg-purple-50 flex items-center justify-between border-b border-gray-100 last:border-0 ${isAdded ? "bg-purple-50" : ""}`}
+                      >
+                        <div className="flex-1 min-w-0">
+                          <span className="truncate block">{item.name}</span>
+                          <span className="text-xs text-gray-400">{item.sku}</span>
+                        </div>
+                        {isAdded ? (
+                          <span className="text-xs text-purple-600 font-medium ml-2 shrink-0">Added</span>
+                        ) : (
+                          <Plus className="w-4 h-4 text-gray-400 ml-2 shrink-0" />
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {transferSearch.length >= 2 && transferSearchResults.length === 0 && (
+                <p className="mt-1 text-xs text-gray-400">No items found</p>
+              )}
             </div>
-            <div className="flex gap-3 mt-5">
+
+            {/* Selected items with quantities */}
+            {transferItems.size > 0 && (
+              <div className="flex-1 min-h-0 overflow-y-auto mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Items to Transfer ({transferItems.size})
+                </label>
+                <div className="space-y-2">
+                  {Array.from(transferItems.entries()).map(([id, { item, quantity }]) => (
+                    <div key={id} className="flex items-center gap-2 p-2 bg-gray-50 rounded-lg">
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-gray-900 truncate">{item.name}</p>
+                        <p className="text-xs text-gray-400">{item.sku}</p>
+                      </div>
+                      <input
+                        type="number"
+                        min="1"
+                        value={quantity}
+                        onChange={(e) => setTransferQuantity(id, e.target.value)}
+                        className="w-20 px-2 py-1 border border-gray-300 rounded text-sm text-center focus:ring-2 focus:ring-purple-500 outline-none"
+                        placeholder="Qty"
+                      />
+                      <button
+                        onClick={() => toggleTransferItem(item)}
+                        className="p-1 text-gray-400 hover:text-red-500"
+                        title="Remove"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {transferItems.size === 0 && (
+              <div className="flex-1 flex items-center justify-center text-sm text-gray-400 py-8">
+                Search and add items above to start a transfer
+              </div>
+            )}
+
+            {/* Transfer results */}
+            {transferResults.length > 0 && (
+              <div className="mb-4 p-3 bg-gray-50 border border-gray-200 rounded-lg max-h-32 overflow-y-auto">
+                <p className="text-sm font-medium text-gray-700 mb-1">Results:</p>
+                {transferResults.map((r, i) => (
+                  <p key={i} className={`text-xs ${r.status.startsWith("Transferred") ? "text-green-700" : "text-red-600"}`}>
+                    {r.name}: {r.status}
+                  </p>
+                ))}
+              </div>
+            )}
+
+            <div className="flex gap-3">
               <button
-                onClick={() => setShowTransfer(false)}
+                onClick={resetTransferModal}
                 className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50"
               >
-                Cancel
+                {transferResults.length > 0 ? "Close" : "Cancel"}
               </button>
-              <button
-                onClick={handleTransferStock}
-                disabled={transferring || !transferForm.sku || !transferForm.fromLocationId || !transferForm.toLocationId || !transferForm.quantity}
-                className="flex-1 px-4 py-2 bg-purple-600 text-white rounded-lg text-sm hover:bg-purple-700 disabled:opacity-50"
-              >
-                {transferring ? "Transferring..." : "Transfer"}
-              </button>
+              {transferResults.length === 0 && (
+                <button
+                  onClick={handleTransferStock}
+                  disabled={transferring || transferItems.size === 0 || !transferFromId || !transferToId}
+                  className="flex-1 px-4 py-2 bg-purple-600 text-white rounded-lg text-sm hover:bg-purple-700 disabled:opacity-50"
+                >
+                  {transferring ? "Transferring..." : `Transfer ${transferItems.size} Item${transferItems.size !== 1 ? "s" : ""}`}
+                </button>
+              )}
             </div>
           </div>
         </div>

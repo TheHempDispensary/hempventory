@@ -1,4 +1,4 @@
-app = "hemp-dispensary-api"
+app = "thd-inventory-api"
 primary_region = "sjc"
 
 [build]
@@ -19,4 +19,4 @@ primary_region = "sjc"
 
 [[vm]]
   size = "shared-cpu-1x"
-  memory = "1024mb"
+  memory = "2048mb"
