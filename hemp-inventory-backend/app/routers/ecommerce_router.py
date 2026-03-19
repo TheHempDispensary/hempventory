@@ -52,9 +52,10 @@ class CreateOrderRequest(BaseModel):
 
 router = APIRouter(prefix="/api/ecommerce", tags=["ecommerce"])
 
-# West location eComm credentials (public endpoint - no auth required)
-WEST_MERCHANT_ID = "XD21MGSEBV081"
-WEST_ECOMM_TOKEN = "2d8433db-1e3e-4e94-9510-1a62a120eb6b"
+# HQ location Clover credentials (public endpoint - no auth required)
+HQ_MERCHANT_ID = "0AJ4FF0G1YFM1"
+HQ_API_TOKEN = "9a06267a-6998-3f5a-521c-ca235f704856"
+HQ_ECOMM_TOKEN = "81e997e6-89d0-0ff7-522d-d195e6cd9138"
 CLOVER_BASE_URL = "https://api.clover.com/v3"
 CLOVER_CHARGES_URL = "https://scl.clover.com/v1/charges"
 
@@ -68,8 +69,8 @@ CLOVER_CACHE_TTL = 1800  # 30 minutes
 
 async def _do_clover_fetch() -> list:
     """Actually fetch all items from the Clover API."""
-    base = f"{CLOVER_BASE_URL}/merchants/{WEST_MERCHANT_ID}"
-    headers = {"Authorization": f"Bearer {WEST_ECOMM_TOKEN}"}
+    base = f"{CLOVER_BASE_URL}/merchants/{HQ_MERCHANT_ID}"
+    headers = {"Authorization": f"Bearer {HQ_API_TOKEN}"}
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         all_items = []
@@ -225,7 +226,7 @@ async def create_order(
             client_ip = forwarded.split(",")[0].strip()
 
         charge_headers = {
-            "Authorization": f"Bearer {WEST_ECOMM_TOKEN}",
+            "Authorization": f"Bearer {HQ_ECOMM_TOKEN}",
             "Content-Type": "application/json",
             "x-forwarded-for": client_ip,
         }
@@ -589,8 +590,8 @@ async def get_product_detail(
     item = next((i for i in all_items if i.get("id") == product_id), None)
 
     if not item:
-        base = f"{CLOVER_BASE_URL}/merchants/{WEST_MERCHANT_ID}"
-        headers = {"Authorization": f"Bearer {WEST_ECOMM_TOKEN}"}
+        base = f"{CLOVER_BASE_URL}/merchants/{HQ_MERCHANT_ID}"
+        headers = {"Authorization": f"Bearer {HQ_API_TOKEN}"}
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(
                 f"{base}/items/{product_id}",
