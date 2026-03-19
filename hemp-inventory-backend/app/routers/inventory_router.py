@@ -652,8 +652,14 @@ async def push_item_to_location(
         "name": source_item.get("name", ""),
         "price": source_item.get("price", 0),
     }
-    if source_item.get("sku"):
-        item_data["sku"] = source_item["sku"]
+    # For items without a real SKU (barcode), use the source Clover ID as SKU
+    # so the sync merges the new item with the original across locations
+    source_sku = source_item.get("sku", "") or ""
+    source_clover_id = source_item.get("id", "")
+    if source_sku:
+        item_data["sku"] = source_sku
+    elif source_clover_id:
+        item_data["sku"] = source_clover_id
     if source_item.get("priceType"):
         item_data["priceType"] = source_item["priceType"]
     if source_item.get("cost"):
