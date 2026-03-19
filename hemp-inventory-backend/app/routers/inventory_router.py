@@ -600,6 +600,7 @@ async def fix_pos_scanning(
 class PushToLocationRequest(BaseModel):
     location_id: int
     initial_stock: Optional[float] = 0
+    item_name: Optional[str] = None
 
 
 @router.post("/items/{sku}/push-to-location")
@@ -635,6 +636,15 @@ async def push_item_to_location(
             matching = [i for i in data.get("elements", []) if i.get("sku") == sku]
             if not matching:
                 matching = [i for i in data.get("elements", []) if i.get("id") == sku]
+            # If item_name provided, filter by name to disambiguate shared SKUs
+            if matching and req.item_name:
+                norm_name = " ".join(req.item_name.split())
+                name_matched = [
+                    i for i in matching
+                    if " ".join((i.get("name", "") or "").split()) == norm_name
+                ]
+                if name_matched:
+                    matching = name_matched
             if matching:
                 source_item = matching[0]
                 source_categories = [
