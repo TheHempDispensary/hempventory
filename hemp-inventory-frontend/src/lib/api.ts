@@ -275,6 +275,11 @@ export const createItemGroup = (data: {
   default_tax_rates?: boolean;
 }) => api.post("/api/inventory/item-groups", data);
 
+export const addVariantsToItem = (sku: string, data: {
+  variants: { attribute_name: string; option_names: string[] }[];
+  sku_prefix?: string;
+}) => api.post(`/api/inventory/items/${encodeURIComponent(sku)}/add-variants`, data);
+
 // Time Clock
 export const getEmployees = () => api.get("/api/timeclock/employees");
 

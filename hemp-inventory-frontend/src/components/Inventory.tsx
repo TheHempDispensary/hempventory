@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo } from "react";
-import { syncInventory, getCachedInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, bulkAssignCategory, bulkAssignImages, syncRefunds, getAgeRestrictionTypes, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup, bulkStockUpdate } from "../lib/api";
+import { syncInventory, getCachedInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, bulkAssignCategory, bulkAssignImages, syncRefunds, getAgeRestrictionTypes, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup, bulkStockUpdate, addVariantsToItem } from "../lib/api";
 import { RefreshCw, Search, Plus, ChevronDown, ChevronUp, X, Save, Package, Trash2, CheckSquare, Square, Minus, Image, Download, Upload, Settings, ArrowRightLeft, Images, Layers, Tag, ChevronsLeft, ChevronsRight, ChevronLeft, ChevronRight } from "lucide-react";
 
 interface LocationStock {
@@ -143,6 +143,13 @@ export default function Inventory() {
   });
   const [saving, setSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+
+  // Edit variant state
+  const [editVariantAttributes, setEditVariantAttributes] = useState<{ attribute_name: string; option_names: string[] }[]>([
+    { attribute_name: "", option_names: [""] }
+  ]);
+  const [editVariantSkuPrefix, setEditVariantSkuPrefix] = useState("");
+  const [addingVariants, setAddingVariants] = useState(false);
 
   // Image state
   const [newItemImageFile, setNewItemImageFile] = useState<File | null>(null);
@@ -542,7 +549,47 @@ export default function Inventory() {
     setSaveMessage(null);
     setEditImageFile(null);
     setEditImagePreview(item.has_image ? getImageUrl(item.sku, imageCacheBust) : null);
+    setEditVariantAttributes([{ attribute_name: "", option_names: [""] }]);
+    setEditVariantSkuPrefix("");
     setEditItem(item);
+  };
+
+  const handleAddVariantsToItem = async () => {
+    if (!editItem) return;
+    const validVariants = editVariantAttributes.filter(v => v.attribute_name.trim() && v.option_names.some(o => o.trim()));
+    if (validVariants.length === 0) {
+      setSaveMessage({ type: "error", text: "At least one attribute with options is required." });
+      return;
+    }
+    setAddingVariants(true);
+    setSaveMessage(null);
+    try {
+      const response = await addVariantsToItem(editItem.sku, {
+        variants: validVariants.map(v => ({
+          attribute_name: v.attribute_name.trim(),
+          option_names: v.option_names.filter(o => o.trim()).map(o => o.trim()),
+        })),
+        sku_prefix: editVariantSkuPrefix || undefined,
+      });
+      const results = response.data?.results || [];
+      const errors = results.filter((r: { status: string }) => r.status === "error");
+      const created = results.filter((r: { status: string }) => r.status === "created");
+      const totalItems = created.reduce((sum: number, r: { items_created?: number }) => sum + (r.items_created || 0), 0);
+      if (errors.length > 0 && created.length === 0) {
+        setSaveMessage({ type: "error", text: `Failed: ${errors[0]?.error || "Unknown error"}` });
+      } else {
+        setSaveMessage({ type: "success", text: `${totalItems} variant(s) created per location. Syncing...` });
+        setEditVariantAttributes([{ attribute_name: "", option_names: [""] }]);
+        setEditVariantSkuPrefix("");
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        await loadData();
+      }
+    } catch (err: unknown) {
+      const axiosError = err as { response?: { data?: { detail?: string } } };
+      setSaveMessage({ type: "error", text: axiosError.response?.data?.detail || "Failed to add variants." });
+    } finally {
+      setAddingVariants(false);
+    }
   };
 
   const handleSaveEdit = async () => {
@@ -1822,6 +1869,7 @@ export default function Inventory() {
             <div className="flex gap-1 mb-4 border-b border-gray-200 overflow-x-auto">
               {[
                 { id: "details", label: "Details" },
+                { id: "variants", label: "Variants" },
                 { id: "online", label: "Online Ordering" },
                 { id: "taxes", label: "Taxes & Fees" },
                 { id: "stock", label: "Stock & PAR" },
@@ -1958,6 +2006,181 @@ export default function Inventory() {
                       </div>
                     </div>
                   )}
+                </>
+              )}
+
+              {/* Variants Tab */}
+              {editTab === "variants" && (
+                <>
+                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-4">
+                    <p className="text-xs text-blue-700">
+                      <strong>Add variants</strong> to create nearly identical items that differ by one or more attributes (e.g., Size, Flavor). The current item will become part of the variant group, and new variant items will be created at all locations.
+                    </p>
+                  </div>
+
+                  <div className="space-y-4">
+                    <div className="flex items-center gap-2 mb-1">
+                      <Layers className="w-4 h-4 text-green-600" />
+                      <h4 className="text-sm font-semibold text-gray-700">Define variants</h4>
+                    </div>
+
+                    {editVariantAttributes.map((attr, attrIdx) => (
+                      <div key={attrIdx} className="border border-gray-200 rounded-lg p-4 bg-gray-50">
+                        <div className="flex items-center justify-between mb-3">
+                          <label className="block text-sm font-medium text-gray-700">Select attribute</label>
+                          {editVariantAttributes.length > 1 && (
+                            <button
+                              onClick={() => setEditVariantAttributes(editVariantAttributes.filter((_, i) => i !== attrIdx))}
+                              className="text-red-500 hover:text-red-700 p-1"
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                          )}
+                        </div>
+                        <select
+                          value={attr.attribute_name}
+                          onChange={(e) => {
+                            const updated = [...editVariantAttributes];
+                            updated[attrIdx] = { ...updated[attrIdx], attribute_name: e.target.value };
+                            setEditVariantAttributes(updated);
+                          }}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-green-500 outline-none mb-3"
+                        >
+                          <option value="">Select attribute</option>
+                          <option value="Size">Size</option>
+                          <option value="Color">Color</option>
+                          <option value="Flavor">Flavor</option>
+                          <option value="Strength">Strength</option>
+                          <option value="Weight">Weight</option>
+                          <option value="Custom">Custom attribute</option>
+                        </select>
+
+                        {attr.attribute_name === "Custom" && (
+                          <input
+                            type="text"
+                            placeholder="Custom attribute name"
+                            value={attr.attribute_name === "Custom" ? "" : attr.attribute_name}
+                            onChange={(e) => {
+                              const updated = [...editVariantAttributes];
+                              updated[attrIdx] = { ...updated[attrIdx], attribute_name: e.target.value || "Custom" };
+                              setEditVariantAttributes(updated);
+                            }}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 outline-none mb-3"
+                          />
+                        )}
+
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Options</label>
+                        <p className="text-xs text-gray-400 mb-2">Options help differentiate similar but unique items. For example, small, medium, and large.</p>
+                        {attr.option_names.map((opt, optIdx) => (
+                          <div key={optIdx} className="flex items-center gap-2 mb-2">
+                            <input
+                              type="text"
+                              value={opt}
+                              onChange={(e) => {
+                                const updated = [...editVariantAttributes];
+                                const newOptions = [...updated[attrIdx].option_names];
+                                newOptions[optIdx] = e.target.value;
+                                updated[attrIdx] = { ...updated[attrIdx], option_names: newOptions };
+                                setEditVariantAttributes(updated);
+                              }}
+                              className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 outline-none"
+                              placeholder="Option name"
+                            />
+                            {attr.option_names.length > 1 && (
+                              <button
+                                onClick={() => {
+                                  const updated = [...editVariantAttributes];
+                                  const newOptions = updated[attrIdx].option_names.filter((_, i) => i !== optIdx);
+                                  updated[attrIdx] = { ...updated[attrIdx], option_names: newOptions };
+                                  setEditVariantAttributes(updated);
+                                }}
+                                className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded"
+                              >
+                                <Minus className="w-4 h-4" />
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                        <button
+                          onClick={() => {
+                            const updated = [...editVariantAttributes];
+                            updated[attrIdx] = { ...updated[attrIdx], option_names: [...updated[attrIdx].option_names, ""] };
+                            setEditVariantAttributes(updated);
+                          }}
+                          className="flex items-center gap-1.5 text-green-600 hover:text-green-700 text-sm font-medium mt-1"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          Add another option
+                        </button>
+                      </div>
+                    ))}
+
+                    <button
+                      onClick={() => setEditVariantAttributes([...editVariantAttributes, { attribute_name: "", option_names: [""] }])}
+                      className="flex items-center gap-1.5 text-green-600 hover:text-green-700 text-sm font-medium px-1"
+                    >
+                      <Plus className="w-4 h-4" />
+                      Add another attribute
+                    </button>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">SKU Prefix (optional)</label>
+                      <input
+                        type="text"
+                        value={editVariantSkuPrefix}
+                        onChange={(e) => setEditVariantSkuPrefix(e.target.value)}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 outline-none"
+                        placeholder="e.g., CBD-GUMMY"
+                      />
+                      <p className="text-xs text-gray-400 mt-1">Auto-generates SKUs like PREFIX-SMA, PREFIX-MED, etc.</p>
+                    </div>
+
+                    {/* Preview */}
+                    {(() => {
+                      const validAttrs = editVariantAttributes.filter(v => v.attribute_name && v.attribute_name !== "Custom" && v.option_names.some(o => o.trim()));
+                      if (validAttrs.length === 0) return null;
+                      const optionArrays = validAttrs.map(v => v.option_names.filter(o => o.trim()));
+                      const editCombos: string[][] = optionArrays.reduce<string[][]>(
+                        (acc, opts) => acc.flatMap(combo => opts.map(opt => [...combo, opt])),
+                        [[]]
+                      );
+                      return (
+                        <div className="bg-green-50 border border-green-200 rounded-lg p-3 mt-2">
+                          <p className="text-xs font-semibold text-green-700 mb-2">
+                            Preview: {editCombos.length} variant{editCombos.length !== 1 ? "s" : ""} will be created
+                          </p>
+                          <div className="space-y-1 max-h-32 overflow-y-auto">
+                            {editCombos.slice(0, 20).map((combo, idx) => (
+                              <p key={idx} className="text-xs text-green-600">
+                                {editItem?.name || "Item"} — {combo.join(" / ")}
+                              </p>
+                            ))}
+                            {editCombos.length > 20 && (
+                              <p className="text-xs text-green-500 italic">...and {editCombos.length - 20} more</p>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })()}
+
+                    <button
+                      onClick={handleAddVariantsToItem}
+                      disabled={addingVariants || editVariantAttributes.every(v => !v.attribute_name.trim() || !v.option_names.some(o => o.trim()))}
+                      className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-green-600 text-white rounded-lg text-sm hover:bg-green-700 disabled:opacity-50 font-medium mt-2"
+                    >
+                      {addingVariants ? (
+                        <>
+                          <RefreshCw className="w-4 h-4 animate-spin" />
+                          Creating Variants...
+                        </>
+                      ) : (
+                        <>
+                          <Layers className="w-4 h-4" />
+                          Add Variants to All Locations
+                        </>
+                      )}
+                    </button>
+                  </div>
                 </>
               )}
 
