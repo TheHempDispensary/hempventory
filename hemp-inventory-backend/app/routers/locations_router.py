@@ -19,6 +19,7 @@ class LocationCreate(BaseModel):
 
 class LocationUpdate(BaseModel):
     name: Optional[str] = None
+    merchant_id: Optional[str] = None
     api_token: Optional[str] = None
 
 
@@ -111,6 +112,8 @@ async def update_location(
 
     if location.name:
         await db.execute("UPDATE locations SET name = ? WHERE id = ?", (location.name, location_id))
+    if location.merchant_id:
+        await db.execute("UPDATE locations SET merchant_id = ? WHERE id = ?", (location.merchant_id, location_id))
     if location.api_token:
         await db.execute("UPDATE locations SET api_token = ? WHERE id = ?", (location.api_token, location_id))
     await db.commit()

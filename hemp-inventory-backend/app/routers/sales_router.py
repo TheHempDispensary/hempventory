@@ -14,7 +14,7 @@ router = APIRouter(prefix="/api/sales", tags=["sales"])
 
 async def _get_locations(db: aiosqlite.Connection):
     cursor = await db.execute(
-        "SELECT id, name, merchant_id, api_token FROM locations WHERE LOWER(name) NOT LIKE '%virtual%' AND LOWER(name) NOT LIKE '%central%'"
+        "SELECT id, name, merchant_id, api_token FROM locations WHERE LOWER(name) NOT LIKE '%virtual%' AND api_token != 'pending'"
     )
     return await cursor.fetchall()
 
