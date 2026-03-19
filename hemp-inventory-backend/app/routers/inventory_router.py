@@ -645,6 +645,9 @@ async def push_item_to_location(
                 ]
                 if name_matched:
                     matching = name_matched
+                else:
+                    # Wrong-name match; skip this location and try the next
+                    continue
             if matching:
                 source_item = matching[0]
                 source_categories = [
