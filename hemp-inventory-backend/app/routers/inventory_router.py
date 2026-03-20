@@ -1089,10 +1089,12 @@ async def upload_image(
 async def get_image(
     sku: str,
     w: Optional[int] = None,
+    nobg: Optional[int] = None,
     db: aiosqlite.Connection = Depends(get_db),
 ):
     """Get a product image by SKU. Returns the raw image bytes.
-    Optional ?w=300 parameter to get a resized thumbnail for faster loading."""
+    Optional ?w=300 parameter to get a resized thumbnail for faster loading.
+    Optional ?nobg=1 parameter to remove white background (returns transparent PNG)."""
     cursor = await db.execute(
         "SELECT image_data, content_type, updated_at FROM product_images WHERE sku = ?", (sku,)
     )
@@ -1101,6 +1103,14 @@ async def get_image(
         raise HTTPException(status_code=404, detail="No image found for this SKU")
 
     image_bytes = base64.b64decode(row[0])
+    final_media_type = row[1]
+
+    # Remove white background if requested
+    if nobg and nobg == 1:
+        try:
+            image_bytes, final_media_type = _remove_white_background(image_bytes)
+        except Exception:
+            pass  # Fall back to original image if background removal fails
 
     # If width parameter provided, resize the image for faster loading
     if w and 50 <= w <= 1200:
@@ -1110,22 +1120,27 @@ async def get_image(
             new_height = int(img.height * ratio)
             img = img.resize((w, new_height), PILImage.LANCZOS)
             buf = io.BytesIO()
-            # Save as WebP for smaller file size, fall back to original format
-            try:
-                img.save(buf, format="WEBP", quality=80)
-                media_type = "image/webp"
-            except Exception:
-                fmt = "PNG" if row[1] == "image/png" else "JPEG"
-                img.save(buf, format=fmt, quality=85)
-                media_type = row[1]
+            if nobg and nobg == 1:
+                # Keep as PNG to preserve transparency
+                img.save(buf, format="PNG")
+                final_media_type = "image/png"
+            else:
+                # Save as WebP for smaller file size, fall back to original format
+                try:
+                    img.save(buf, format="WEBP", quality=80)
+                    final_media_type = "image/webp"
+                except Exception:
+                    fmt = "PNG" if row[1] == "image/png" else "JPEG"
+                    img.save(buf, format=fmt, quality=85)
+                    final_media_type = row[1]
             image_bytes = buf.getvalue()
         except Exception:
             pass  # Fall back to original image if resize fails
 
     return Response(
         content=image_bytes,
-        media_type=row[1] if not w else media_type if w and 50 <= w <= 1200 else row[1],
-        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache"},
+        media_type=final_media_type,
+        headers={"Cache-Control": "public, max-age=3600"},
     )
 
 
