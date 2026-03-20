@@ -100,11 +100,11 @@ async def get_products(
     image_base_url = os.environ.get("BASE_URL", "https://thd-inventory-api.fly.dev") + "/api/inventory/images"
     cursor = await db.execute("SELECT sku, product_name, updated_at FROM product_images")
     image_rows = await cursor.fetchall()
-    image_by_sku = {row[0]: f"{image_base_url}/{row[0]}?t={row[2] or ''}" for row in image_rows}
+    image_by_sku = {row[0]: f"{image_base_url}/{row[0]}?nobg=1&t={row[2] or ''}" for row in image_rows}
     image_by_name = {}
     for row in image_rows:
         if row[1]:
-            image_by_name[row[1].upper()] = f"{image_base_url}/{row[0]}?t={row[2] or ''}"
+            image_by_name[row[1].upper()] = f"{image_base_url}/{row[0]}?nobg=1&t={row[2] or ''}"
 
     # Build product list
     products = []
@@ -571,7 +571,7 @@ async def get_product_detail(
         (sku, name.upper()),
     )
     row = await cursor.fetchone()
-    image_url = f"{image_base_url}/{row[0]}?t={row[1] or ''}" if row else None
+    image_url = f"{image_base_url}/{row[0]}?nobg=1&t={row[1] or ''}" if row else None
 
     return {
         "id": item.get("id", ""),
