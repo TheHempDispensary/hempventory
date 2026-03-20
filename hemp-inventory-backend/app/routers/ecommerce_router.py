@@ -59,31 +59,30 @@ HQ_ECOMM_TOKEN = "81e997e6-89d0-0ff7-522d-d195e6cd9138"
 CLOVER_BASE_URL = "https://api.clover.com/v3"
 CLOVER_CHARGES_URL = "https://scl.clover.com/v1/charges"
 
+# ── In-memory product cache ──────────────────────────────────────────────────
+_product_cache: dict = {}  # {"products": [...], "total": int, "categories": [...]}
+_cache_timestamp: float = 0.0
+_cache_lock = asyncio.Lock()
+CACHE_TTL = 300  # 5 minutes
 
-@router.get("/products")
-async def get_products(
-    category: Optional[str] = None,
-    search: Optional[str] = None,
-    limit: int = 100,
-    offset: int = 0,
-    db: aiosqlite.Connection = Depends(get_db),
-):
-    """Public endpoint: Get products from Clover eCommerce catalog (HQ location).
-    Returns products with categories, stock, and image URLs from inventory backend."""
+
+async def _fetch_and_cache_products() -> dict:
+    """Fetch all products from Clover API + image DB and cache in memory."""
+    global _product_cache, _cache_timestamp
+
     base = f"{CLOVER_BASE_URL}/merchants/{HQ_MERCHANT_ID}"
     headers = {"Authorization": f"Bearer {HQ_API_TOKEN}"}
 
     async with httpx.AsyncClient(timeout=30.0) as client:
-        # Fetch all items with categories and stock
-        all_items = []
-        current_offset = offset
+        all_items: list = []
+        current_offset = 0
         while True:
             resp = await client.get(
                 f"{base}/items",
                 headers=headers,
                 params={
                     "expand": "categories,itemStock",
-                    "limit": min(limit, 1000),
+                    "limit": 1000,
                     "offset": current_offset,
                     "filter": "deleted=false",
                 },
@@ -92,23 +91,27 @@ async def get_products(
             data = resp.json()
             elements = data.get("elements", [])
             all_items.extend(elements)
-            if len(elements) < 1000 or len(all_items) >= limit:
+            if len(elements) < 1000:
                 break
             current_offset += 1000
 
     # Get image map from our database
+    from app.database import DB_PATH
     image_base_url = os.environ.get("BASE_URL", "https://thd-inventory-api.fly.dev") + "/api/inventory/images"
-    cursor = await db.execute("SELECT sku, product_name, updated_at FROM product_images")
-    image_rows = await cursor.fetchall()
+    db = await aiosqlite.connect(DB_PATH)
+    try:
+        cursor = await db.execute("SELECT sku, product_name, updated_at FROM product_images")
+        image_rows = await cursor.fetchall()
+    finally:
+        await db.close()
     image_by_sku = {row[0]: f"{image_base_url}/{row[0]}?nobg=1&t={row[2] or ''}" for row in image_rows}
     image_by_name = {}
     for row in image_rows:
         if row[1]:
             image_by_name[row[1].upper()] = f"{image_base_url}/{row[0]}?nobg=1&t={row[2] or ''}"
 
-    # Build product list
     products = []
-    categories_set = set()
+    categories_set: set = set()
 
     for item in all_items:
         if item.get("hidden", False):
@@ -123,28 +126,15 @@ async def get_products(
         description = item.get("description", "")
         online_name = item.get("onlineName", "") or name
 
-        # Filter by category if specified
-        if category and category.lower() != "all":
-            if not any(c.lower() == category.lower() for c in item_categories):
-                continue
-
-        # Filter by search term
-        if search:
-            search_lower = search.lower()
-            if search_lower not in name.lower() and search_lower not in description.lower():
-                continue
-
         for cat in item_categories:
             categories_set.add(cat)
 
-        # Find image URL: check by SKU first, then by product name
         image_url = image_by_sku.get(sku)
         if not image_url:
             image_url = image_by_name.get(name.upper())
 
-        # Generate a URL-friendly slug from the product name
         slug = name.lower().replace(" ", "-").replace(",", "").replace(".", "")
-        slug = "-".join(slug.split())  # normalize multiple spaces
+        slug = "-".join(slug.split())
 
         products.append({
             "id": item.get("id", ""),
@@ -161,13 +151,73 @@ async def get_products(
             "is_age_restricted": item.get("isAgeRestricted", False),
         })
 
-    # Sort by name
     products.sort(key=lambda p: p["name"])
+
+    result = {
+        "products": products,
+        "total": len(products),
+        "categories": sorted(categories_set),
+    }
+
+    _product_cache = result
+    _cache_timestamp = time.time()
+    print(f"[cache] Product cache refreshed: {len(products)} products")
+    return result
+
+
+async def _get_cached_products() -> dict:
+    """Return cached products, refreshing in background if stale."""
+    global _product_cache, _cache_timestamp
+    now = time.time()
+
+    if _product_cache and (now - _cache_timestamp) < CACHE_TTL:
+        return _product_cache
+
+    if _product_cache:
+        # Stale cache exists — return it and refresh in background
+        asyncio.create_task(_refresh_cache_background())
+        return _product_cache
+
+    # No cache at all — must fetch synchronously
+    async with _cache_lock:
+        if _product_cache:
+            return _product_cache
+        return await _fetch_and_cache_products()
+
+
+async def _refresh_cache_background():
+    """Background task to refresh the cache without blocking requests."""
+    async with _cache_lock:
+        try:
+            await _fetch_and_cache_products()
+        except Exception as e:
+            print(f"[cache] Background refresh failed: {e}")
+
+
+@router.get("/products")
+async def get_products(
+    category: Optional[str] = None,
+    search: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+):
+    """Public endpoint: Get products from Clover eCommerce catalog (HQ location).
+    Returns products with categories, stock, and image URLs from inventory backend.
+    Results are served from an in-memory cache that refreshes every 5 minutes."""
+    cached = await _get_cached_products()
+    products = cached["products"]
+
+    # Apply optional filters on the cached data
+    if category and category.lower() != "all":
+        products = [p for p in products if any(c.lower() == category.lower() for c in p["categories"])]
+    if search:
+        search_lower = search.lower()
+        products = [p for p in products if search_lower in p["name"].lower() or search_lower in (p.get("description") or "").lower()]
 
     return {
         "products": products,
         "total": len(products),
-        "categories": sorted(categories_set),
+        "categories": cached["categories"],
     }
 
 
@@ -542,11 +592,15 @@ async def _send_order_emails(
 
 
 @router.get("/products/{product_id}")
-async def get_product_detail(
-    product_id: str,
-    db: aiosqlite.Connection = Depends(get_db),
-):
-    """Public endpoint: Get a single product detail by Clover item ID."""
+async def get_product_detail(product_id: str):
+    """Public endpoint: Get a single product detail by Clover item ID.
+    Serves from the in-memory cache when available, falls back to direct Clover API."""
+    cached = await _get_cached_products()
+    for p in cached["products"]:
+        if p["id"] == product_id:
+            return p
+
+    # Not in cache — fetch directly from Clover as fallback
     base = f"{CLOVER_BASE_URL}/merchants/{HQ_MERCHANT_ID}"
     headers = {"Authorization": f"Bearer {HQ_API_TOKEN}"}
 
@@ -564,13 +618,17 @@ async def get_product_detail(
     stock_info = item.get("itemStock", {})
     stock = stock_info.get("quantity", 0) if stock_info else 0
 
-    # Find image URL
     image_base_url = os.environ.get("BASE_URL", "https://thd-inventory-api.fly.dev") + "/api/inventory/images"
-    cursor = await db.execute(
-        "SELECT sku, updated_at FROM product_images WHERE sku = ? OR UPPER(product_name) = ?",
-        (sku, name.upper()),
-    )
-    row = await cursor.fetchone()
+    from app.database import DB_PATH
+    db = await aiosqlite.connect(DB_PATH)
+    try:
+        cursor = await db.execute(
+            "SELECT sku, updated_at FROM product_images WHERE sku = ? OR UPPER(product_name) = ?",
+            (sku, name.upper()),
+        )
+        row = await cursor.fetchone()
+    finally:
+        await db.close()
     image_url = f"{image_base_url}/{row[0]}?nobg=1&t={row[1] or ''}" if row else None
 
     return {

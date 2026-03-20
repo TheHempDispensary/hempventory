@@ -115,6 +115,8 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     # Run initial inventory sync in background so server starts accepting requests immediately
     asyncio.create_task(_scheduled_inventory_sync())
+    # Pre-warm the ecommerce product cache so first request is instant
+    asyncio.create_task(ecommerce_router._fetch_and_cache_products())
     yield
     scheduler.shutdown()
 
