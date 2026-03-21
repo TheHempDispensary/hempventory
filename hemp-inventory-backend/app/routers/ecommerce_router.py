@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 from typing import Optional, List
 from pydantic import BaseModel
 import httpx
@@ -62,136 +63,143 @@ CLOVER_CHARGES_URL = "https://scl.clover.com/v1/charges"
 # ── In-memory product cache ──────────────────────────────────────────────────
 _product_cache: dict = {}  # {"products": [...], "total": int, "categories": [...]}
 _cache_timestamp: float = 0.0
-_cache_lock = asyncio.Lock()
+_refresh_in_progress: bool = False
 CACHE_TTL = 300  # 5 minutes
 
 
 async def _fetch_and_cache_products() -> dict:
     """Fetch all products from Clover API + image DB and cache in memory."""
-    global _product_cache, _cache_timestamp
+    global _product_cache, _cache_timestamp, _refresh_in_progress
+    _refresh_in_progress = True
 
-    base = f"{CLOVER_BASE_URL}/merchants/{HQ_MERCHANT_ID}"
-    headers = {"Authorization": f"Bearer {HQ_API_TOKEN}"}
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        all_items: list = []
-        current_offset = 0
-        while True:
-            resp = await client.get(
-                f"{base}/items",
-                headers=headers,
-                params={
-                    "expand": "categories,itemStock",
-                    "limit": 1000,
-                    "offset": current_offset,
-                    "filter": "deleted=false",
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            elements = data.get("elements", [])
-            all_items.extend(elements)
-            if len(elements) < 1000:
-                break
-            current_offset += 1000
-
-    # Get image map from our database
-    from app.database import DB_PATH
-    image_base_url = os.environ.get("BASE_URL", "https://thd-inventory-api.fly.dev") + "/api/inventory/images"
-    db = await aiosqlite.connect(DB_PATH)
     try:
-        cursor = await db.execute("SELECT sku, product_name, updated_at FROM product_images")
-        image_rows = await cursor.fetchall()
+        base = f"{CLOVER_BASE_URL}/merchants/{HQ_MERCHANT_ID}"
+        headers = {"Authorization": f"Bearer {HQ_API_TOKEN}"}
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            all_items: list = []
+            current_offset = 0
+            while True:
+                resp = await client.get(
+                    f"{base}/items",
+                    headers=headers,
+                    params={
+                        "expand": "categories,itemStock",
+                        "limit": 1000,
+                        "offset": current_offset,
+                        "filter": "deleted=false",
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                elements = data.get("elements", [])
+                all_items.extend(elements)
+                if len(elements) < 1000:
+                    break
+                current_offset += 1000
+
+        # Get image map from our database
+        from app.database import DB_PATH
+        image_base_url = os.environ.get("BASE_URL", "https://thd-inventory-api.fly.dev") + "/api/inventory/images"
+        db = await aiosqlite.connect(DB_PATH)
+        try:
+            cursor = await db.execute("SELECT sku, product_name, updated_at FROM product_images")
+            image_rows = await cursor.fetchall()
+        finally:
+            await db.close()
+        image_by_sku = {row[0]: f"{image_base_url}/{row[0]}?nobg=1&t={row[2] or ''}" for row in image_rows}
+        image_by_name = {}
+        for row in image_rows:
+            if row[1]:
+                image_by_name[row[1].upper()] = f"{image_base_url}/{row[0]}?nobg=1&t={row[2] or ''}"
+
+        products = []
+        categories_set: set = set()
+
+        for item in all_items:
+            if item.get("hidden", False):
+                continue
+
+            name = item.get("name", "")
+            sku = item.get("sku", "") or item.get("id", "")
+            price = item.get("price", 0)
+            item_categories = [c.get("name", "") for c in item.get("categories", {}).get("elements", [])]
+            stock_info = item.get("itemStock", {})
+            stock = stock_info.get("quantity", 0) if stock_info else 0
+            description = item.get("description", "")
+            online_name = item.get("onlineName", "") or name
+
+            for cat in item_categories:
+                categories_set.add(cat)
+
+            image_url = image_by_sku.get(sku)
+            if not image_url:
+                image_url = image_by_name.get(name.upper())
+
+            slug = name.lower().replace(" ", "-").replace(",", "").replace(".", "")
+            slug = "-".join(slug.split())
+
+            products.append({
+                "id": item.get("id", ""),
+                "name": name,
+                "online_name": online_name,
+                "slug": slug,
+                "sku": sku,
+                "price": price,
+                "description": description,
+                "categories": item_categories,
+                "stock": stock,
+                "available": item.get("available", True) and stock > 0,
+                "image_url": image_url,
+                "is_age_restricted": item.get("isAgeRestricted", False),
+            })
+
+        products.sort(key=lambda p: p["name"])
+
+        result = {
+            "products": products,
+            "total": len(products),
+            "categories": sorted(categories_set),
+        }
+
+        _product_cache = result
+        _cache_timestamp = time.time()
+        print(f"[cache] Product cache refreshed: {len(products)} products")
+        return result
+    except Exception as e:
+        print(f"[cache] Refresh failed: {e}")
+        if _product_cache:
+            return _product_cache
+        raise
     finally:
-        await db.close()
-    image_by_sku = {row[0]: f"{image_base_url}/{row[0]}?nobg=1&t={row[2] or ''}" for row in image_rows}
-    image_by_name = {}
-    for row in image_rows:
-        if row[1]:
-            image_by_name[row[1].upper()] = f"{image_base_url}/{row[0]}?nobg=1&t={row[2] or ''}"
-
-    products = []
-    categories_set: set = set()
-
-    for item in all_items:
-        if item.get("hidden", False):
-            continue
-
-        name = item.get("name", "")
-        sku = item.get("sku", "") or item.get("id", "")
-        price = item.get("price", 0)
-        item_categories = [c.get("name", "") for c in item.get("categories", {}).get("elements", [])]
-        stock_info = item.get("itemStock", {})
-        stock = stock_info.get("quantity", 0) if stock_info else 0
-        description = item.get("description", "")
-        online_name = item.get("onlineName", "") or name
-
-        for cat in item_categories:
-            categories_set.add(cat)
-
-        image_url = image_by_sku.get(sku)
-        if not image_url:
-            image_url = image_by_name.get(name.upper())
-
-        slug = name.lower().replace(" ", "-").replace(",", "").replace(".", "")
-        slug = "-".join(slug.split())
-
-        products.append({
-            "id": item.get("id", ""),
-            "name": name,
-            "online_name": online_name,
-            "slug": slug,
-            "sku": sku,
-            "price": price,
-            "description": description,
-            "categories": item_categories,
-            "stock": stock,
-            "available": item.get("available", True) and stock > 0,
-            "image_url": image_url,
-            "is_age_restricted": item.get("isAgeRestricted", False),
-        })
-
-    products.sort(key=lambda p: p["name"])
-
-    result = {
-        "products": products,
-        "total": len(products),
-        "categories": sorted(categories_set),
-    }
-
-    _product_cache = result
-    _cache_timestamp = time.time()
-    print(f"[cache] Product cache refreshed: {len(products)} products")
-    return result
+        _refresh_in_progress = False
 
 
 async def _get_cached_products() -> dict:
-    """Return cached products, refreshing in background if stale."""
+    """Return cached products instantly. Trigger background refresh if stale."""
     global _product_cache, _cache_timestamp
     now = time.time()
 
+    # Fresh cache — return immediately
     if _product_cache and (now - _cache_timestamp) < CACHE_TTL:
         return _product_cache
 
+    # Stale cache — return it immediately but kick off background refresh
     if _product_cache:
-        # Stale cache exists — return it and refresh in background
-        asyncio.create_task(_refresh_cache_background())
+        if not _refresh_in_progress:
+            asyncio.create_task(_safe_refresh())
         return _product_cache
 
-    # No cache at all — must fetch synchronously
-    async with _cache_lock:
-        if _product_cache:
-            return _product_cache
-        return await _fetch_and_cache_products()
+    # No cache at all — must wait for first fetch
+    return await _fetch_and_cache_products()
 
 
-async def _refresh_cache_background():
-    """Background task to refresh the cache without blocking requests."""
-    async with _cache_lock:
-        try:
-            await _fetch_and_cache_products()
-        except Exception as e:
-            print(f"[cache] Background refresh failed: {e}")
+async def _safe_refresh():
+    """Background refresh that won't duplicate or crash."""
+    try:
+        await _fetch_and_cache_products()
+    except Exception as e:
+        print(f"[cache] Background refresh failed: {e}")
 
 
 @router.get("/products")
@@ -202,23 +210,20 @@ async def get_products(
     offset: int = 0,
 ):
     """Public endpoint: Get products from Clover eCommerce catalog (HQ location).
-    Returns products with categories, stock, and image URLs from inventory backend.
     Results are served from an in-memory cache that refreshes every 5 minutes."""
     cached = await _get_cached_products()
     products = cached["products"]
 
-    # Apply optional filters on the cached data
     if category and category.lower() != "all":
         products = [p for p in products if any(c.lower() == category.lower() for c in p["categories"])]
     if search:
         search_lower = search.lower()
         products = [p for p in products if search_lower in p["name"].lower() or search_lower in (p.get("description") or "").lower()]
 
-    return {
-        "products": products,
-        "total": len(products),
-        "categories": cached["categories"],
-    }
+    return JSONResponse(
+        content={"products": products, "total": len(products), "categories": cached["categories"]},
+        headers={"Cache-Control": "public, max-age=120, stale-while-revalidate=300"},
+    )
 
 
 @router.post("/orders")
