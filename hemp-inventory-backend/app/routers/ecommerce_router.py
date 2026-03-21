@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from typing import Optional, List
 from pydantic import BaseModel
 import httpx
 import aiosqlite
 import time
+import json
 import smtplib
 import asyncio
 import os
@@ -62,41 +63,92 @@ CLOVER_CHARGES_URL = "https://scl.clover.com/v1/charges"
 
 # ── In-memory product cache ──────────────────────────────────────────────────
 _product_cache: dict = {}  # {"products": [...], "total": int, "categories": [...]}
+_product_cache_json: bytes = b""  # Pre-serialized JSON for the full /products response
 _cache_timestamp: float = 0.0
 _refresh_in_progress: bool = False
-CACHE_TTL = 300  # 5 minutes
+CACHE_TTL = 600  # 10 minutes
+DISK_CACHE_PATH = os.environ.get("DB_PATH", "").replace("app.db", "product_cache.json") or "/tmp/product_cache.json"
+
+
+async def _load_disk_cache() -> bool:
+    """Load product cache from disk (survives restarts/deploys). Returns True if loaded."""
+    global _product_cache, _product_cache_json, _cache_timestamp
+    try:
+        if os.path.exists(DISK_CACHE_PATH):
+            with open(DISK_CACHE_PATH, "r") as f:
+                disk_data = json.load(f)
+            saved_at = disk_data.get("timestamp", 0)
+            age = time.time() - saved_at
+            if age < 3600:  # disk cache valid for 1 hour
+                _product_cache = disk_data["data"]
+                _cache_timestamp = saved_at
+                _product_cache_json = json.dumps(
+                    {"products": _product_cache["products"], "total": _product_cache["total"], "categories": _product_cache["categories"]}
+                ).encode()
+                print(f"[cache] Loaded {_product_cache['total']} products from disk cache ({age:.0f}s old)")
+                return True
+    except Exception as e:
+        print(f"[cache] Disk cache load failed: {e}")
+    return False
+
+
+def _save_disk_cache(result: dict) -> None:
+    """Persist cache to disk so it survives restarts."""
+    try:
+        with open(DISK_CACHE_PATH, "w") as f:
+            json.dump({"data": result, "timestamp": time.time()}, f)
+    except Exception as e:
+        print(f"[cache] Disk cache save failed: {e}")
+
+
+async def _fetch_clover_page(client: httpx.AsyncClient, base: str, headers: dict, offset: int) -> list:
+    """Fetch a single page of items from Clover API."""
+    resp = await client.get(
+        f"{base}/items",
+        headers=headers,
+        params={
+            "expand": "categories,itemStock",
+            "limit": 500,
+            "offset": offset,
+            "filter": "deleted=false",
+        },
+    )
+    resp.raise_for_status()
+    return resp.json().get("elements", [])
 
 
 async def _fetch_and_cache_products() -> dict:
     """Fetch all products from Clover API + image DB and cache in memory."""
-    global _product_cache, _cache_timestamp, _refresh_in_progress
+    global _product_cache, _product_cache_json, _cache_timestamp, _refresh_in_progress
     _refresh_in_progress = True
+    start_time = time.time()
 
     try:
         base = f"{CLOVER_BASE_URL}/merchants/{HQ_MERCHANT_ID}"
         headers = {"Authorization": f"Bearer {HQ_API_TOKEN}"}
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            all_items: list = []
-            current_offset = 0
-            while True:
-                resp = await client.get(
-                    f"{base}/items",
-                    headers=headers,
-                    params={
-                        "expand": "categories,itemStock",
-                        "limit": 1000,
-                        "offset": current_offset,
-                        "filter": "deleted=false",
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                elements = data.get("elements", [])
-                all_items.extend(elements)
-                if len(elements) < 1000:
-                    break
-                current_offset += 1000
+        # First request to get total count
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            first_page = await _fetch_clover_page(client, base, headers, 0)
+
+            # If first page has 500 items, there are more pages — fetch them in parallel
+            if len(first_page) >= 500:
+                offsets = list(range(500, 5000, 500))  # up to 5000 items
+                tasks = [_fetch_clover_page(client, base, headers, o) for o in offsets]
+                pages = await asyncio.gather(*tasks, return_exceptions=True)
+                all_items = list(first_page)
+                for page in pages:
+                    if isinstance(page, Exception):
+                        print(f"[cache] Page fetch failed: {page}")
+                        continue
+                    if not page:  # empty page = no more items
+                        break
+                    all_items.extend(page)
+            else:
+                all_items = list(first_page)
+
+        fetch_time = time.time() - start_time
+        print(f"[cache] Clover API fetched {len(all_items)} items in {fetch_time:.1f}s")
 
         # Get image map from our database
         from app.database import DB_PATH
@@ -164,7 +216,17 @@ async def _fetch_and_cache_products() -> dict:
 
         _product_cache = result
         _cache_timestamp = time.time()
-        print(f"[cache] Product cache refreshed: {len(products)} products")
+        # Pre-serialize JSON so /products endpoint returns bytes instantly
+        _product_cache_json = json.dumps(
+            {"products": products, "total": len(products), "categories": result["categories"]}
+        ).encode()
+
+        total_time = time.time() - start_time
+        print(f"[cache] Product cache refreshed: {len(products)} products in {total_time:.1f}s")
+
+        # Save to disk for fast recovery after restart
+        _save_disk_cache(result)
+
         return result
     except Exception as e:
         print(f"[cache] Refresh failed: {e}")
@@ -190,7 +252,13 @@ async def _get_cached_products() -> dict:
             asyncio.create_task(_safe_refresh())
         return _product_cache
 
-    # No cache at all — must wait for first fetch
+    # No cache at all — try disk cache first
+    if await _load_disk_cache():
+        if not _refresh_in_progress:
+            asyncio.create_task(_safe_refresh())
+        return _product_cache
+
+    # No cache anywhere — must wait for first fetch
     return await _fetch_and_cache_products()
 
 
@@ -210,7 +278,16 @@ async def get_products(
     offset: int = 0,
 ):
     """Public endpoint: Get products from Clover eCommerce catalog (HQ location).
-    Results are served from an in-memory cache that refreshes every 5 minutes."""
+    Results are served from an in-memory cache that refreshes every 10 minutes."""
+
+    # Fast path: no filters + pre-serialized JSON available → return raw bytes
+    if not category and not search and _product_cache_json:
+        return Response(
+            content=_product_cache_json,
+            media_type="application/json",
+            headers={"Cache-Control": "public, max-age=120, stale-while-revalidate=300"},
+        )
+
     cached = await _get_cached_products()
     products = cached["products"]
 
