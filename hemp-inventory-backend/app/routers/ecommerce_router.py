@@ -101,51 +101,47 @@ def _save_disk_cache(result: dict) -> None:
         print(f"[cache] Disk cache save failed: {e}")
 
 
-async def _fetch_clover_page(client: httpx.AsyncClient, base: str, headers: dict, offset: int) -> list:
-    """Fetch a single page of items from Clover API."""
-    resp = await client.get(
-        f"{base}/items",
-        headers=headers,
-        params={
-            "expand": "categories,itemStock",
-            "limit": 500,
-            "offset": offset,
-            "filter": "deleted=false",
-        },
-    )
-    resp.raise_for_status()
-    return resp.json().get("elements", [])
+_fetch_event: Optional[asyncio.Event] = None  # Signals when an in-flight fetch completes
 
 
 async def _fetch_and_cache_products() -> dict:
     """Fetch all products from Clover API + image DB and cache in memory."""
-    global _product_cache, _product_cache_json, _cache_timestamp, _refresh_in_progress
+    global _product_cache, _product_cache_json, _cache_timestamp, _refresh_in_progress, _fetch_event
+    if _refresh_in_progress and _fetch_event:
+        # Another fetch is already running — wait for it instead of starting a duplicate
+        await _fetch_event.wait()
+        return _product_cache
+
     _refresh_in_progress = True
+    _fetch_event = asyncio.Event()
     start_time = time.time()
 
     try:
         base = f"{CLOVER_BASE_URL}/merchants/{HQ_MERCHANT_ID}"
         headers = {"Authorization": f"Bearer {HQ_API_TOKEN}"}
 
-        # First request to get total count
+        # Sequential pagination — avoids Clover 429 rate limits
         async with httpx.AsyncClient(timeout=120.0) as client:
-            first_page = await _fetch_clover_page(client, base, headers, 0)
-
-            # If first page has 500 items, there are more pages — fetch them in parallel
-            if len(first_page) >= 500:
-                offsets = list(range(500, 5000, 500))  # up to 5000 items
-                tasks = [_fetch_clover_page(client, base, headers, o) for o in offsets]
-                pages = await asyncio.gather(*tasks, return_exceptions=True)
-                all_items = list(first_page)
-                for page in pages:
-                    if isinstance(page, Exception):
-                        print(f"[cache] Page fetch failed: {page}")
-                        continue
-                    if not page:  # empty page = no more items
-                        break
-                    all_items.extend(page)
-            else:
-                all_items = list(first_page)
+            all_items: list = []
+            current_offset = 0
+            while True:
+                resp = await client.get(
+                    f"{base}/items",
+                    headers=headers,
+                    params={
+                        "expand": "categories,itemStock",
+                        "limit": 1000,
+                        "offset": current_offset,
+                        "filter": "deleted=false",
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                elements = data.get("elements", [])
+                all_items.extend(elements)
+                if len(elements) < 1000:
+                    break
+                current_offset += 1000
 
         fetch_time = time.time() - start_time
         print(f"[cache] Clover API fetched {len(all_items)} items in {fetch_time:.1f}s")
@@ -235,6 +231,8 @@ async def _fetch_and_cache_products() -> dict:
         raise
     finally:
         _refresh_in_progress = False
+        if _fetch_event:
+            _fetch_event.set()
 
 
 async def _get_cached_products() -> dict:
