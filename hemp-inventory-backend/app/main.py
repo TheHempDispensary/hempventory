@@ -115,7 +115,8 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     # Run initial inventory sync in background so server starts accepting requests immediately
     asyncio.create_task(_scheduled_inventory_sync())
-    # Pre-warm the ecommerce product cache so first request is instant
+    # Load disk cache first for instant availability, then refresh from Clover in background
+    await ecommerce_router._load_disk_cache()
     asyncio.create_task(ecommerce_router._fetch_and_cache_products())
     yield
     scheduler.shutdown()
