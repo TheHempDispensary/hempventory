@@ -1121,9 +1121,10 @@ async def get_image(
             img = img.resize((w, new_height), PILImage.LANCZOS)
             buf = io.BytesIO()
             if nobg and nobg == 1:
-                # Keep as PNG to preserve transparency
-                img.save(buf, format="PNG")
-                final_media_type = "image/png"
+                # Save as JPEG with white background (no transparency needed)
+                img = img.convert("RGB")
+                img.save(buf, format="JPEG", quality=90)
+                final_media_type = "image/jpeg"
             else:
                 # Save as WebP for smaller file size, fall back to original format
                 try:
@@ -1519,35 +1520,42 @@ async def transfer_stock(
 
 
 def _remove_white_background(image_bytes: bytes, threshold: int = 240, edge_softness: int = 20) -> tuple[bytes, str]:
-    """Remove white/near-white AND dark/black backgrounds from an image, returning transparent PNG bytes."""
+    """Remove white/near-white backgrounds (transparent) and replace dark/black backgrounds with white."""
     img = PILImage.open(io.BytesIO(image_bytes)).convert("RGBA")
     pixels = img.load()
     width, height = img.size
 
-    dark_threshold = 30
-    dark_edge_softness = 20
+    dark_threshold = 35
+    dark_edge_softness = 25
 
     for y in range(height):
         for x in range(width):
             r, g, b, a = pixels[x, y]
-            # Remove white/near-white pixels
+            # Remove white/near-white pixels (make transparent)
             if r > threshold and g > threshold and b > threshold:
-                pixels[x, y] = (r, g, b, 0)
+                pixels[x, y] = (255, 255, 255, 0)
             elif r > (threshold - edge_softness) and g > (threshold - edge_softness) and b > (threshold - edge_softness):
                 min_c = min(r, g, b)
                 new_alpha = int(255 * (1 - (min_c - (threshold - edge_softness)) / edge_softness))
                 pixels[x, y] = (r, g, b, min(a, max(0, new_alpha)))
-            # Remove black/near-black pixels
+            # Replace black/near-black pixels with white
             elif r < dark_threshold and g < dark_threshold and b < dark_threshold:
-                pixels[x, y] = (r, g, b, 0)
+                pixels[x, y] = (255, 255, 255, 255)
             elif r < (dark_threshold + dark_edge_softness) and g < (dark_threshold + dark_edge_softness) and b < (dark_threshold + dark_edge_softness):
                 max_c = max(r, g, b)
-                new_alpha = int(255 * (max_c - dark_threshold) / dark_edge_softness)
-                pixels[x, y] = (r, g, b, min(a, max(0, new_alpha)))
+                blend = max_c / (dark_threshold + dark_edge_softness)
+                new_r = int(r * blend + 255 * (1 - blend))
+                new_g = int(g * blend + 255 * (1 - blend))
+                new_b = int(b * blend + 255 * (1 - blend))
+                pixels[x, y] = (new_r, new_g, new_b, a)
 
+    # Flatten to white background and save as JPEG for smaller size
+    background = PILImage.new("RGBA", img.size, (255, 255, 255, 255))
+    background.paste(img, mask=img.split()[3])
+    rgb_img = background.convert("RGB")
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue(), "image/png"
+    rgb_img.save(buf, format="JPEG", quality=90)
+    return buf.getvalue(), "image/jpeg"
 
 
 class BulkImageAssignRequest(BaseModel):
