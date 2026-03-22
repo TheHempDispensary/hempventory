@@ -117,19 +117,42 @@ class CloverClient:
         offset: int = 0,
         filter_str: Optional[str] = None,
         expand: str = "lineItems,customers",
+        paginate_all: bool = False,
     ) -> dict:
-        """Get orders for sales tracking."""
-        params: dict = {"limit": limit, "offset": offset, "expand": expand}
-        if filter_str:
-            params["filter"] = filter_str
+        """Get orders for sales tracking. If paginate_all=True, fetches all pages."""
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await self._request_with_retry(
-                client, "get",
-                f"{self.base_url}/orders",
-                headers=self._headers(),
-                params=params,
-            )
-            return resp.json()
+            if not paginate_all:
+                params: dict = {"limit": limit, "offset": offset, "expand": expand}
+                if filter_str:
+                    params["filter"] = filter_str
+                resp = await self._request_with_retry(
+                    client, "get",
+                    f"{self.base_url}/orders",
+                    headers=self._headers(),
+                    params=params,
+                )
+                return resp.json()
+            else:
+                all_orders: list = []
+                current_offset = offset
+                while True:
+                    params = {"limit": limit, "offset": current_offset, "expand": expand}
+                    if filter_str:
+                        params["filter"] = filter_str
+                    resp = await self._request_with_retry(
+                        client, "get",
+                        f"{self.base_url}/orders",
+                        headers=self._headers(),
+                        params=params,
+                    )
+                    data = resp.json()
+                    elements = data.get("elements", [])
+                    all_orders.extend(elements)
+                    if len(elements) < limit:
+                        break
+                    current_offset += limit
+                    await asyncio.sleep(0.5)
+                return {"elements": all_orders}
 
     async def delete_item(self, item_id: str) -> None:
         """Delete an inventory item."""

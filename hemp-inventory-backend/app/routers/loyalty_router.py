@@ -943,7 +943,7 @@ async def _do_sync_orders(db: aiosqlite.Connection) -> dict:
                 if cc_name:
                     clover_id_to_name[cc_id] = cc_name
 
-            orders_data = await client.get_orders(limit=100, filter_str="payType!=NULL")
+            orders_data = await client.get_orders(limit=100, filter_str="payType!=NULL", paginate_all=True)
             orders = orders_data.get("elements", [])
 
             for order in orders:
@@ -1076,247 +1076,107 @@ async def sync_clover_orders(
     user: dict = Depends(get_current_user),
     db: aiosqlite.Connection = Depends(get_db),
 ):
-    """Poll Clover orders and auto-award loyalty points for matched customers.
-    Matches by phone number between Clover order customers and loyalty_customers.
-    Only processes orders not yet synced (tracked in loyalty_synced_orders table)."""
+    """Poll Clover orders and auto-award loyalty points for matched customers."""
+    return await _do_sync_orders(db)
+
+
+@router.post("/rematch-orders")
+async def rematch_unmatched_orders(
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Re-attempt matching on all previously 'no_match' orders.
+    Useful after importing new customers or fixing customer data."""
+    # Delete all no_match records so they get re-processed on next sync
+    cursor = await db.execute("SELECT COUNT(*) FROM loyalty_synced_orders WHERE status = 'no_match'")
+    no_match_count = (await cursor.fetchone())[0]
+
+    if no_match_count == 0:
+        return {"status": "done", "message": "No unmatched orders to retry.", "cleared": 0}
+
+    await db.execute("DELETE FROM loyalty_synced_orders WHERE status = 'no_match'")
+    await db.commit()
+
+    # Now run the sync again to re-process those orders
+    result = await _do_sync_orders(db)
+    result["previously_unmatched"] = no_match_count
+    return result
+
+
+@router.get("/unmatched-report")
+async def unmatched_orders_report(
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Report on unmatched orders from the last 30 days."""
+    # Total no_match orders
+    cursor = await db.execute(
+        "SELECT COUNT(*) FROM loyalty_synced_orders WHERE status = 'no_match'"
+    )
+    total_no_match = (await cursor.fetchone())[0]
+
+    # No_match in last 30 days
+    cursor = await db.execute(
+        "SELECT COUNT(*) FROM loyalty_synced_orders WHERE status = 'no_match' AND synced_at >= datetime('now', '-30 days')"
+    )
+    no_match_30d = (await cursor.fetchone())[0]
+
+    # Total dollar value of unmatched orders (last 30 days)
+    cursor = await db.execute(
+        "SELECT COALESCE(SUM(order_total), 0) FROM loyalty_synced_orders WHERE status = 'no_match' AND synced_at >= datetime('now', '-30 days')"
+    )
+    unmatched_value_cents = (await cursor.fetchone())[0]
+
+    # Estimated lost points
     settings = await _get_settings(db)
     points_per_dollar = int(settings.get("points_per_dollar", "1"))
+    estimated_lost_points = math.floor((unmatched_value_cents / 100.0) * points_per_dollar)
 
-    # Get all locations
-    loc_cursor = await db.execute("SELECT id, name, merchant_id, api_token FROM locations")
-    locations = await loc_cursor.fetchall()
-    if not locations:
-        return {"status": "no_locations", "orders_processed": 0, "points_awarded": 0}
-
-    # Get all loyalty customers indexed by phone, name, and clover_customer_id
-    cust_cursor = await db.execute(
-        "SELECT id, first_name, last_name, phone, email, clover_customer_id FROM loyalty_customers"
+    # By location breakdown
+    cursor = await db.execute(
+        """SELECT location_name, COUNT(*), COALESCE(SUM(order_total), 0)
+           FROM loyalty_synced_orders
+           WHERE status = 'no_match' AND synced_at >= datetime('now', '-30 days')
+           GROUP BY location_name"""
     )
-    cust_rows = await cust_cursor.fetchall()
+    by_location = await cursor.fetchall()
 
-    # Build multiple lookup indexes for matching
-    phone_to_customer: dict[str, dict] = {}
-    name_to_customer: dict[str, dict] = {}
-    clover_id_to_customer: dict[str, dict] = {}
-
-    for c in cust_rows:
-        cust_dict = {
-            "id": c[0], "first_name": c[1], "last_name": c[2],
-            "phone": c[3], "email": c[4],
-        }
-        # Phone index (normalized last 10 digits)
-        raw_phone = c[3] or ""
-        normalized = "".join(ch for ch in raw_phone if ch.isdigit())
-        if len(normalized) >= 10:
-            normalized = normalized[-10:]
-            phone_to_customer[normalized] = cust_dict
-
-        # Name index (lowercase first+last)
-        name_key = f"{(c[1] or '').strip()} {(c[2] or '').strip()}".strip().lower()
-        if name_key:
-            name_to_customer[name_key] = cust_dict
-
-        # Clover customer ID index (if previously linked - legacy single field)
-        clover_cid = c[5] or ""
-        if clover_cid:
-            clover_id_to_customer[clover_cid] = cust_dict
-
-    # Also load multi-location Clover ID mappings
-    map_cursor = await db.execute(
-        "SELECT loyalty_customer_id, clover_customer_id, merchant_id FROM loyalty_clover_id_map"
+    # Recent unmatched orders (last 20)
+    cursor = await db.execute(
+        """SELECT clover_order_id, location_name, order_total, synced_at
+           FROM loyalty_synced_orders
+           WHERE status = 'no_match'
+           ORDER BY synced_at DESC LIMIT 20"""
     )
-    map_rows = await map_cursor.fetchall()
-    for mr in map_rows:
-        mapped_clover_id = mr[1]
-        mapped_loyalty_id = mr[0]
-        # Find the loyalty customer dict for this mapping
-        for c in cust_rows:
-            if c[0] == mapped_loyalty_id:
-                clover_id_to_customer[mapped_clover_id] = {
-                    "id": c[0], "first_name": c[1], "last_name": c[2],
-                    "phone": c[3], "email": c[4],
-                }
-                break
+    recent = await cursor.fetchall()
 
-    total_processed = 0
-    total_points_awarded = 0
-    total_skipped = 0
-    total_no_match = 0
-    details: list[dict] = []
+    # Overall sync stats for context
+    cursor = await db.execute("SELECT COUNT(*) FROM loyalty_synced_orders WHERE status = 'awarded'")
+    total_awarded = (await cursor.fetchone())[0]
 
-    for loc in locations:
-        loc_id, loc_name, merchant_id, api_token = loc[0], loc[1], loc[2], loc[3]
-        try:
-            client = CloverClient(merchant_id, api_token)
+    cursor = await db.execute("SELECT COUNT(*) FROM loyalty_synced_orders")
+    total_synced = (await cursor.fetchone())[0]
 
-            # Pre-fetch ALL Clover customers for this location to build
-            # a mapping of clover_customer_id -> phone number.
-            # Clover orders only include customer IDs (not phone numbers),
-            # so we need this lookup table.
-            clover_cust_data = await client.get_customers(limit=100)
-            clover_id_to_phone: dict[str, str] = {}
-            clover_id_to_name: dict[str, str] = {}
-            for cc in clover_cust_data.get("elements", []):
-                cc_id = cc.get("id", "")
-                # Build phone mapping
-                phone_elements = cc.get("phoneNumbers", {}).get("elements", []) if cc.get("phoneNumbers") else []
-                for pe in phone_elements:
-                    ph = pe.get("phoneNumber", "")
-                    if ph:
-                        clover_id_to_phone[cc_id] = ph
-                        break
-                # Build name mapping
-                cc_name = f"{(cc.get('firstName') or '').strip()} {(cc.get('lastName') or '').strip()}".strip().lower()
-                if cc_name:
-                    clover_id_to_name[cc_id] = cc_name
+    match_rate = ((total_awarded / total_synced * 100) if total_synced > 0 else 0)
 
-            # Get recent paid orders (with customers expanded)
-            orders_data = await client.get_orders(limit=100, filter_str="payType!=NULL")
-            orders = orders_data.get("elements", [])
-
-            for order in orders:
-                order_id = order.get("id", "")
-                if not order_id:
-                    continue
-
-                # Check if already synced
-                synced_cursor = await db.execute(
-                    "SELECT id FROM loyalty_synced_orders WHERE clover_order_id = ? AND location_merchant_id = ?",
-                    (order_id, merchant_id),
-                )
-                if await synced_cursor.fetchone():
-                    total_skipped += 1
-                    continue
-
-                order_total = order.get("total", 0)  # in cents
-                if order_total <= 0:
-                    # Mark as synced but no points (zero/negative order)
-                    await db.execute(
-                        "INSERT INTO loyalty_synced_orders (clover_order_id, location_merchant_id, location_name, order_total, status) VALUES (?, ?, ?, ?, 'zero_total')",
-                        (order_id, merchant_id, loc_name, order_total),
-                    )
-                    total_skipped += 1
-                    continue
-
-                # Try multiple matching strategies to find the loyalty customer
-                matched_customer = None
-                order_customers = order.get("customers", {})
-                order_cust_elements = (order_customers.get("elements", []) if order_customers else [])
-
-                for oc in order_cust_elements:
-                    clover_cust_id = oc.get("id", "")
-
-                    # Strategy 1: Direct Clover customer ID match (previously linked)
-                    if clover_cust_id and clover_cust_id in clover_id_to_customer:
-                        matched_customer = clover_id_to_customer[clover_cust_id]
-                        break
-
-                    # Strategy 2: Phone number match (inline on order or from Clover customer lookup)
-                    customer_phone = oc.get("phoneNumber") or oc.get("phone", "")
-                    if not customer_phone and clover_cust_id and clover_cust_id in clover_id_to_phone:
-                        customer_phone = clover_id_to_phone[clover_cust_id]
-
-                    if customer_phone:
-                        norm_phone = "".join(ch for ch in customer_phone if ch.isdigit())
-                        if len(norm_phone) >= 10:
-                            norm_phone = norm_phone[-10:]
-                            matched_customer = phone_to_customer.get(norm_phone)
-                            if matched_customer:
-                                # Auto-link this Clover customer ID in mapping table
-                                if clover_cust_id:
-                                    try:
-                                        await db.execute(
-                                            "INSERT OR IGNORE INTO loyalty_clover_id_map (loyalty_customer_id, clover_customer_id, merchant_id, location_name) VALUES (?, ?, ?, ?)",
-                                            (matched_customer["id"], clover_cust_id, merchant_id, loc_name),
-                                        )
-                                        clover_id_to_customer[clover_cust_id] = matched_customer
-                                    except Exception:
-                                        pass
-                                break
-
-                    # Strategy 3: Name-based match (Clover customer name -> loyalty customer name)
-                    if clover_cust_id and clover_cust_id in clover_id_to_name:
-                        clover_name = clover_id_to_name[clover_cust_id]
-                        if clover_name and clover_name in name_to_customer:
-                            matched_customer = name_to_customer[clover_name]
-                            # Auto-link in mapping table
-                            if clover_cust_id:
-                                try:
-                                    await db.execute(
-                                        "INSERT OR IGNORE INTO loyalty_clover_id_map (loyalty_customer_id, clover_customer_id, merchant_id, location_name) VALUES (?, ?, ?, ?)",
-                                        (matched_customer["id"], clover_cust_id, merchant_id, loc_name),
-                                    )
-                                    clover_id_to_customer[clover_cust_id] = matched_customer
-                                except Exception:
-                                    pass
-                            break
-
-                if not matched_customer:
-                    # No match - record as synced but unmatched
-                    await db.execute(
-                        "INSERT INTO loyalty_synced_orders (clover_order_id, location_merchant_id, location_name, order_total, status) VALUES (?, ?, ?, ?, 'no_match')",
-                        (order_id, merchant_id, loc_name, order_total),
-                    )
-                    total_no_match += 1
-                    continue
-
-                # Calculate points: points_per_dollar * order total in dollars
-                order_dollars = order_total / 100.0
-                points_to_award = math.floor(order_dollars * points_per_dollar)
-                if points_to_award <= 0:
-                    await db.execute(
-                        "INSERT INTO loyalty_synced_orders (clover_order_id, location_merchant_id, location_name, order_total, customer_id, status) VALUES (?, ?, ?, ?, ?, 'zero_points')",
-                        (order_id, merchant_id, loc_name, order_total, matched_customer["id"]),
-                    )
-                    total_skipped += 1
-                    continue
-
-                # Award points
-                await db.execute(
-                    """UPDATE loyalty_customers
-                       SET points_balance = points_balance + ?,
-                           lifetime_points = lifetime_points + ?,
-                           updated_at = CURRENT_TIMESTAMP
-                       WHERE id = ?""",
-                    (points_to_award, points_to_award, matched_customer["id"]),
-                )
-                await db.execute(
-                    """INSERT INTO loyalty_transactions (customer_id, type, points, description, order_id, location_name)
-                       VALUES (?, 'earn', ?, ?, ?, ?)""",
-                    (matched_customer["id"], points_to_award,
-                     f"POS purchase ${order_dollars:.2f} at {loc_name}",
-                     order_id, loc_name),
-                )
-                # Mark order as synced
-                await db.execute(
-                    "INSERT INTO loyalty_synced_orders (clover_order_id, location_merchant_id, location_name, order_total, customer_id, points_awarded, status) VALUES (?, ?, ?, ?, ?, ?, 'awarded')",
-                    (order_id, merchant_id, loc_name, order_total, matched_customer["id"], points_to_award),
-                )
-
-                total_processed += 1
-                total_points_awarded += points_to_award
-                details.append({
-                    "order_id": order_id,
-                    "location": loc_name,
-                    "customer": f"{matched_customer['first_name']} {matched_customer.get('last_name', '')}".strip(),
-                    "order_total": order_dollars,
-                    "points_awarded": points_to_award,
-                })
-
-        except Exception as e:
-            details.append({"location": loc_name, "error": str(e)})
-
-        # Delay between locations to avoid Clover API rate limiting
-        await asyncio.sleep(2)
-
-    await db.commit()
     return {
-        "status": "done",
-        "orders_processed": total_processed,
-        "points_awarded": total_points_awarded,
-        "orders_skipped": total_skipped,
-        "orders_no_match": total_no_match,
-        "details": details,
+        "total_unmatched_orders": total_no_match,
+        "unmatched_last_30_days": no_match_30d,
+        "unmatched_value_dollars": round(unmatched_value_cents / 100.0, 2),
+        "estimated_lost_points": estimated_lost_points,
+        "total_awarded_orders": total_awarded,
+        "total_synced_orders": total_synced,
+        "match_rate_percent": round(match_rate, 1),
+        "by_location": [{
+            "location": r[0],
+            "unmatched_count": r[1],
+            "unmatched_value_dollars": round(r[2] / 100.0, 2),
+        } for r in by_location],
+        "recent_unmatched": [{
+            "order_id": r[0], "location": r[1],
+            "order_total_dollars": round((r[2] or 0) / 100.0, 2),
+            "synced_at": r[3],
+        } for r in recent],
     }
 
 

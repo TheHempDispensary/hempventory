@@ -287,11 +287,15 @@ async def init_db():
                 "INSERT INTO loyalty_settings (key, value) VALUES (?, ?)",
                 [
                     ("points_per_dollar", "1"),
-                    ("signup_bonus", "10"),
-                    ("birthday_bonus", "25"),
+                    ("signup_bonus", "200"),
+                    ("birthday_bonus", "100"),
                     ("program_name", "Hemp Rewards"),
                 ]
             )
+
+        # Migration: update loyalty settings to match customer-facing website values
+        await db.execute("UPDATE loyalty_settings SET value = '200' WHERE key = 'signup_bonus' AND value = '10'")
+        await db.execute("UPDATE loyalty_settings SET value = '100' WHERE key = 'birthday_bonus' AND value = '25'")
 
         # Seed default reward if empty
         cursor = await db.execute("SELECT COUNT(*) FROM loyalty_rewards")
