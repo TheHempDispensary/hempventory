@@ -1519,19 +1519,30 @@ async def transfer_stock(
 
 
 def _remove_white_background(image_bytes: bytes, threshold: int = 240, edge_softness: int = 20) -> tuple[bytes, str]:
-    """Remove white/near-white background from an image, returning transparent PNG bytes and content_type."""
+    """Remove white/near-white AND dark/black backgrounds from an image, returning transparent PNG bytes."""
     img = PILImage.open(io.BytesIO(image_bytes)).convert("RGBA")
     pixels = img.load()
     width, height = img.size
 
+    dark_threshold = 30
+    dark_edge_softness = 20
+
     for y in range(height):
         for x in range(width):
             r, g, b, a = pixels[x, y]
+            # Remove white/near-white pixels
             if r > threshold and g > threshold and b > threshold:
                 pixels[x, y] = (r, g, b, 0)
             elif r > (threshold - edge_softness) and g > (threshold - edge_softness) and b > (threshold - edge_softness):
                 min_c = min(r, g, b)
                 new_alpha = int(255 * (1 - (min_c - (threshold - edge_softness)) / edge_softness))
+                pixels[x, y] = (r, g, b, min(a, max(0, new_alpha)))
+            # Remove black/near-black pixels
+            elif r < dark_threshold and g < dark_threshold and b < dark_threshold:
+                pixels[x, y] = (r, g, b, 0)
+            elif r < (dark_threshold + dark_edge_softness) and g < (dark_threshold + dark_edge_softness) and b < (dark_threshold + dark_edge_softness):
+                max_c = max(r, g, b)
+                new_alpha = int(255 * (max_c - dark_threshold) / dark_edge_softness)
                 pixels[x, y] = (r, g, b, min(a, max(0, new_alpha)))
 
     buf = io.BytesIO()
