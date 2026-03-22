@@ -23,6 +23,11 @@ router = APIRouter(prefix="/api/inventory", tags=["inventory"])
 _inventory_cache: dict = {"items": [], "locations": [], "updated_at": 0}
 _cache_lock = asyncio.Lock()
 
+# In-memory cache for processed images (nobg + resize results)
+# Key: (sku, w, nobg) -> (image_bytes, media_type)
+_image_cache: dict[tuple[str, int | None, int | None], tuple[bytes, str]] = {}
+_IMAGE_CACHE_MAX = 500
+
 
 async def _invalidate_cache():
     """Clear inventory cache so next /cached call triggers a fresh sync."""
@@ -1077,6 +1082,9 @@ async def upload_image(
         (sku, data.image_data, data.content_type, data.product_name),
     )
     await db.commit()
+    # Invalidate processed image cache for this SKU
+    for key in [k for k in _image_cache if k[0] == sku]:
+        del _image_cache[key]
     # Update cache in-place to reflect the new image without full re-sync
     async with _cache_lock:
         for item in _inventory_cache.get("items", []):
@@ -1094,7 +1102,17 @@ async def get_image(
 ):
     """Get a product image by SKU. Returns the raw image bytes.
     Optional ?w=300 parameter to get a resized thumbnail for faster loading.
-    Optional ?nobg=1 parameter to remove white background (returns transparent PNG)."""
+    Optional ?nobg=1 parameter to remove white background (returns transparent PNG).
+    Results are cached in-memory so expensive nobg processing only runs once per SKU."""
+    cache_key = (sku, w, nobg)
+    cached = _image_cache.get(cache_key)
+    if cached is not None:
+        return Response(
+            content=cached[0],
+            media_type=cached[1],
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
     cursor = await db.execute(
         "SELECT image_data, content_type, updated_at FROM product_images WHERE sku = ?", (sku,)
     )
@@ -1136,10 +1154,16 @@ async def get_image(
         except Exception:
             pass  # Fall back to original image if resize fails
 
+    # Cache the processed result (evict oldest if full)
+    if len(_image_cache) >= _IMAGE_CACHE_MAX:
+        oldest_key = next(iter(_image_cache))
+        del _image_cache[oldest_key]
+    _image_cache[cache_key] = (image_bytes, final_media_type)
+
     return Response(
         content=image_bytes,
         media_type=final_media_type,
-        headers={"Cache-Control": "public, max-age=3600"},
+        headers={"Cache-Control": "public, max-age=86400"},
     )
 
 
@@ -1285,6 +1309,9 @@ async def delete_image(
     """Delete a product image by SKU."""
     await db.execute("DELETE FROM product_images WHERE sku = ?", (sku,))
     await db.commit()
+    # Invalidate processed image cache for this SKU
+    for key in [k for k in _image_cache if k[0] == sku]:
+        del _image_cache[key]
     return {"status": "ok", "sku": sku}
 
 
