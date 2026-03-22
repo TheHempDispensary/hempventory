@@ -1381,6 +1381,13 @@ class PublicSignup(BaseModel):
     last_name: Optional[str] = ""
     phone: str
     email: Optional[str] = None
+    birthday: Optional[str] = None
+
+
+class ReferralRequest(BaseModel):
+    referrer_phone: str
+    friend_name: str
+    friend_email: str
 
 
 @router.post("/signup")
@@ -1389,7 +1396,7 @@ async def public_signup(
     db: aiosqlite.Connection = Depends(get_db),
 ):
     """Public endpoint for customers to sign up for loyalty online."""
-    return await _do_signup(data.phone, data.first_name, data.last_name or "", data.email or "", db)
+    return await _do_signup(data.phone, data.first_name, data.last_name or "", data.email or "", db, data.birthday or "")
 
 
 @router.get("/signup")
@@ -1398,13 +1405,14 @@ async def public_signup_get(
     first_name: str = "",
     last_name: str = "",
     email: str = "",
+    birthday: str = "",
     db: aiosqlite.Connection = Depends(get_db),
 ):
     """GET-based signup endpoint (avoids CORS preflight for cross-origin calls)."""
-    return await _do_signup(phone, first_name, last_name, email, db)
+    return await _do_signup(phone, first_name, last_name, email, db, birthday)
 
 
-async def _do_signup(phone: str, first_name: str, last_name: str, email: str, db: aiosqlite.Connection):
+async def _do_signup(phone: str, first_name: str, last_name: str, email: str, db: aiosqlite.Connection, birthday: str = ""):
     if not phone:
         raise HTTPException(status_code=400, detail="Phone number is required")
     if not first_name:
@@ -1428,10 +1436,10 @@ async def _do_signup(phone: str, first_name: str, last_name: str, email: str, db
 
     try:
         cursor = await db.execute(
-            """INSERT INTO loyalty_customers (first_name, last_name, phone, email,
+            """INSERT INTO loyalty_customers (first_name, last_name, phone, email, birthday,
                                              points_balance, lifetime_points)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (first_name, last_name, phone, email,
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (first_name, last_name, phone, email, birthday,
              signup_bonus, signup_bonus),
         )
         customer_id = cursor.lastrowid
@@ -1487,13 +1495,40 @@ async def lookup_customer(
     )
     rewards = await rw_cursor.fetchall()
 
+    # Get transaction history
+    tx_cursor = await db.execute(
+        """SELECT type, points, description, created_at
+           FROM loyalty_transactions WHERE customer_id = ?
+           ORDER BY created_at DESC LIMIT 50""",
+        (row[0],),
+    )
+    txns = await tx_cursor.fetchall()
+
+    # Get birthday
+    bday_cursor = await db.execute(
+        "SELECT birthday FROM loyalty_customers WHERE id = ?", (row[0],)
+    )
+    bday_row = await bday_cursor.fetchone()
+
+    # Get lifetime spend from Clover order syncs (sum of earn transactions with order_id)
+    spend_cursor = await db.execute(
+        """SELECT COALESCE(SUM(points), 0) FROM loyalty_transactions
+           WHERE customer_id = ? AND type = 'earn'""",
+        (row[0],),
+    )
+    lifetime_earned = (await spend_cursor.fetchone())[0]
+
     return {
         "found": True,
         "customer": {
             "id": row[0], "first_name": row[1], "last_name": row[2] or "",
             "phone": row[3] or "", "email": row[4] or "",
             "points_balance": row[5], "lifetime_points": row[6],
+            "birthday": bday_row[0] or "" if bday_row else "",
         },
+        "transactions": [{
+            "type": t[0], "points": t[1], "description": t[2] or "", "created_at": t[3]
+        } for t in txns],
         "available_rewards": [{
             "id": r[0], "name": r[1], "points_required": r[2],
             "reward_type": r[3], "reward_value": r[4], "description": r[5],
