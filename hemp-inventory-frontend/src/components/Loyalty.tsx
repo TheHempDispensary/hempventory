@@ -715,42 +715,75 @@ export default function Loyalty() {
 
       {/* ── Rewards Tab ── */}
       {tab === "rewards" && (
-        <div className="space-y-4">
-          <div className="flex justify-between items-center">
-            <h2 className="text-lg font-semibold text-gray-900">Reward Tiers</h2>
-            <button onClick={() => setShowAddReward(true)} className="flex items-center gap-2 px-4 py-2.5 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700">
-              <Plus className="w-4 h-4" /> Add Reward
-            </button>
+        <div className="space-y-6">
+          {/* Ways to Earn */}
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900 mb-4">Ways to Earn</h2>
+            <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              {[
+                { label: "Sign Up Bonus", pts: settings.signup_bonus || "200", desc: "Create your free account", icon: "🎁" },
+                { label: "Every $1 Spent", pts: settings.points_per_dollar || "1", desc: "In-store & online", icon: "💵" },
+                { label: "Follow on Instagram", pts: "25", desc: "@thehempdispensary", icon: "📸" },
+                { label: "Follow on TikTok", pts: "25", desc: "@thehempdispensary", icon: "🎵" },
+                { label: "Email Signup", pts: "30", desc: "Join our mailing list", icon: "✉️" },
+                { label: "Google Review", pts: "150", desc: "Pending staff approval", icon: "⭐" },
+                { label: "Refer a Friend", pts: "500", desc: "After friend's first purchase", icon: "👥" },
+                { label: "Birthday Bonus", pts: settings.birthday_bonus || "100", desc: "Awarded in your birthday month", icon: "🎂" },
+                { label: "Daily Bud Puppet", pts: "10", desc: "Play once per day", icon: "🎮" },
+                { label: "Scratch Card Win", pts: "25", desc: "Win the daily scratch card", icon: "🎰" },
+              ].map((item) => (
+                <div key={item.label} className="bg-white rounded-xl border border-gray-200 p-4 flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-lg bg-green-50 flex items-center justify-center text-lg flex-shrink-0">
+                    {item.icon}
+                  </div>
+                  <div className="min-w-0">
+                    <p className="font-medium text-gray-900 text-sm">{item.label}</p>
+                    <p className="text-green-600 text-sm font-semibold">+{item.pts} pts</p>
+                    <p className="text-xs text-gray-400 truncate">{item.desc}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
 
-          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {rewards.map((r) => (
-              <div key={r.id} className={`bg-white rounded-xl border p-5 ${r.is_active ? "border-gray-200" : "border-gray-100 opacity-60"}`}>
-                <div className="flex items-start justify-between mb-3">
-                  <div className="w-10 h-10 rounded-lg bg-purple-50 flex items-center justify-center">
-                    <Gift className="w-5 h-5 text-purple-600" />
+          {/* Redemption Tiers */}
+          <div>
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-lg font-semibold text-gray-900">Redemption Tiers</h2>
+              <button onClick={() => setShowAddReward(true)} className="flex items-center gap-2 px-4 py-2.5 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700">
+                <Plus className="w-4 h-4" /> Add Reward
+              </button>
+            </div>
+
+            <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              {rewards.map((r) => (
+                <div key={r.id} className={`bg-white rounded-xl border p-5 ${r.is_active ? "border-gray-200" : "border-gray-100 opacity-60"}`}>
+                  <div className="flex items-start justify-between mb-3">
+                    <div className="w-10 h-10 rounded-lg bg-purple-50 flex items-center justify-center">
+                      <Gift className="w-5 h-5 text-purple-600" />
+                    </div>
+                    <div className="flex gap-1">
+                      <button onClick={() => handleToggleReward(r)} className={`px-2 py-1 rounded text-xs font-medium ${r.is_active ? "bg-green-50 text-green-700" : "bg-gray-100 text-gray-500"}`}>
+                        {r.is_active ? "Active" : "Inactive"}
+                      </button>
+                      <button onClick={() => handleDeleteReward(r.id)} className="p-1 rounded hover:bg-red-50 text-red-400"><Trash2 className="w-3.5 h-3.5" /></button>
+                    </div>
                   </div>
-                  <div className="flex gap-1">
-                    <button onClick={() => handleToggleReward(r)} className={`px-2 py-1 rounded text-xs font-medium ${r.is_active ? "bg-green-50 text-green-700" : "bg-gray-100 text-gray-500"}`}>
-                      {r.is_active ? "Active" : "Inactive"}
-                    </button>
-                    <button onClick={() => handleDeleteReward(r.id)} className="p-1 rounded hover:bg-red-50 text-red-400"><Trash2 className="w-3.5 h-3.5" /></button>
+                  <h3 className="font-semibold text-gray-900 mb-1">{r.name}</h3>
+                  <p className="text-sm text-gray-500 mb-3">{r.description || "No description"}</p>
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-medium text-purple-600">{r.points_required} pts required</span>
+                    <span className="text-sm font-bold text-green-600">${r.reward_value.toFixed(2)} off</span>
                   </div>
                 </div>
-                <h3 className="font-semibold text-gray-900 mb-1">{r.name}</h3>
-                <p className="text-sm text-gray-500 mb-3">{r.description || "No description"}</p>
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium text-purple-600">{r.points_required} pts required</span>
-                  <span className="text-sm font-bold text-green-600">${r.reward_value.toFixed(2)} off</span>
+              ))}
+              {rewards.length === 0 && (
+                <div className="col-span-full text-center py-12 text-gray-400">
+                  <Gift className="w-12 h-12 mx-auto mb-3 opacity-30" />
+                  <p>No rewards configured yet</p>
                 </div>
-              </div>
-            ))}
-            {rewards.length === 0 && (
-              <div className="col-span-full text-center py-12 text-gray-400">
-                <Gift className="w-12 h-12 mx-auto mb-3 opacity-30" />
-                <p>No rewards configured yet</p>
-              </div>
-            )}
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -785,8 +818,12 @@ export default function Loyalty() {
             <h3 className="font-semibold text-gray-900 mb-2">How It Works</h3>
             <ul className="text-sm text-gray-600 space-y-2">
               <li>Customers earn <strong>{settings.points_per_dollar || 1} point(s)</strong> per $1 spent</li>
-              <li>New members get a <strong>{settings.signup_bonus || 10} point</strong> sign-up bonus</li>
-              <li>Birthday bonus: <strong>{settings.birthday_bonus || 25} points</strong></li>
+              <li>New members get a <strong>{settings.signup_bonus || 200} point</strong> sign-up bonus</li>
+              <li>Birthday bonus: <strong>{settings.birthday_bonus || 100} points</strong></li>
+              <li>Follow on Instagram/TikTok: <strong>25 pts each</strong></li>
+              <li>Email signup: <strong>30 pts</strong> · Google review: <strong>150 pts</strong></li>
+              <li>Refer a friend: <strong>500 pts</strong> after their first purchase</li>
+              <li>Daily Bud Puppet: <strong>10 pts</strong> · Scratch Card Win: <strong>25 pts</strong></li>
               <li>Points work across <strong>all locations</strong> and your online store</li>
               <li>Customers can look up points on the e-commerce site by phone or email</li>
             </ul>
@@ -824,7 +861,7 @@ export default function Loyalty() {
               <label className="block text-xs font-medium text-gray-600 mb-1">Notes</label>
               <textarea value={newCustomer.notes} onChange={(e) => setNewCustomer({ ...newCustomer, notes: e.target.value })} className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm" rows={2} />
             </div>
-            <p className="text-xs text-green-600">New member will receive {settings.signup_bonus || "10"} bonus points!</p>
+            <p className="text-xs text-green-600">New member will receive {settings.signup_bonus || "200"} bonus points!</p>
             <button onClick={handleAddCustomer} className="w-full px-4 py-2.5 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700">
               Add Member
             </button>
