@@ -1120,20 +1120,18 @@ async def get_image(
             new_height = int(img.height * ratio)
             img = img.resize((w, new_height), PILImage.LANCZOS)
             buf = io.BytesIO()
-            if nobg and nobg == 1:
-                # Save as JPEG with white background (no transparency needed)
-                img = img.convert("RGB")
-                img.save(buf, format="JPEG", quality=90)
-                final_media_type = "image/jpeg"
-            else:
-                # Save as WebP for smaller file size, fall back to original format
-                try:
+            # Always serve WebP for smaller file size
+            try:
+                if img.mode == "RGBA":
+                    img.save(buf, format="WEBP", quality=80, lossless=False)
+                else:
+                    img = img.convert("RGB")
                     img.save(buf, format="WEBP", quality=80)
-                    final_media_type = "image/webp"
-                except Exception:
-                    fmt = "PNG" if row[1] == "image/png" else "JPEG"
-                    img.save(buf, format=fmt, quality=85)
-                    final_media_type = row[1]
+                final_media_type = "image/webp"
+            except Exception:
+                fmt = "PNG" if row[1] == "image/png" else "JPEG"
+                img.save(buf, format=fmt, quality=85)
+                final_media_type = row[1]
             image_bytes = buf.getvalue()
         except Exception:
             pass  # Fall back to original image if resize fails
