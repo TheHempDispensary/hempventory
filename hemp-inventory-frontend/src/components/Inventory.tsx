@@ -270,11 +270,13 @@ export default function Inventory() {
     let filtered = [...items];
 
     if (search) {
-      const s = search.toLowerCase();
+      const words = search.toLowerCase().split(/\s+/).filter(Boolean);
       filtered = filtered.filter(
-        (i) =>
-          i.name.toLowerCase().includes(s) ||
-          i.sku.toLowerCase().includes(s)
+        (i) => {
+          const name = i.name.toLowerCase();
+          const sku = i.sku.toLowerCase();
+          return words.every(w => name.includes(w) || sku.includes(w));
+        }
       );
     }
 
