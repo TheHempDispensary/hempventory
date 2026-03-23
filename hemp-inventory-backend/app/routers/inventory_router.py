@@ -1106,31 +1106,40 @@ async def get_image(
     image_bytes = base64.b64decode(row[0])
     final_media_type = row[1]
 
-    # Resize FIRST (before nobg) so background removal runs on smaller image = much faster
-    if w and 50 <= w <= 1200:
-        try:
-            img = PILImage.open(io.BytesIO(image_bytes))
-            ratio = w / img.width
-            new_height = int(img.height * ratio)
-            img = img.resize((w, new_height), PILImage.LANCZOS)
-            buf = io.BytesIO()
-            img.save(buf, format="PNG")
-            image_bytes = buf.getvalue()
-            final_media_type = "image/png"
-        except Exception:
-            pass  # Fall back to original image if resize fails
+    # Run CPU-intensive image processing in thread pool to avoid blocking the event loop
+    def _process_image(raw_bytes: bytes, width: int | None, do_nobg: bool) -> tuple[bytes, str]:
+        result_bytes = raw_bytes
+        media = final_media_type
+        # Resize FIRST (before nobg) so background removal runs on smaller image
+        if width and 50 <= width <= 1200:
+            try:
+                img = PILImage.open(io.BytesIO(result_bytes))
+                ratio = width / img.width
+                new_height = int(img.height * ratio)
+                img = img.resize((width, new_height), PILImage.LANCZOS)
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                result_bytes = buf.getvalue()
+                media = "image/png"
+            except Exception:
+                pass
+        # Remove white background if requested
+        if do_nobg:
+            try:
+                result_bytes, media = _remove_white_background(result_bytes)
+            except Exception:
+                pass
+        return result_bytes, media
 
-    # Remove white background if requested (runs on resized image = fast)
-    if nobg and nobg == 1:
-        try:
-            image_bytes, final_media_type = _remove_white_background(image_bytes)
-        except Exception:
-            pass  # Fall back to original image if background removal fails
+    loop = asyncio.get_event_loop()
+    image_bytes, final_media_type = await loop.run_in_executor(
+        None, _process_image, image_bytes, w, bool(nobg and nobg == 1)
+    )
 
     return Response(
         content=image_bytes,
         media_type=final_media_type,
-        headers={"Cache-Control": "public, max-age=3600"},
+        headers={"Cache-Control": "public, max-age=86400"},
     )
 
 
