@@ -284,6 +284,37 @@ async def init_db():
             )
         """)
 
+        # Discount codes table for e-commerce
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS discount_codes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT NOT NULL UNIQUE,
+                discount_type TEXT NOT NULL DEFAULT 'percentage',
+                discount_value REAL NOT NULL,
+                description TEXT,
+                min_order_amount INTEGER DEFAULT 0,
+                max_uses INTEGER DEFAULT 0,
+                times_used INTEGER DEFAULT 0,
+                is_active INTEGER DEFAULT 1,
+                starts_at TEXT,
+                expires_at TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Seed default discount code if empty
+        try:
+            cursor = await db.execute("SELECT COUNT(*) FROM discount_codes")
+            count = (await cursor.fetchone())[0]
+            if count == 0:
+                await db.execute(
+                    """INSERT INTO discount_codes (code, discount_type, discount_value, description, is_active)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    ("FIRST15", "percentage", 15.0, "15% off for first-time customers", 1)
+                )
+        except Exception:
+            pass
+
         # Seed default loyalty settings if empty
         cursor = await db.execute("SELECT COUNT(*) FROM loyalty_settings")
         count = (await cursor.fetchone())[0]

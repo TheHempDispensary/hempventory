@@ -344,6 +344,34 @@ export const updateOrderStatus = (orderId: number, status: string) =>
 export const updateOrderNotes = (orderId: number, staffNotes: string) =>
   api.patch(`/api/ecommerce/orders/${orderId}/notes`, { staff_notes: staffNotes });
 
+// Discounts
+export const getDiscounts = () => api.get("/api/discounts");
+
+export const createDiscount = (data: {
+  code: string;
+  discount_type: string;
+  discount_value: number;
+  description?: string;
+  min_order_amount?: number;
+  max_uses?: number;
+  starts_at?: string;
+  expires_at?: string;
+}) => api.post("/api/discounts", data);
+
+export const updateDiscount = (id: number, data: {
+  code?: string;
+  discount_type?: string;
+  discount_value?: number;
+  description?: string;
+  min_order_amount?: number;
+  max_uses?: number;
+  is_active?: boolean;
+  starts_at?: string;
+  expires_at?: string;
+}) => api.patch(`/api/discounts/${id}`, data);
+
+export const deleteDiscount = (id: number) => api.delete(`/api/discounts/${id}`);
+
 // Shipping (Shippo)
 export const createShipment = (data: {
   order_id: number;
