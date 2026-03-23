@@ -301,6 +301,23 @@ async def get_products(
     )
 
 
+@router.post("/products/refresh")
+async def refresh_products():
+    """Force refresh the product cache from Clover API."""
+    global _product_cache, _product_cache_json, _cache_timestamp
+    _product_cache = {}
+    _product_cache_json = b""
+    _cache_timestamp = 0.0
+    # Delete disk cache too
+    try:
+        if os.path.exists(DISK_CACHE_PATH):
+            os.remove(DISK_CACHE_PATH)
+    except Exception:
+        pass
+    result = await _fetch_and_cache_products()
+    return {"status": "refreshed", "total": result["total"], "categories": result["categories"]}
+
+
 @router.post("/orders")
 async def create_order(
     order: CreateOrderRequest,
