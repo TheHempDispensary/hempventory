@@ -16,6 +16,12 @@ from app.database import get_db
 
 STORE_EMAIL = "Support@TheHempDispensary.com"
 
+# SMTP env-var fallbacks (so emails work even if DB settings are empty)
+SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = os.environ.get("SMTP_PORT", "587")
+SMTP_USER = os.environ.get("SMTP_USER", "")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+
 
 class OrderItem(BaseModel):
     product_id: str
@@ -341,15 +347,54 @@ async def create_order(
             "Content-Type": "application/json",
             "x-forwarded-for": client_ip,
         }
+        # Build item descriptions for Clover receipt
+        item_lines = [f"{item.name} x{item.quantity}" for item in order.items]
+        description = "; ".join(item_lines)
+        if len(description) > 255:
+            description = description[:252] + "..."
+
         charge_data = {
             "amount": order.total,
             "currency": "usd",
             "source": order.payment_token,
-            "description": f"Hemp Dispensary Online Order - {order.customer.first_name} {order.customer.last_name}",
+            "description": description,
             "ecomind": "ecom",
         }
 
         async with httpx.AsyncClient(timeout=30.0) as client:
+            # Create a Clover order with line items so the receipt shows actual products
+            try:
+                clover_order_headers = {
+                    "Authorization": f"Bearer {HQ_API_TOKEN}",
+                    "Content-Type": "application/json",
+                }
+                clover_order_url = f"{CLOVER_BASE_URL}/merchants/{HQ_MERCHANT_ID}/orders"
+                order_body = {
+                    "state": "open",
+                    "manualTransaction": False,
+                    "note": f"Online Order - {order.customer.first_name} {order.customer.last_name} ({order.customer.email})",
+                }
+                order_resp = await client.post(clover_order_url, headers=clover_order_headers, json=order_body)
+                if order_resp.status_code == 200:
+                    clover_order = order_resp.json()
+                    clover_order_id = clover_order.get("id", "")
+                    # Add line items to the Clover order
+                    for item in order.items:
+                        line_item_url = f"{clover_order_url}/{clover_order_id}/line_items"
+                        line_item_body = {
+                            "name": item.name,
+                            "price": item.price,
+                            "unitQty": item.quantity * 1000,  # Clover uses millis for quantity
+                        }
+                        await client.post(line_item_url, headers=clover_order_headers, json=line_item_body)
+                    # Associate charge with the Clover order
+                    charge_data["orderId"] = clover_order_id
+                    print(f"[order] Created Clover order {clover_order_id} with {len(order.items)} line items")
+                else:
+                    print(f"[order] Failed to create Clover order: {order_resp.status_code} {order_resp.text}")
+            except Exception as e:
+                print(f"[order] Clover order creation failed (charge will still proceed): {e}")
+
             try:
                 resp = await client.post(
                     CLOVER_CHARGES_URL,
@@ -442,13 +487,25 @@ def _format_price(cents: int) -> str:
 
 
 async def _get_smtp_settings(db: aiosqlite.Connection) -> dict[str, str]:
-    """Get SMTP settings from database."""
+    """Get SMTP settings from database, falling back to env vars."""
     smtp_settings: dict[str, str] = {}
     for key in ["smtp_host", "smtp_port", "smtp_user", "smtp_password"]:
-        cursor = await db.execute("SELECT value FROM settings WHERE key = ?", (key,))
-        row = await cursor.fetchone()
-        if row:
-            smtp_settings[key] = row[0]
+        try:
+            cursor = await db.execute("SELECT value FROM settings WHERE key = ?", (key,))
+            row = await cursor.fetchone()
+            if row:
+                smtp_settings[key] = row[0]
+        except Exception:
+            pass
+    # Fall back to env vars for any missing settings
+    if not smtp_settings.get("smtp_host"):
+        smtp_settings["smtp_host"] = SMTP_HOST
+    if not smtp_settings.get("smtp_port"):
+        smtp_settings["smtp_port"] = SMTP_PORT
+    if not smtp_settings.get("smtp_user") and SMTP_USER:
+        smtp_settings["smtp_user"] = SMTP_USER
+    if not smtp_settings.get("smtp_password") and SMTP_PASSWORD:
+        smtp_settings["smtp_password"] = SMTP_PASSWORD
     return smtp_settings
 
 
@@ -742,3 +799,93 @@ async def get_product_detail(product_id: str):
         "image_url": image_url,
         "is_age_restricted": item.get("isAgeRestricted", False),
     }
+
+
+@router.get("/orders")
+async def get_orders(
+    request: Request,
+    db: aiosqlite.Connection = Depends(get_db),
+    limit: int = 50,
+    offset: int = 0,
+    status: Optional[str] = None,
+):
+    """Get online orders (requires admin auth via Authorization header)."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    # Verify JWT token
+    import jwt
+    token = auth.split(" ", 1)[1]
+    jwt_secret = os.environ.get("JWT_SECRET", "hemp-inventory-secret-key")
+    try:
+        jwt.decode(token, jwt_secret, algorithms=["HS256"])
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    # Fetch orders
+    query = "SELECT * FROM ecommerce_orders"
+    params: list = []
+    if status:
+        query += " WHERE payment_status = ?"
+        params.append(status)
+    query += " ORDER BY id DESC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+
+    cursor = await db.execute(query, params)
+    columns = [desc[0] for desc in cursor.description]
+    rows = await cursor.fetchall()
+    orders = [dict(zip(columns, row)) for row in rows]
+
+    # Fetch items for each order
+    for order in orders:
+        item_cursor = await db.execute(
+            "SELECT product_id, product_name, sku, price, quantity FROM ecommerce_order_items WHERE order_id = ?",
+            (order["id"],),
+        )
+        item_cols = [desc[0] for desc in item_cursor.description]
+        item_rows = await item_cursor.fetchall()
+        order["items"] = [dict(zip(item_cols, row)) for row in item_rows]
+
+    # Get total count
+    count_query = "SELECT COUNT(*) FROM ecommerce_orders"
+    count_params: list = []
+    if status:
+        count_query += " WHERE payment_status = ?"
+        count_params.append(status)
+    count_cursor = await db.execute(count_query, count_params)
+    total = (await count_cursor.fetchone())[0]
+
+    return {"orders": orders, "total": total}
+
+
+@router.patch("/orders/{order_id}/status")
+async def update_order_status(
+    order_id: int,
+    request: Request,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Update an order's fulfillment status (requires admin auth)."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    import jwt
+    token = auth.split(" ", 1)[1]
+    jwt_secret = os.environ.get("JWT_SECRET", "hemp-inventory-secret-key")
+    try:
+        jwt.decode(token, jwt_secret, algorithms=["HS256"])
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    body = await request.json()
+    new_status = body.get("status", "")
+    if new_status not in ("pending", "paid", "processing", "shipped", "delivered", "cancelled"):
+        raise HTTPException(status_code=400, detail="Invalid status")
+
+    await db.execute(
+        "UPDATE ecommerce_orders SET payment_status = ? WHERE id = ?",
+        (new_status, order_id),
+    )
+    await db.commit()
+    return {"success": True, "order_id": order_id, "status": new_status}
