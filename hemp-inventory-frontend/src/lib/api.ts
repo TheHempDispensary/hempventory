@@ -107,7 +107,7 @@ export const bulkStockUpdate = (updates: { sku: string; location_id: number; qua
   api.post("/api/inventory/items/bulk-stock-update", { updates });
 
 export const bulkAssignImages = (keyword: string, imageData: string, contentType: string = "image/png", skus?: string[], products?: { sku: string; name: string }[]) =>
-  api.post("/api/inventory/bulk-assign-images", { keyword, image_data: imageData, content_type: contentType, skus: skus || null, products: products || null });
+  api.post("/api/inventory/bulk-assign-images", { keyword, image_data: imageData, content_type: contentType, skus: skus || null, products: products || null }, { timeout: 60000 });
 
 export const syncRefunds = () => api.post("/api/inventory/sync-refunds");
 

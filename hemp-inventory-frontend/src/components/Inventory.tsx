@@ -992,20 +992,36 @@ export default function Inventory() {
     setAssigningImages(true);
     setBulkImageResult(null);
     try {
-      const reader = new FileReader();
-      const base64Promise = new Promise<string>((resolve) => {
-        reader.onload = () => {
-          const result = reader.result as string;
-          resolve(result.split(",")[1]); // strip data:image/...;base64,
-        };
-        reader.readAsDataURL(bulkImageFile);
-      });
-      const base64 = await base64Promise;
+      // Compress image client-side before uploading (max 800px, JPEG quality 0.8)
+      const compressImage = (file: File): Promise<string> => {
+        return new Promise((resolve, reject) => {
+          const img = document.createElement("img");
+          img.onload = () => {
+            const maxDim = 800;
+            let w = img.naturalWidth, h = img.naturalHeight;
+            if (w > maxDim || h > maxDim) {
+              if (w > h) { h = Math.round(h * maxDim / w); w = maxDim; }
+              else { w = Math.round(w * maxDim / h); h = maxDim; }
+            }
+            const canvas = document.createElement("canvas");
+            canvas.width = w;
+            canvas.height = h;
+            const ctx = canvas.getContext("2d");
+            if (!ctx) { reject(new Error("No canvas context")); return; }
+            ctx.drawImage(img, 0, 0, w, h);
+            const dataUrl = canvas.toDataURL("image/jpeg", 0.8);
+            resolve(dataUrl.split(",")[1]);
+          };
+          img.onerror = () => reject(new Error("Failed to load image"));
+          img.src = URL.createObjectURL(file);
+        });
+      };
+      const base64 = await compressImage(bulkImageFile);
       const selectedSkus = Array.from(bulkImageSelected);
       const selectedProducts = bulkImageMatches
         .filter((m) => bulkImageSelected.has(m.sku))
         .map((m) => ({ sku: m.sku, name: m.name }));
-      const resp = await bulkAssignImages(bulkImageKeyword, base64, bulkImageFile.type || "image/png", selectedSkus, selectedProducts);
+      const resp = await bulkAssignImages(bulkImageKeyword, base64, "image/jpeg", selectedSkus, selectedProducts);
       const d = resp.data;
       setBulkImageResult({ assigned: d.assigned, products: d.products || [] });
       if (d.assigned > 0) {
