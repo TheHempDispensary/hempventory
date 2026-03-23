@@ -156,11 +156,11 @@ async def _fetch_and_cache_products() -> dict:
             image_rows = await cursor.fetchall()
         finally:
             await db.close()
-        image_by_sku = {row[0]: f"{image_base_url}/{row[0]}?nobg=1&v=2&t={row[2] or ''}" for row in image_rows}
+        image_by_sku = {row[0]: f"{image_base_url}/{row[0]}?v=2&t={row[2] or ''}" for row in image_rows}
         image_by_name = {}
         for row in image_rows:
             if row[1]:
-                image_by_name[row[1].upper()] = f"{image_base_url}/{row[0]}?nobg=1&v=2&t={row[2] or ''}"
+                image_by_name[row[1].upper()] = f"{image_base_url}/{row[0]}?v=2&t={row[2] or ''}"
 
         products = []
         categories_set: set = set()
@@ -727,7 +727,7 @@ async def get_product_detail(product_id: str):
         row = await cursor.fetchone()
     finally:
         await db.close()
-    image_url = f"{image_base_url}/{row[0]}?nobg=1&v=2&t={row[1] or ''}" if row else None
+    image_url = f"{image_base_url}/{row[0]}?v=2&t={row[1] or ''}" if row else None
 
     return {
         "id": item.get("id", ""),
