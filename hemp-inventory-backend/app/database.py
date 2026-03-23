@@ -161,15 +161,19 @@ async def init_db():
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        # Migration: add charge_id and payment_status columns if missing
-        try:
-            await db.execute("ALTER TABLE ecommerce_orders ADD COLUMN charge_id TEXT")
-        except Exception:
-            pass
-        try:
-            await db.execute("ALTER TABLE ecommerce_orders ADD COLUMN payment_status TEXT DEFAULT 'pending'")
-        except Exception:
-            pass
+        # Migration: add columns if missing
+        for col, coldef in [
+            ("charge_id", "TEXT"),
+            ("payment_status", "TEXT DEFAULT 'pending'"),
+            ("tracking_number", "TEXT"),
+            ("tracking_url", "TEXT"),
+            ("label_url", "TEXT"),
+            ("shippo_transaction_id", "TEXT"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE ecommerce_orders ADD COLUMN {col} {coldef}")
+            except Exception:
+                pass
         await db.execute("""
             CREATE TABLE IF NOT EXISTS ecommerce_order_items (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

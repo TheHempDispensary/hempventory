@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { getOnlineOrders, updateOrderStatus } from "../lib/api";
-import { RefreshCw, Search, Package, ChevronDown, ChevronUp, Truck, CheckCircle, XCircle, Clock, ShoppingCart } from "lucide-react";
+import { getOnlineOrders, updateOrderStatus, createShipment, purchaseLabel, getShippingLabel } from "../lib/api";
+import { RefreshCw, Search, Package, ChevronDown, ChevronUp, Truck, CheckCircle, XCircle, Clock, ShoppingCart, Printer, Tag, ExternalLink, Loader2 } from "lucide-react";
 
 interface OrderItem {
   product_id: string;
@@ -30,7 +30,20 @@ interface Order {
   charge_id: string;
   payment_status: string;
   created_at: string;
+  tracking_number?: string;
+  tracking_url?: string;
+  label_url?: string;
   items: OrderItem[];
+}
+
+interface ShippingRate {
+  id: string;
+  provider: string;
+  service_level: string;
+  amount: string;
+  currency: string;
+  estimated_days: number | null;
+  duration_terms: string;
 }
 
 const STATUS_OPTIONS = [
@@ -56,6 +69,76 @@ function getStatusInfo(status: string) {
   return STATUS_OPTIONS.find((s) => s.value === status) || STATUS_OPTIONS[5];
 }
 
+function printOrder(order: Order) {
+  const printWindow = window.open("", "_blank", "width=800,height=600");
+  if (!printWindow) return;
+
+  const itemRows = order.items
+    .map(
+      (item) => `
+      <tr>
+        <td style="padding:8px;border-bottom:1px solid #eee">${item.product_name}</td>
+        <td style="padding:8px;border-bottom:1px solid #eee;text-align:center">${item.quantity}</td>
+        <td style="padding:8px;border-bottom:1px solid #eee;text-align:right">$${(item.price / 100).toFixed(2)}</td>
+        <td style="padding:8px;border-bottom:1px solid #eee;text-align:right">$${((item.price * item.quantity) / 100).toFixed(2)}</td>
+      </tr>`
+    )
+    .join("");
+
+  printWindow.document.write(`
+    <html>
+    <head><title>Order ${order.order_number}</title></head>
+    <body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto;padding:20px">
+      <div style="text-align:center;margin-bottom:20px">
+        <h1 style="margin:0;font-size:24px">The Hemp Dispensary</h1>
+        <p style="margin:4px 0;color:#666">Order Packing Slip</p>
+      </div>
+      <hr style="border:1px solid #ddd">
+      <div style="display:flex;justify-content:space-between;margin:16px 0">
+        <div>
+          <strong>Order:</strong> ${order.order_number}<br>
+          <strong>Date:</strong> ${formatDate(order.created_at)}<br>
+          <strong>Status:</strong> ${order.payment_status.toUpperCase()}
+        </div>
+        <div style="text-align:right">
+          <strong>Customer:</strong><br>
+          ${order.customer_first_name} ${order.customer_last_name}<br>
+          ${order.customer_email}<br>
+          ${order.customer_phone || ""}
+        </div>
+      </div>
+      <div style="background:#f9f9f9;padding:12px;border-radius:6px;margin-bottom:16px">
+        <strong>Ship To:</strong><br>
+        ${order.customer_first_name} ${order.customer_last_name}<br>
+        ${order.shipping_address}${order.shipping_apartment ? ", " + order.shipping_apartment : ""}<br>
+        ${order.shipping_city}, ${order.shipping_state} ${order.shipping_zip}
+      </div>
+      ${order.tracking_number ? "<p><strong>Tracking:</strong> " + order.tracking_number + "</p>" : ""}
+      <table style="width:100%;border-collapse:collapse;margin-top:12px">
+        <thead>
+          <tr style="background:#f3f4f6">
+            <th style="padding:8px;text-align:left">Product</th>
+            <th style="padding:8px;text-align:center">Qty</th>
+            <th style="padding:8px;text-align:right">Price</th>
+            <th style="padding:8px;text-align:right">Total</th>
+          </tr>
+        </thead>
+        <tbody>${itemRows}</tbody>
+      </table>
+      <div style="text-align:right;margin-top:12px">
+        <p>Subtotal: $${(order.subtotal / 100).toFixed(2)}</p>
+        <p>Shipping: ${order.shipping_cost === 0 ? "Free" : "$" + (order.shipping_cost / 100).toFixed(2)}</p>
+        <p>Tax: $${(order.tax / 100).toFixed(2)}</p>
+        <p style="font-size:18px"><strong>Total: $${(order.total / 100).toFixed(2)}</strong></p>
+      </div>
+      ${order.notes ? "<div style=\"margin-top:16px;padding:12px;background:#fffbeb;border-radius:6px\"><strong>Notes:</strong> " + order.notes + "</div>" : ""}
+      <` + `script>window.print();</` + `script>
+    </body>
+    </html>
+  `);
+  printWindow.document.close();
+}
+
 export default function OnlineOrders() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [total, setTotal] = useState(0);
@@ -64,6 +147,17 @@ export default function OnlineOrders() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [expandedOrder, setExpandedOrder] = useState<number | null>(null);
   const [updatingStatus, setUpdatingStatus] = useState<number | null>(null);
+
+  // Shipping state
+  const [shippingOrderId, setShippingOrderId] = useState<number | null>(null);
+  const [rates, setRates] = useState<ShippingRate[]>([]);
+  const [loadingRates, setLoadingRates] = useState(false);
+  const [purchasingLabel, setPurchasingLabel] = useState(false);
+  const [shippingError, setShippingError] = useState("");
+  const [parcelWeight, setParcelWeight] = useState("1.0");
+  const [parcelLength, setParcelLength] = useState("10");
+  const [parcelWidth, setParcelWidth] = useState("8");
+  const [parcelHeight, setParcelHeight] = useState("4");
 
   const loadOrders = async () => {
     setLoading(true);
@@ -95,6 +189,72 @@ export default function OnlineOrders() {
       console.error("Error updating status:", err);
     } finally {
       setUpdatingStatus(null);
+    }
+  };
+
+  const handleGetRates = async (orderId: number) => {
+    setShippingOrderId(orderId);
+    setRates([]);
+    setShippingError("");
+    setLoadingRates(true);
+    try {
+      const res = await createShipment({
+        order_id: orderId,
+        parcel_weight: parseFloat(parcelWeight) || 1.0,
+        parcel_length: parseFloat(parcelLength) || 10,
+        parcel_width: parseFloat(parcelWidth) || 8,
+        parcel_height: parseFloat(parcelHeight) || 4,
+      });
+      setRates(res.data.rates || []);
+      if ((res.data.rates || []).length === 0) {
+        setShippingError("No shipping rates available for this address.");
+      }
+    } catch (err: unknown) {
+      const msg = (err && typeof err === "object" && "response" in err)
+        ? ((err as { response?: { data?: { detail?: string } } }).response?.data?.detail || "Failed to get rates")
+        : "Failed to get shipping rates";
+      setShippingError(msg);
+    } finally {
+      setLoadingRates(false);
+    }
+  };
+
+  const handlePurchaseLabel = async (rateId: string, orderId: number) => {
+    setPurchasingLabel(true);
+    setShippingError("");
+    try {
+      const res = await purchaseLabel({ rate_id: rateId, order_id: orderId });
+      const { label_url, tracking_number, tracking_url } = res.data;
+      setOrders((prev) =>
+        prev.map((o) =>
+          o.id === orderId
+            ? { ...o, label_url, tracking_number, tracking_url, payment_status: "shipped" }
+            : o
+        )
+      );
+      setShippingOrderId(null);
+      setRates([]);
+      if (label_url) {
+        window.open(label_url, "_blank");
+      }
+    } catch (err: unknown) {
+      const msg = (err && typeof err === "object" && "response" in err)
+        ? ((err as { response?: { data?: { detail?: string } } }).response?.data?.detail || "Failed to purchase label")
+        : "Failed to purchase label";
+      setShippingError(msg);
+    } finally {
+      setPurchasingLabel(false);
+    }
+  };
+
+  const handleViewLabel = async (orderId: number) => {
+    try {
+      const res = await getShippingLabel(orderId);
+      if (res.data.has_label && res.data.label_url) {
+        window.open(res.data.label_url, "_blank");
+      }
+    } catch (err) {
+      console.error("Error fetching label:", err);
     }
   };
 
@@ -203,6 +363,7 @@ export default function OnlineOrders() {
             const statusInfo = getStatusInfo(order.payment_status);
             const StatusIcon = statusInfo.icon;
             const isExpanded = expandedOrder === order.id;
+            const isShippingOpen = shippingOrderId === order.id;
 
             return (
               <div key={order.id} className="bg-white rounded-lg border border-gray-200 overflow-hidden">
@@ -213,12 +374,18 @@ export default function OnlineOrders() {
                 >
                   <div className="flex items-center gap-4 flex-1 min-w-0">
                     <div className="min-w-0">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <span className="font-semibold text-gray-900">{order.order_number}</span>
                         <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${statusInfo.color}`}>
                           <StatusIcon className="w-3 h-3" />
                           {statusInfo.label}
                         </span>
+                        {order.tracking_number && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
+                            <Truck className="w-3 h-3" />
+                            {order.tracking_number}
+                          </span>
+                        )}
                       </div>
                       <p className="text-sm text-gray-500 truncate">
                         {order.customer_first_name} {order.customer_last_name} &middot; {order.customer_email}
@@ -262,6 +429,18 @@ export default function OnlineOrders() {
                         <p className="text-sm text-gray-600">Placed: {formatDate(order.created_at)}</p>
                         <p className="text-sm text-gray-600">Charge: <span className="font-mono text-xs">{order.charge_id}</span></p>
                         {order.notes && <p className="text-sm text-gray-600 mt-1">Notes: {order.notes}</p>}
+                        {order.tracking_number && (
+                          <div className="mt-2">
+                            <p className="text-sm text-gray-600">
+                              Tracking: <span className="font-mono text-xs font-medium">{order.tracking_number}</span>
+                            </p>
+                            {order.tracking_url && (
+                              <a href={order.tracking_url} target="_blank" rel="noopener noreferrer" className="text-sm text-blue-600 hover:underline flex items-center gap-1 mt-1">
+                                <ExternalLink className="w-3 h-3" /> Track Package
+                              </a>
+                            )}
+                          </div>
+                        )}
                       </div>
                     </div>
 
@@ -297,6 +476,116 @@ export default function OnlineOrders() {
                         <p className="font-bold text-gray-900 text-base">Total: {formatPrice(order.total)}</p>
                       </div>
                     </div>
+
+                    {/* Action Buttons */}
+                    <div className="mt-4 pt-4 border-t border-gray-200 flex flex-wrap items-center gap-3">
+                      <button
+                        onClick={() => printOrder(order)}
+                        className="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm font-medium"
+                      >
+                        <Printer className="w-4 h-4" />
+                        Print Order
+                      </button>
+
+                      {order.label_url ? (
+                        <button
+                          onClick={() => handleViewLabel(order.id)}
+                          className="flex items-center gap-2 px-4 py-2 bg-indigo-100 text-indigo-700 rounded-lg hover:bg-indigo-200 transition-colors text-sm font-medium"
+                        >
+                          <Tag className="w-4 h-4" />
+                          View / Print Label
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => {
+                            if (isShippingOpen) {
+                              setShippingOrderId(null);
+                              setRates([]);
+                            } else {
+                              setShippingOrderId(order.id);
+                              setRates([]);
+                              setShippingError("");
+                            }
+                          }}
+                          className="flex items-center gap-2 px-4 py-2 bg-green-100 text-green-700 rounded-lg hover:bg-green-200 transition-colors text-sm font-medium"
+                        >
+                          <Tag className="w-4 h-4" />
+                          {isShippingOpen ? "Cancel" : "Create Shipping Label"}
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Shipping Label Creation Panel */}
+                    {isShippingOpen && !order.label_url && (
+                      <div className="mt-4 p-4 bg-white rounded-lg border border-green-200">
+                        <h4 className="text-sm font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                          <Truck className="w-4 h-4 text-green-600" />
+                          Create Shipping Label via Shippo
+                        </h4>
+
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+                          <div>
+                            <label className="text-xs text-gray-500 block mb-1">Weight (lb)</label>
+                            <input type="number" step="0.1" value={parcelWeight} onChange={(e) => setParcelWeight(e.target.value)}
+                              className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-green-500" />
+                          </div>
+                          <div>
+                            <label className="text-xs text-gray-500 block mb-1">Length (in)</label>
+                            <input type="number" step="0.5" value={parcelLength} onChange={(e) => setParcelLength(e.target.value)}
+                              className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-green-500" />
+                          </div>
+                          <div>
+                            <label className="text-xs text-gray-500 block mb-1">Width (in)</label>
+                            <input type="number" step="0.5" value={parcelWidth} onChange={(e) => setParcelWidth(e.target.value)}
+                              className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-green-500" />
+                          </div>
+                          <div>
+                            <label className="text-xs text-gray-500 block mb-1">Height (in)</label>
+                            <input type="number" step="0.5" value={parcelHeight} onChange={(e) => setParcelHeight(e.target.value)}
+                              className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-green-500" />
+                          </div>
+                        </div>
+
+                        <button
+                          onClick={() => handleGetRates(order.id)}
+                          disabled={loadingRates}
+                          className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors text-sm font-medium mb-3"
+                        >
+                          {loadingRates ? <Loader2 className="w-4 h-4 animate-spin" /> : <Truck className="w-4 h-4" />}
+                          {loadingRates ? "Getting Rates..." : "Get Shipping Rates"}
+                        </button>
+
+                        {shippingError && (
+                          <div className="text-sm text-red-600 bg-red-50 p-3 rounded-lg mb-3">{shippingError}</div>
+                        )}
+
+                        {rates.length > 0 && (
+                          <div className="space-y-2">
+                            <p className="text-xs font-semibold text-gray-500 uppercase">Select a Rate</p>
+                            {rates.map((rate) => (
+                              <div key={rate.id} className="flex items-center justify-between p-3 border border-gray-200 rounded-lg hover:border-green-300 transition-colors">
+                                <div>
+                                  <p className="text-sm font-medium text-gray-900">{rate.provider} &mdash; {rate.service_level}</p>
+                                  <p className="text-xs text-gray-500">
+                                    {rate.estimated_days ? `Est. ${rate.estimated_days} day${rate.estimated_days !== 1 ? "s" : ""}` : rate.duration_terms || ""}
+                                  </p>
+                                </div>
+                                <div className="flex items-center gap-3">
+                                  <span className="text-lg font-bold text-gray-900">${rate.amount}</span>
+                                  <button
+                                    onClick={() => handlePurchaseLabel(rate.id, order.id)}
+                                    disabled={purchasingLabel}
+                                    className="px-4 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors text-sm font-medium"
+                                  >
+                                    {purchasingLabel ? "Purchasing..." : "Buy Label"}
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
 
                     {/* Status Update */}
                     <div className="mt-4 pt-4 border-t border-gray-200 flex items-center gap-3">
