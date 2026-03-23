@@ -363,13 +363,6 @@ async def get_shipping_rates(body: ShippingRateRequest):
             )
         shipment = resp.json()
 
-    # Debug logging
-    print(f"[shippo] Shipment status: {shipment.get('status')}")
-    print(f"[shippo] Total rates returned: {len(shipment.get('rates', []))}")
-    print(f"[shippo] Messages: {shipment.get('messages', [])}")
-    for r in shipment.get("rates", []):
-        print(f"[shippo]   rate: provider={r.get('provider')} service={r.get('servicelevel',{}).get('name')} amount={r.get('amount')}")
-
     # Filter to USPS only, add $2 markup, and format
     rates = shipment.get("rates", [])
     usps_rates = []
