@@ -71,7 +71,9 @@ DISK_CACHE_PATH = os.environ.get("DB_PATH", "").replace("app.db", "product_cache
 
 
 async def _load_disk_cache() -> bool:
-    """Load product cache from disk (survives restarts/deploys). Returns True if loaded."""
+    """Load product cache from disk (survives restarts/deploys). Returns True if loaded.
+    Always loads if file exists — no TTL expiry. This ensures products are always
+    available instantly on startup, even if the file is hours old."""
     global _product_cache, _product_cache_json, _cache_timestamp
     try:
         if os.path.exists(DISK_CACHE_PATH):
@@ -79,14 +81,13 @@ async def _load_disk_cache() -> bool:
                 disk_data = json.load(f)
             saved_at = disk_data.get("timestamp", 0)
             age = time.time() - saved_at
-            if age < 3600:  # disk cache valid for 1 hour
-                _product_cache = disk_data["data"]
-                _cache_timestamp = saved_at
-                _product_cache_json = json.dumps(
-                    {"products": _product_cache["products"], "total": _product_cache["total"], "categories": _product_cache["categories"]}
-                ).encode()
-                print(f"[cache] Loaded {_product_cache['total']} products from disk cache ({age:.0f}s old)")
-                return True
+            _product_cache = disk_data["data"]
+            _cache_timestamp = saved_at
+            _product_cache_json = json.dumps(
+                {"products": _product_cache["products"], "total": _product_cache["total"], "categories": _product_cache["categories"]}
+            ).encode()
+            print(f"[cache] Loaded {_product_cache['total']} products from disk cache ({age:.0f}s old)")
+            return True
     except Exception as e:
         print(f"[cache] Disk cache load failed: {e}")
     return False

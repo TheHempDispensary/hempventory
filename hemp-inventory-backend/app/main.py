@@ -105,6 +105,15 @@ async def _scheduled_refund_sync():
         print(f"[auto-sync] Refund sync failed: {e}")
 
 
+async def _scheduled_ecommerce_refresh():
+    """Background job: refresh the ecommerce product cache from Clover every 10 minutes."""
+    try:
+        await ecommerce_router._fetch_and_cache_products()
+        print("[auto-sync] Ecommerce product cache refreshed")
+    except Exception as e:
+        print(f"[auto-sync] Ecommerce cache refresh failed: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
@@ -112,6 +121,7 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(_scheduled_inventory_sync, "interval", minutes=5, id="inventory_sync", replace_existing=True)
     scheduler.add_job(_scheduled_refund_sync, "interval", minutes=15, id="refund_sync", replace_existing=True)
     scheduler.add_job(_scheduled_loyalty_sync, "interval", minutes=10, id="loyalty_sync", replace_existing=True)
+    scheduler.add_job(_scheduled_ecommerce_refresh, "interval", minutes=10, id="ecommerce_refresh", replace_existing=True)
     scheduler.start()
     # Run initial inventory sync in background so server starts accepting requests immediately
     asyncio.create_task(_scheduled_inventory_sync())
