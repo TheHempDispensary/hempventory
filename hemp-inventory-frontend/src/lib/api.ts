@@ -106,8 +106,8 @@ export const bulkAssignCategory = (skus: string[], categoryName: string) =>
 export const bulkStockUpdate = (updates: { sku: string; location_id: number; quantity: number }[]) =>
   api.post("/api/inventory/items/bulk-stock-update", { updates });
 
-export const bulkAssignImages = (keyword: string, imageData: string, contentType: string = "image/png", skus?: string[]) =>
-  api.post("/api/inventory/bulk-assign-images", { keyword, image_data: imageData, content_type: contentType, skus: skus || null });
+export const bulkAssignImages = (keyword: string, imageData: string, contentType: string = "image/png", skus?: string[], products?: { sku: string; name: string }[]) =>
+  api.post("/api/inventory/bulk-assign-images", { keyword, image_data: imageData, content_type: contentType, skus: skus || null, products: products || null });
 
 export const syncRefunds = () => api.post("/api/inventory/sync-refunds");
 

@@ -1543,12 +1543,18 @@ def _remove_white_background(image_bytes: bytes, threshold: int = 240, edge_soft
     return buf.getvalue(), "image/png"
 
 
+class BulkImageProduct(BaseModel):
+    sku: str
+    name: str
+
+
 class BulkImageAssignRequest(BaseModel):
     keyword: str  # e.g., "gummies"
     image_data: str  # base64 encoded image
     content_type: str = "image/png"
     remove_bg: bool = False  # whether to remove white background
     skus: list[str] | None = None  # optional: only assign to these specific SKUs
+    products: list[BulkImageProduct] | None = None  # preferred: explicit sku+name pairs from frontend
 
 
 @router.post("/bulk-assign-images")
@@ -1558,7 +1564,7 @@ async def bulk_assign_images(
     db: aiosqlite.Connection = Depends(get_db),
 ):
     """Assign the same image to all products whose name contains the keyword.
-    For example, keyword='gummies' assigns the image to all gummy products."""
+    Accepts explicit product list from frontend to avoid re-fetching from Clover."""
     if not req.keyword or len(req.keyword) < 2:
         raise HTTPException(status_code=400, detail="Keyword must be at least 2 characters")
 
@@ -1582,37 +1588,28 @@ async def bulk_assign_images(
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Failed to remove background: {e}")
 
-    # Get all items from all locations to find matching products
-    locations = await _get_locations(db)
-    if not locations:
-        raise HTTPException(status_code=400, detail="No locations configured")
+    # Use explicit product list from frontend if provided (preferred path)
+    if req.products:
+        matching_skus: dict[str, str] = {p.sku: p.name for p in req.products}
+    else:
+        # Fallback: match from cached inventory instead of re-fetching from Clover
+        matching_skus = {}
+        keyword_lower = req.keyword.lower()
+        async with _cache_lock:
+            for item in _inventory_cache.get("items", []):
+                if keyword_lower in item["name"].lower():
+                    matching_skus[item["sku"]] = item["name"]
 
-    matching_skus: dict[str, str] = {}  # sku -> product name
-    keyword_lower = req.keyword.lower()
-
-    for loc in locations:
-        try:
-            client = CloverClient(loc[2], loc[3])
-            data = await client.get_items()
-            for item in data.get("elements", []):
-                name = item.get("name", "")
-                sku = item.get("sku") or item.get("id", "")
-                if keyword_lower in name.lower() and sku not in matching_skus:
-                    matching_skus[sku] = name
-        except Exception:
-            continue
-
-    if not matching_skus:
-        return {"status": "no_matches", "keyword": req.keyword, "assigned": 0, "products": []}
-
-    # If specific SKUs provided, filter to only those
-    if req.skus is not None:
-        filtered = {sku: name for sku, name in matching_skus.items() if sku in req.skus}
-        matching_skus = filtered
         if not matching_skus:
             return {"status": "no_matches", "keyword": req.keyword, "assigned": 0, "products": []}
 
-    # Assign image to selected products
+        # If specific SKUs provided, filter to only those
+        if req.skus is not None:
+            matching_skus = {sku: name for sku, name in matching_skus.items() if sku in req.skus}
+            if not matching_skus:
+                return {"status": "no_matches", "keyword": req.keyword, "assigned": 0, "products": []}
+
+    # Assign image to each product
     assigned = 0
     skipped = 0
     for sku, product_name in matching_skus.items():

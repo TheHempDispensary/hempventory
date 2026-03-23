@@ -1002,7 +1002,10 @@ export default function Inventory() {
       });
       const base64 = await base64Promise;
       const selectedSkus = Array.from(bulkImageSelected);
-      const resp = await bulkAssignImages(bulkImageKeyword, base64, bulkImageFile.type || "image/png", selectedSkus);
+      const selectedProducts = bulkImageMatches
+        .filter((m) => bulkImageSelected.has(m.sku))
+        .map((m) => ({ sku: m.sku, name: m.name }));
+      const resp = await bulkAssignImages(bulkImageKeyword, base64, bulkImageFile.type || "image/png", selectedSkus, selectedProducts);
       const d = resp.data;
       setBulkImageResult({ assigned: d.assigned, products: d.products || [] });
       if (d.assigned > 0) {
