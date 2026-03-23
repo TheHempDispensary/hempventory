@@ -627,7 +627,7 @@ async def _send_order_emails(
                     </tr>
                     <tr>
                         <td style="padding: 8px 12px;">Shipping</td>
-                        <td style="padding: 8px 12px; text-align: right;">{'Free' if order.shipping_cost == 0 else _format_price(order.shipping_cost)}</td>
+                        <td style="padding: 8px 12px; text-align: right;">{_format_price(order.shipping_cost)}</td>
                     </tr>
                     <tr>
                         <td style="padding: 8px 12px;">Tax</td>
@@ -708,7 +708,7 @@ async def _send_order_emails(
                     </tr>
                     <tr>
                         <td style="padding: 8px 12px;">Shipping</td>
-                        <td style="padding: 8px 12px; text-align: right;">{'Free' if order.shipping_cost == 0 else _format_price(order.shipping_cost)}</td>
+                        <td style="padding: 8px 12px; text-align: right;">{_format_price(order.shipping_cost)}</td>
                     </tr>
                     <tr>
                         <td style="padding: 8px 12px;">Tax</td>
