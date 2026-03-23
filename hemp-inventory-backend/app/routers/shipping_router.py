@@ -37,7 +37,7 @@ DEFAULT_FROM_ADDRESS = {
 LEAFLIFE_FROM_ADDRESS = {
     "name": "LeafLife",
     "company": "LeafLife",
-    "street1": "Madison",
+    "street1": "1 S Pinckney St",
     "city": "Madison",
     "state": "WI",
     "zip": "53704",
