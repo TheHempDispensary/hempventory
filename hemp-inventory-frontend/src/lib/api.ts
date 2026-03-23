@@ -354,6 +354,7 @@ export const createDiscount = (data: {
   description?: string;
   min_order_amount?: number;
   max_uses?: number;
+  applies_to?: string;
   starts_at?: string;
   expires_at?: string;
 }) => api.post("/api/discounts", data);
@@ -366,6 +367,7 @@ export const updateDiscount = (id: number, data: {
   min_order_amount?: number;
   max_uses?: number;
   is_active?: boolean;
+  applies_to?: string;
   starts_at?: string;
   expires_at?: string;
 }) => api.patch(`/api/discounts/${id}`, data);

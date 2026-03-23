@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { getDiscounts, createDiscount, updateDiscount, deleteDiscount } from "../lib/api";
-import { Tag, Plus, Trash2, ToggleLeft, ToggleRight, ExternalLink, Percent, DollarSign, RefreshCw } from "lucide-react";
+import { Tag, Plus, Trash2, ToggleLeft, ToggleRight, ExternalLink, Percent, DollarSign, RefreshCw, Globe, Store, Layers } from "lucide-react";
 
 interface Discount {
   id: number;
@@ -12,6 +12,7 @@ interface Discount {
   max_uses: number;
   times_used: number;
   is_active: number;
+  applies_to: string;
   starts_at: string | null;
   expires_at: string | null;
   created_at: string;
@@ -30,6 +31,7 @@ export default function Discounts() {
   const [discountValue, setDiscountValue] = useState("");
   const [description, setDescription] = useState("");
   const [maxUses, setMaxUses] = useState("");
+  const [appliesTo, setAppliesTo] = useState("both");
   const [expiresAt, setExpiresAt] = useState("");
 
   const SITE_URL = "https://www.thehempdispensary.com";
@@ -56,6 +58,7 @@ export default function Discounts() {
     setDiscountValue("");
     setDescription("");
     setMaxUses("");
+    setAppliesTo("both");
     setExpiresAt("");
     setError("");
   };
@@ -73,6 +76,7 @@ export default function Discounts() {
         discount_value: parseFloat(discountValue),
         description,
         max_uses: maxUses ? parseInt(maxUses) : 0,
+        applies_to: appliesTo,
         expires_at: expiresAt || undefined,
       });
       resetForm();
@@ -222,6 +226,18 @@ export default function Discounts() {
               />
             </div>
             <div>
+              <label className="text-sm font-medium text-gray-700 block mb-1">Applies To</label>
+              <select
+                value={appliesTo}
+                onChange={(e) => setAppliesTo(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
+              >
+                <option value="both">Online &amp; In-Store</option>
+                <option value="online">Online Only</option>
+                <option value="in_store">In-Store Only</option>
+              </select>
+            </div>
+            <div>
               <label className="text-sm font-medium text-gray-700 block mb-1">Max Uses (0 = unlimited)</label>
               <input
                 type="number"
@@ -290,6 +306,9 @@ export default function Discounts() {
                       <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${discount.is_active ? "bg-green-100 text-green-800" : "bg-gray-100 text-gray-500"}`}>
                         {discount.is_active ? "Active" : "Inactive"}
                       </span>
+                      <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-700 flex items-center gap-1">
+                        {discount.applies_to === "online" ? <><Globe className="w-3 h-3" /> Online</> : discount.applies_to === "in_store" ? <><Store className="w-3 h-3" /> In-Store</> : <><Layers className="w-3 h-3" /> Both</>}
+                      </span>
                     </div>
                     <p className="text-sm text-gray-500">
                       {discount.discount_type === "percentage"
@@ -334,6 +353,7 @@ export default function Discounts() {
         <p className="font-medium mb-1">How discount codes work:</p>
         <ul className="list-disc list-inside space-y-1 text-blue-700">
           <li>Active codes can be used at checkout on <a href={SITE_URL} target="_blank" rel="noopener noreferrer" className="underline font-medium">{SITE_URL.replace("https://", "")}</a></li>
+          <li>Choose where each code applies: <strong>Online</strong>, <strong>In-Store</strong>, or <strong>Both</strong></li>
           <li>Toggle codes on/off instantly without deleting them</li>
           <li>Set max uses to limit how many times a code can be redeemed (0 = unlimited)</li>
           <li>Set an expiration date to auto-expire seasonal promotions</li>

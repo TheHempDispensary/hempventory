@@ -296,11 +296,18 @@ async def init_db():
                 max_uses INTEGER DEFAULT 0,
                 times_used INTEGER DEFAULT 0,
                 is_active INTEGER DEFAULT 1,
+                applies_to TEXT DEFAULT 'both',
                 starts_at TEXT,
                 expires_at TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # Migration: add applies_to column if missing
+        try:
+            await db.execute("ALTER TABLE discount_codes ADD COLUMN applies_to TEXT DEFAULT 'both'")
+        except Exception:
+            pass
 
         # Seed default discount code if empty
         try:

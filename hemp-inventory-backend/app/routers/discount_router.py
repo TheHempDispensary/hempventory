@@ -30,6 +30,7 @@ class CreateDiscountRequest(BaseModel):
     description: str = ""
     min_order_amount: int = 0
     max_uses: int = 0
+    applies_to: str = "both"
     starts_at: Optional[str] = None
     expires_at: Optional[str] = None
 
@@ -42,6 +43,7 @@ class UpdateDiscountRequest(BaseModel):
     min_order_amount: Optional[int] = None
     max_uses: Optional[int] = None
     is_active: Optional[bool] = None
+    applies_to: Optional[str] = None
     starts_at: Optional[str] = None
     expires_at: Optional[str] = None
 
@@ -81,11 +83,14 @@ async def create_discount(
         raise HTTPException(status_code=400, detail="Value must be greater than 0")
 
     try:
+        if data.applies_to not in ("online", "in_store", "both"):
+            raise HTTPException(status_code=400, detail="applies_to must be 'online', 'in_store', or 'both'")
+
         cursor = await db.execute(
-            """INSERT INTO discount_codes (code, discount_type, discount_value, description, min_order_amount, max_uses, starts_at, expires_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO discount_codes (code, discount_type, discount_value, description, min_order_amount, max_uses, applies_to, starts_at, expires_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (code, data.discount_type, data.discount_value, data.description,
-             data.min_order_amount, data.max_uses, data.starts_at, data.expires_at),
+             data.min_order_amount, data.max_uses, data.applies_to, data.starts_at, data.expires_at),
         )
         await db.commit()
         return {"success": True, "id": cursor.lastrowid, "code": code}
@@ -126,6 +131,9 @@ async def update_discount(
     if data.is_active is not None:
         updates.append("is_active = ?")
         params.append(1 if data.is_active else 0)
+    if data.applies_to is not None:
+        updates.append("applies_to = ?")
+        params.append(data.applies_to)
     if data.starts_at is not None:
         updates.append("starts_at = ?")
         params.append(data.starts_at)
@@ -198,4 +206,5 @@ async def validate_discount(
         "discount_type": discount["discount_type"],
         "discount_value": discount["discount_value"],
         "description": discount["description"],
+        "applies_to": discount.get("applies_to", "both"),
     }
