@@ -334,4 +334,11 @@ export const getMyEntries = (params?: { start_date?: string; end_date?: string }
 // Seed employees
 export const seedEmployees = () => api.post("/api/timeclock/seed-employees");
 
+// Online Orders (ecommerce)
+export const getOnlineOrders = (params?: { limit?: number; offset?: number; status?: string }) =>
+  api.get("/api/ecommerce/orders", { params });
+
+export const updateOrderStatus = (orderId: number, status: string) =>
+  api.patch(`/api/ecommerce/orders/${orderId}/status`, { status });
+
 export default api;

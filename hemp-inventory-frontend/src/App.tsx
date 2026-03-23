@@ -12,6 +12,7 @@ import SettingsPage from "./components/SettingsPage";
 import Loyalty from "./components/Loyalty";
 import TimeClock from "./components/TimeClock";
 import SalesReport from "./components/SalesReport";
+import OnlineOrders from "./components/OnlineOrders";
 
 function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -148,6 +149,8 @@ function App() {
         return <TimeClock />;
       case "sales":
         return <SalesReport />;
+      case "orders":
+        return <OnlineOrders />;
       default:
         return <Inventory />;
     }
