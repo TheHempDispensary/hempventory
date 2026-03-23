@@ -194,6 +194,9 @@ async def _fetch_and_cache_products() -> dict:
             slug = name.lower().replace(" ", "-").replace(",", "").replace(".", "")
             slug = "-".join(slug.split())
 
+            # LeafLife products (SKU starts with LF-) are shipped from supplier, not available for pickup
+            is_shipping_only = sku.startswith("LF-") if isinstance(sku, str) else False
+
             products.append({
                 "id": item.get("id", ""),
                 "name": name,
@@ -207,6 +210,7 @@ async def _fetch_and_cache_products() -> dict:
                 "available": item.get("available", True) and stock > 0,
                 "image_url": image_url,
                 "is_age_restricted": item.get("isAgeRestricted", False),
+                "shipping_only": is_shipping_only,
             })
 
         products.sort(key=lambda p: p["name"])
@@ -786,6 +790,8 @@ async def get_product_detail(product_id: str):
         await db.close()
     image_url = f"{image_base_url}/{row[0]}?v=2&t={row[1] or ''}" if row else None
 
+    is_shipping_only = sku.startswith("LF-") if isinstance(sku, str) else False
+
     return {
         "id": item.get("id", ""),
         "name": name,
@@ -798,6 +804,7 @@ async def get_product_detail(product_id: str):
         "available": item.get("available", True) and stock > 0,
         "image_url": image_url,
         "is_age_restricted": item.get("isAgeRestricted", False),
+        "shipping_only": is_shipping_only,
     }
 
 

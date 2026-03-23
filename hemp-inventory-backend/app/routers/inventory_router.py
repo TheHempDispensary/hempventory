@@ -1123,40 +1123,46 @@ async def get_image(
     image_bytes = base64.b64decode(row[0])
     final_media_type = row[1]
 
-    # Remove white background if requested
-    if nobg and nobg == 1:
-        try:
-            image_bytes, final_media_type = _remove_white_background(image_bytes)
-        except Exception:
-            pass  # Fall back to original image if background removal fails
+    # Run CPU-intensive image processing in a thread pool to avoid blocking the event loop
+    orig_media_type = row[1]
 
-    # If width parameter provided, resize the image for faster loading
-    if w and 50 <= w <= 1200:
-        try:
-            img = PILImage.open(io.BytesIO(image_bytes))
-            ratio = w / img.width
-            new_height = int(img.height * ratio)
-            img = img.resize((w, new_height), PILImage.LANCZOS)
-            buf = io.BytesIO()
-            # Composite onto pure white background to avoid grey tint from
-            # lossy compression on transparent/semi-transparent areas
+    def _process_image(raw_bytes: bytes) -> tuple[bytes, str]:
+        result_bytes = raw_bytes
+        media = orig_media_type
+        # Remove white background if requested
+        if nobg and nobg == 1:
             try:
-                if img.mode == "RGBA":
-                    bg = PILImage.new("RGBA", img.size, (255, 255, 255, 255))
-                    bg.paste(img, mask=img.split()[3])
-                    img = bg.convert("RGB")
-                else:
-                    img = img.convert("RGB")
-                # Use high quality to keep white backgrounds pure
-                img.save(buf, format="WEBP", quality=95)
-                final_media_type = "image/webp"
+                result_bytes, media = _remove_white_background(result_bytes)
             except Exception:
-                fmt = "PNG" if row[1] == "image/png" else "JPEG"
-                img.save(buf, format=fmt, quality=95)
-                final_media_type = row[1]
-            image_bytes = buf.getvalue()
-        except Exception:
-            pass  # Fall back to original image if resize fails
+                pass
+        # Resize if width parameter provided
+        if w and 50 <= w <= 1200:
+            try:
+                img = PILImage.open(io.BytesIO(result_bytes))
+                ratio = w / img.width
+                new_height = int(img.height * ratio)
+                img = img.resize((w, new_height), PILImage.LANCZOS)
+                buf = io.BytesIO()
+                try:
+                    if img.mode == "RGBA":
+                        bg = PILImage.new("RGBA", img.size, (255, 255, 255, 255))
+                        bg.paste(img, mask=img.split()[3])
+                        img = bg.convert("RGB")
+                    else:
+                        img = img.convert("RGB")
+                    img.save(buf, format="WEBP", quality=95)
+                    media = "image/webp"
+                except Exception:
+                    fmt = "PNG" if orig_media_type == "image/png" else "JPEG"
+                    img.save(buf, format=fmt, quality=95)
+                    media = orig_media_type
+                result_bytes = buf.getvalue()
+            except Exception:
+                pass
+        return result_bytes, media
+
+    loop = asyncio.get_event_loop()
+    image_bytes, final_media_type = await loop.run_in_executor(None, _process_image, image_bytes)
 
     # Cache the processed result (evict oldest if full)
     if len(_image_cache) >= _IMAGE_CACHE_MAX:
