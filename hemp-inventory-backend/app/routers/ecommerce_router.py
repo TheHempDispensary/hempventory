@@ -889,3 +889,33 @@ async def update_order_status(
     )
     await db.commit()
     return {"success": True, "order_id": order_id, "status": new_status}
+
+
+@router.patch("/orders/{order_id}/notes")
+async def update_order_notes(
+    order_id: int,
+    request: Request,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Update an order's staff notes (requires admin auth)."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    import jwt
+    token = auth.split(" ", 1)[1]
+    jwt_secret = os.environ.get("JWT_SECRET", "hemp-inventory-secret-key")
+    try:
+        jwt.decode(token, jwt_secret, algorithms=["HS256"])
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    body = await request.json()
+    staff_notes = body.get("staff_notes", "")
+
+    await db.execute(
+        "UPDATE ecommerce_orders SET staff_notes = ? WHERE id = ?",
+        (staff_notes, order_id),
+    )
+    await db.commit()
+    return {"success": True, "order_id": order_id, "staff_notes": staff_notes}

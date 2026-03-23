@@ -341,6 +341,9 @@ export const getOnlineOrders = (params?: { limit?: number; offset?: number; stat
 export const updateOrderStatus = (orderId: number, status: string) =>
   api.patch(`/api/ecommerce/orders/${orderId}/status`, { status });
 
+export const updateOrderNotes = (orderId: number, staffNotes: string) =>
+  api.patch(`/api/ecommerce/orders/${orderId}/notes`, { staff_notes: staffNotes });
+
 // Shipping (Shippo)
 export const createShipment = (data: {
   order_id: number;

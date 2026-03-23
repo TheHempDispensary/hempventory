@@ -169,6 +169,7 @@ async def init_db():
             ("tracking_url", "TEXT"),
             ("label_url", "TEXT"),
             ("shippo_transaction_id", "TEXT"),
+            ("staff_notes", "TEXT"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE ecommerce_orders ADD COLUMN {col} {coldef}")

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { getOnlineOrders, updateOrderStatus, createShipment, purchaseLabel, getShippingLabel } from "../lib/api";
+import { getOnlineOrders, updateOrderStatus, updateOrderNotes, createShipment, purchaseLabel, getShippingLabel } from "../lib/api";
+import { MessageSquare, Save } from "lucide-react";
 import { RefreshCw, Search, Package, ChevronDown, ChevronUp, Truck, CheckCircle, XCircle, Clock, ShoppingCart, Printer, Tag, ExternalLink, Loader2 } from "lucide-react";
 
 interface OrderItem {
@@ -33,6 +34,7 @@ interface Order {
   tracking_number?: string;
   tracking_url?: string;
   label_url?: string;
+  staff_notes?: string;
   items: OrderItem[];
 }
 
@@ -159,6 +161,11 @@ export default function OnlineOrders() {
   const [parcelWidth, setParcelWidth] = useState("8");
   const [parcelHeight, setParcelHeight] = useState("4");
 
+  // Staff notes state
+  const [editingNotes, setEditingNotes] = useState<number | null>(null);
+  const [notesText, setNotesText] = useState("");
+  const [savingNotes, setSavingNotes] = useState(false);
+
   const loadOrders = async () => {
     setLoading(true);
     try {
@@ -255,6 +262,21 @@ export default function OnlineOrders() {
       }
     } catch (err) {
       console.error("Error fetching label:", err);
+    }
+  };
+
+  const handleSaveNotes = async (orderId: number) => {
+    setSavingNotes(true);
+    try {
+      await updateOrderNotes(orderId, notesText);
+      setOrders((prev) =>
+        prev.map((o) => (o.id === orderId ? { ...o, staff_notes: notesText } : o))
+      );
+      setEditingNotes(null);
+    } catch (err) {
+      console.error("Error saving notes:", err);
+    } finally {
+      setSavingNotes(false);
     }
   };
 
@@ -475,6 +497,60 @@ export default function OnlineOrders() {
                         <p className="text-gray-600">Tax: {formatPrice(order.tax)}</p>
                         <p className="font-bold text-gray-900 text-base">Total: {formatPrice(order.total)}</p>
                       </div>
+                    </div>
+
+                    {/* Staff Notes */}
+                    <div className="mt-4 pt-4 border-t border-gray-200">
+                      <div className="flex items-center justify-between mb-2">
+                        <h4 className="text-xs font-semibold text-gray-500 uppercase flex items-center gap-1">
+                          <MessageSquare className="w-3.5 h-3.5" />
+                          Staff Notes
+                        </h4>
+                        {editingNotes !== order.id && (
+                          <button
+                            onClick={() => {
+                              setEditingNotes(order.id);
+                              setNotesText(order.staff_notes || "");
+                            }}
+                            className="text-xs text-blue-600 hover:text-blue-800 font-medium"
+                          >
+                            {order.staff_notes ? "Edit" : "Add Note"}
+                          </button>
+                        )}
+                      </div>
+                      {editingNotes === order.id ? (
+                        <div className="space-y-2">
+                          <textarea
+                            value={notesText}
+                            onChange={(e) => setNotesText(e.target.value)}
+                            placeholder="Add internal notes for staff (packing instructions, special requests, etc.)..."
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500 resize-y"
+                            rows={3}
+                          />
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => handleSaveNotes(order.id)}
+                              disabled={savingNotes}
+                              className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors text-sm font-medium"
+                            >
+                              <Save className="w-3.5 h-3.5" />
+                              {savingNotes ? "Saving..." : "Save Note"}
+                            </button>
+                            <button
+                              onClick={() => setEditingNotes(null)}
+                              className="px-3 py-1.5 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm font-medium"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      ) : order.staff_notes ? (
+                        <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 text-sm text-gray-800 whitespace-pre-wrap">
+                          {order.staff_notes}
+                        </div>
+                      ) : (
+                        <p className="text-sm text-gray-400 italic">No staff notes yet</p>
+                      )}
                     </div>
 
                     {/* Action Buttons */}
