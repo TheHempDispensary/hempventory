@@ -42,6 +42,8 @@ LEAFLIFE_FROM_ADDRESS = {
     "state": "WI",
     "zip": "53704",
     "country": "US",
+    "phone": "352-340-2439",
+    "email": "support@thehempdispensary.com",
 }
 
 
