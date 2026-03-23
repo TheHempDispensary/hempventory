@@ -1125,10 +1125,12 @@ async def upload_image(
 async def get_image(
     sku: str,
     w: Optional[int] = None,
+    t: Optional[str] = None,
     db: aiosqlite.Connection = Depends(get_db),
 ):
     """Get a product image by SKU. Returns the raw image bytes.
-    Optional ?w=300 parameter to get a resized thumbnail for faster loading."""
+    Optional ?w=300 parameter to get a resized thumbnail for faster loading.
+    The ?t= parameter is used for cache-busting (changes when image is re-uploaded)."""
     cursor = await db.execute(
         "SELECT image_data, content_type, updated_at FROM product_images WHERE sku = ?", (sku,)
     )
@@ -1137,31 +1139,40 @@ async def get_image(
         raise HTTPException(status_code=404, detail="No image found for this SKU")
 
     image_bytes = base64.b64decode(row[0])
+    media_type = row[1]
 
-    # If width parameter provided, resize the image for faster loading
+    # If width parameter provided, resize the image in a thread to avoid blocking
     if w and 50 <= w <= 1200:
         try:
-            img = PILImage.open(io.BytesIO(image_bytes))
-            ratio = w / img.width
-            new_height = int(img.height * ratio)
-            img = img.resize((w, new_height), PILImage.LANCZOS)
-            buf = io.BytesIO()
-            # Save as WebP for smaller file size, fall back to original format
-            try:
-                img.save(buf, format="WEBP", quality=80)
-                media_type = "image/webp"
-            except Exception:
-                fmt = "PNG" if row[1] == "image/png" else "JPEG"
-                img.save(buf, format=fmt, quality=85)
-                media_type = row[1]
-            image_bytes = buf.getvalue()
+            import asyncio
+            import functools
+
+            def _resize(data: bytes, width: int, content_type: str) -> tuple[bytes, str]:
+                img = PILImage.open(io.BytesIO(data))
+                ratio = width / img.width
+                new_height = int(img.height * ratio)
+                img = img.resize((width, new_height), PILImage.LANCZOS)
+                buf = io.BytesIO()
+                try:
+                    img.save(buf, format="WEBP", quality=80)
+                    return buf.getvalue(), "image/webp"
+                except Exception:
+                    fmt = "PNG" if content_type == "image/png" else "JPEG"
+                    img.save(buf, format=fmt, quality=85)
+                    return buf.getvalue(), content_type
+
+            loop = asyncio.get_event_loop()
+            image_bytes, media_type = await loop.run_in_executor(
+                None, functools.partial(_resize, image_bytes, w, row[1])
+            )
         except Exception:
             pass  # Fall back to original image if resize fails
 
+    # Cache for 1 hour - the ?t= timestamp param busts cache when image changes
     return Response(
         content=image_bytes,
-        media_type=row[1] if not w else media_type if w and 50 <= w <= 1200 else row[1],
-        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache"},
+        media_type=media_type,
+        headers={"Cache-Control": "public, max-age=3600", "Vary": "Accept-Encoding"},
     )
 
 
