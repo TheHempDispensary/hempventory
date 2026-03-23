@@ -1085,6 +1085,23 @@ async def upload_image(
             raise
         raise HTTPException(status_code=400, detail=f"Invalid base64 image data: {e}")
 
+    # Compress image to save disk space
+    store_data = data.image_data
+    store_type = data.content_type
+    try:
+        img = PILImage.open(io.BytesIO(decoded))
+        max_dim = 800
+        if img.width > max_dim or img.height > max_dim:
+            img.thumbnail((max_dim, max_dim), PILImage.LANCZOS)
+        buf = io.BytesIO()
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        img.save(buf, format="JPEG", quality=80, optimize=True)
+        store_data = base64.b64encode(buf.getvalue()).decode("utf-8")
+        store_type = "image/jpeg"
+    except Exception:
+        pass  # Use original if compression fails
+
     await db.execute(
         """INSERT INTO product_images (sku, image_data, content_type, product_name, updated_at)
            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -1093,7 +1110,7 @@ async def upload_image(
              content_type = excluded.content_type,
              product_name = COALESCE(excluded.product_name, product_images.product_name),
              updated_at = CURRENT_TIMESTAMP""",
-        (sku, data.image_data, data.content_type, data.product_name),
+        (sku, store_data, store_type, data.product_name),
     )
     await db.commit()
     # Update cache in-place to reflect the new image without full re-sync
@@ -1578,12 +1595,31 @@ async def bulk_assign_images(
             raise
         raise HTTPException(status_code=400, detail=f"Invalid base64 image data: {e}")
 
-    # Remove white background if requested
-    final_image_data = req.image_data
-    final_content_type = req.content_type
+    # Compress image to save disk space (max 800px, JPEG quality 80)
+    try:
+        img = PILImage.open(io.BytesIO(decoded))
+        max_dim = 800
+        if img.width > max_dim or img.height > max_dim:
+            img.thumbnail((max_dim, max_dim), PILImage.LANCZOS)
+        buf = io.BytesIO()
+        # Convert to RGB for JPEG (drop alpha channel)
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        img.save(buf, format="JPEG", quality=80, optimize=True)
+        compressed = buf.getvalue()
+        final_image_data = base64.b64encode(compressed).decode("utf-8")
+        final_content_type = "image/jpeg"
+    except Exception:
+        # If compression fails, use original
+        final_image_data = req.image_data
+        final_content_type = req.content_type
+
+    # Remove white background if requested (applied after compression)
     if req.remove_bg:
         try:
-            processed_bytes, final_content_type = _remove_white_background(decoded)
+            processed_bytes, final_content_type = _remove_white_background(
+                base64.b64decode(final_image_data)
+            )
             final_image_data = base64.b64encode(processed_bytes).decode("utf-8")
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Failed to remove background: {e}")
@@ -1609,26 +1645,46 @@ async def bulk_assign_images(
             if not matching_skus:
                 return {"status": "no_matches", "keyword": req.keyword, "assigned": 0, "products": []}
 
-    # Assign image to each product
-    assigned = 0
-    skipped = 0
-    for sku, product_name in matching_skus.items():
-        try:
-            await db.execute(
-                """INSERT INTO product_images (sku, image_data, content_type, product_name, updated_at)
-                   VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-                   ON CONFLICT(sku) DO UPDATE SET
-                     image_data = excluded.image_data,
-                     content_type = excluded.content_type,
-                     product_name = COALESCE(excluded.product_name, product_images.product_name),
-                     updated_at = CURRENT_TIMESTAMP""",
-                (sku, final_image_data, final_content_type, product_name),
-            )
-            assigned += 1
-        except Exception:
-            skipped += 1
-
-    await db.commit()
+    # Assign image to each unique SKU using executemany for reliability
+    skus_to_assign = list(matching_skus.items())
+    params = [(sku, final_image_data, final_content_type, name) for sku, name in skus_to_assign]
+    try:
+        await db.executemany(
+            """INSERT INTO product_images (sku, image_data, content_type, product_name, updated_at)
+               VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(sku) DO UPDATE SET
+                 image_data = excluded.image_data,
+                 content_type = excluded.content_type,
+                 product_name = COALESCE(excluded.product_name, product_images.product_name),
+                 updated_at = CURRENT_TIMESTAMP""",
+            params,
+        )
+        await db.commit()
+        assigned = len(skus_to_assign)
+        skipped = 0
+    except Exception as e:
+        import logging
+        logging.error(f"Bulk image assign failed: {e}")
+        # Fallback: try one-by-one to save what we can
+        assigned = 0
+        skipped = 0
+        for sku, product_name in skus_to_assign:
+            try:
+                await db.execute(
+                    """INSERT INTO product_images (sku, image_data, content_type, product_name, updated_at)
+                       VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                       ON CONFLICT(sku) DO UPDATE SET
+                         image_data = excluded.image_data,
+                         content_type = excluded.content_type,
+                         product_name = COALESCE(excluded.product_name, product_images.product_name),
+                         updated_at = CURRENT_TIMESTAMP""",
+                    (sku, final_image_data, final_content_type, product_name),
+                )
+                assigned += 1
+            except Exception as inner_e:
+                logging.error(f"Failed to assign image to SKU {sku}: {inner_e}")
+                skipped += 1
+        await db.commit()
 
     # Update cache in-place to reflect new images without full re-sync
     if assigned > 0:
