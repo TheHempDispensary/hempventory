@@ -1138,17 +1138,21 @@ async def get_image(
             new_height = int(img.height * ratio)
             img = img.resize((w, new_height), PILImage.LANCZOS)
             buf = io.BytesIO()
-            # Always serve WebP for smaller file size
+            # Composite onto pure white background to avoid grey tint from
+            # lossy compression on transparent/semi-transparent areas
             try:
                 if img.mode == "RGBA":
-                    img.save(buf, format="WEBP", quality=80, lossless=False)
+                    bg = PILImage.new("RGBA", img.size, (255, 255, 255, 255))
+                    bg.paste(img, mask=img.split()[3])
+                    img = bg.convert("RGB")
                 else:
                     img = img.convert("RGB")
-                    img.save(buf, format="WEBP", quality=80)
+                # Use high quality to keep white backgrounds pure
+                img.save(buf, format="WEBP", quality=95)
                 final_media_type = "image/webp"
             except Exception:
                 fmt = "PNG" if row[1] == "image/png" else "JPEG"
-                img.save(buf, format=fmt, quality=85)
+                img.save(buf, format=fmt, quality=95)
                 final_media_type = row[1]
             image_bytes = buf.getvalue()
         except Exception:
