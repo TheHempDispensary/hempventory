@@ -982,19 +982,43 @@ async def refund_order(
 
     # Call Clover refund API
     import httpx
-    refund_url = f"https://scl.clover.com/v1/charges/{charge_id}/refunds"
+    refund_url = "https://scl.clover.com/v1/refunds"
     refund_headers = {
         "Authorization": f"Bearer {HQ_ECOMM_TOKEN}",
         "Content-Type": "application/json",
     }
-    refund_data: dict = {}
+    refund_data: dict = {"charge": charge_id, "reason": "requested_by_customer"}
     if refund_amount:
         refund_data["amount"] = refund_amount
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(refund_url, headers=refund_headers, json=refund_data)
-            result = resp.json()
+            print(f"[refund] Clover response status={resp.status_code} body={resp.text[:500]}")
+
+            try:
+                result = resp.json()
+            except Exception:
+                # Clover sometimes returns non-JSON responses
+                if resp.status_code in (200, 201):
+                    # Refund succeeded but response wasn't JSON
+                    new_status = "refunded"
+                    await db.execute(
+                        "UPDATE ecommerce_orders SET payment_status = ?, refund_amount = ? WHERE id = ?",
+                        (new_status, amount, order_id),
+                    )
+                    await db.commit()
+                    return {
+                        "success": True,
+                        "order_id": order_id,
+                        "refund_id": "",
+                        "refund_amount": amount,
+                        "status": new_status,
+                    }
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Refund failed: Clover returned status {resp.status_code} — {resp.text[:200]}"
+                )
 
             if resp.status_code in (200, 201):
                 refund_id = result.get("id", "")
@@ -1014,5 +1038,7 @@ async def refund_order(
             else:
                 error_msg = result.get("message") or result.get("error", {}).get("message", "Refund failed")
                 raise HTTPException(status_code=400, detail=f"Refund failed: {error_msg}")
-    except httpx.HTTPError as e:
+    except HTTPException:
+        raise
+    except Exception as e:
         raise HTTPException(status_code=500, detail=f"Refund service error: {str(e)}")
