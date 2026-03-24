@@ -938,6 +938,159 @@ async def update_order_notes(
     return {"success": True, "order_id": order_id, "staff_notes": staff_notes}
 
 
+@router.post("/orders/{order_id}/resend-confirmation")
+async def resend_order_confirmation(
+    order_id: int,
+    request: Request,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Resend order confirmation email to customer (requires admin auth)."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    import jwt
+    token = auth.split(" ", 1)[1]
+    jwt_secret = os.environ.get("JWT_SECRET", "hemp-inventory-secret-key")
+    try:
+        jwt.decode(token, jwt_secret, algorithms=["HS256"])
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    # Get order details
+    cursor = await db.execute("SELECT * FROM ecommerce_orders WHERE id = ?", (order_id,))
+    columns = [desc[0] for desc in cursor.description]
+    row = await cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Order not found")
+    order = dict(zip(columns, row))
+
+    customer_email = order.get("customer_email", "")
+    if not customer_email:
+        raise HTTPException(status_code=400, detail="No customer email on this order")
+
+    # Get order items
+    item_cursor = await db.execute(
+        "SELECT product_name, price, quantity FROM ecommerce_order_items WHERE order_id = ?",
+        (order_id,),
+    )
+    item_cols = [desc[0] for desc in item_cursor.description]
+    item_rows = await item_cursor.fetchall()
+    items = [dict(zip(item_cols, r)) for r in item_rows]
+
+    # Build items HTML
+    items_html = ""
+    for item in items:
+        line_total = item["price"] * item["quantity"]
+        items_html += f"""
+        <tr>
+            <td style="padding: 10px 12px; border-bottom: 1px solid #e5e7eb;">{item["product_name"]}</td>
+            <td style="padding: 10px 12px; border-bottom: 1px solid #e5e7eb; text-align: center;">{item["quantity"]}</td>
+            <td style="padding: 10px 12px; border-bottom: 1px solid #e5e7eb; text-align: right;">{_format_price(item["price"])}</td>
+            <td style="padding: 10px 12px; border-bottom: 1px solid #e5e7eb; text-align: right;">{_format_price(line_total)}</td>
+        </tr>
+        """
+
+    shipping_line = order.get("shipping_address", "")
+    if order.get("shipping_apartment"):
+        shipping_line += f", {order['shipping_apartment']}"
+    shipping_line += f"<br>{order.get('shipping_city', '')}, {order.get('shipping_state', '')} {order.get('shipping_zip', '')}"
+
+    order_number = order.get("order_number", f"THD-{order_id}")
+    first_name = order.get("customer_first_name", "Customer")
+    subtotal = order.get("subtotal", 0)
+    shipping_cost = order.get("shipping_cost", 0)
+    tax = order.get("tax", 0)
+    total = order.get("total", 0)
+
+    customer_html = f"""
+    <html>
+    <body style="font-family: 'Helvetica Neue', Arial, sans-serif; color: #1f2937; max-width: 600px; margin: 0 auto;">
+        <div style="background: #065f46; padding: 20px; text-align: center;">
+            <h1 style="color: white; margin: 0; font-size: 22px;">Order Confirmed!</h1>
+        </div>
+        <div style="padding: 24px; background: #f9fafb;">
+            <p style="font-size: 16px;">Hi {first_name},</p>
+            <p>Thank you for your order! Your payment has been processed successfully.</p>
+
+            <table style="width: 100%; margin: 16px 0; background: white; border-radius: 8px; overflow: hidden;">
+                <tr style="background: #f3f4f6;">
+                    <td style="padding: 10px 12px; font-weight: bold;">Order Number</td>
+                    <td style="padding: 10px 12px;">{order_number}</td>
+                </tr>
+                <tr>
+                    <td style="padding: 10px 12px; font-weight: bold;">Payment Status</td>
+                    <td style="padding: 10px 12px; color: #059669; font-weight: bold;">Paid</td>
+                </tr>
+                <tr style="background: #f3f4f6;">
+                    <td style="padding: 10px 12px; font-weight: bold;">Shipping To</td>
+                    <td style="padding: 10px 12px;">{shipping_line}</td>
+                </tr>
+            </table>
+
+            <h3>Your Items</h3>
+            <table style="width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden;">
+                <thead>
+                    <tr style="background: #065f46; color: white;">
+                        <th style="padding: 10px 12px; text-align: left;">Product</th>
+                        <th style="padding: 10px 12px; text-align: center;">Qty</th>
+                        <th style="padding: 10px 12px; text-align: right;">Price</th>
+                        <th style="padding: 10px 12px; text-align: right;">Total</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {items_html}
+                </tbody>
+            </table>
+
+            <table style="width: 100%; margin-top: 16px; background: white; border-radius: 8px; overflow: hidden;">
+                <tr>
+                    <td style="padding: 8px 12px;">Subtotal</td>
+                    <td style="padding: 8px 12px; text-align: right;">{_format_price(subtotal)}</td>
+                </tr>
+                <tr>
+                    <td style="padding: 8px 12px;">Shipping</td>
+                    <td style="padding: 8px 12px; text-align: right;">{'Free' if shipping_cost == 0 else _format_price(shipping_cost)}</td>
+                </tr>
+                <tr>
+                    <td style="padding: 8px 12px;">Tax</td>
+                    <td style="padding: 8px 12px; text-align: right;">{_format_price(tax)}</td>
+                </tr>
+                <tr style="font-weight: bold; font-size: 18px; background: #f3f4f6;">
+                    <td style="padding: 12px;">Total Charged</td>
+                    <td style="padding: 12px; text-align: right; color: #059669;">{_format_price(total)}</td>
+                </tr>
+            </table>
+
+            <p style="margin-top: 20px;">If you have any questions about your order, reply to this email or contact us at <a href="mailto:{STORE_EMAIL}">{STORE_EMAIL}</a>.</p>
+            <p>Thank you for choosing The Hemp Dispensary!</p>
+        </div>
+        <div style="padding: 16px; text-align: center; color: #9ca3af; font-size: 12px;">
+            The Hemp Dispensary — Premium Hemp Products<br>
+            Spring Hill, FL
+        </div>
+    </body>
+    </html>
+    """
+
+    smtp_settings = await _get_smtp_settings(db)
+    subject = f"Order Confirmed — {order_number} | The Hemp Dispensary"
+
+    try:
+        loop = asyncio.get_event_loop()
+        sent = await loop.run_in_executor(
+            None, _send_smtp_email, smtp_settings, customer_email, subject, customer_html
+        )
+        if not sent:
+            raise HTTPException(status_code=500, detail="Failed to send email — SMTP not configured or credentials invalid")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to send email: {str(e)}")
+
+    return {"success": True, "order_id": order_id, "email": customer_email}
+
+
 @router.post("/orders/{order_id}/refund")
 async def refund_order(
     order_id: int,

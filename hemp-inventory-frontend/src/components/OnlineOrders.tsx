@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { getOnlineOrders, updateOrderStatus, updateOrderNotes, createShipment, purchaseLabel, getShippingLabel, refundOrder } from "../lib/api";
+import { getOnlineOrders, updateOrderStatus, updateOrderNotes, createShipment, purchaseLabel, getShippingLabel, refundOrder, resendOrderConfirmation } from "../lib/api";
 import { MessageSquare, Save } from "lucide-react";
-import { RefreshCw, Search, Package, ChevronDown, ChevronUp, Truck, CheckCircle, XCircle, Clock, ShoppingCart, Printer, Tag, ExternalLink, Loader2, RotateCcw, AlertTriangle, DollarSign } from "lucide-react";
+import { RefreshCw, Search, Package, ChevronDown, ChevronUp, Truck, CheckCircle, XCircle, Clock, ShoppingCart, Printer, Tag, ExternalLink, Loader2, RotateCcw, AlertTriangle, DollarSign, Mail } from "lucide-react";
 
 interface OrderItem {
   product_id: string;
@@ -166,6 +166,11 @@ export default function OnlineOrders() {
   const [notesText, setNotesText] = useState("");
   const [savingNotes, setSavingNotes] = useState(false);
 
+  // Resend confirmation state
+  const [resendingOrderId, setResendingOrderId] = useState<number | null>(null);
+  const [resendSuccess, setResendSuccess] = useState("");
+  const [resendError, setResendError] = useState("");
+
   // Refund state
   const [refundingOrderId, setRefundingOrderId] = useState<number | null>(null);
   const [refundConfirm, setRefundConfirm] = useState(false);
@@ -297,6 +302,29 @@ export default function OnlineOrders() {
       setRefundConfirm(false);
     } finally {
       setProcessingRefund(false);
+    }
+  };
+
+  const handleResendConfirmation = async (order: Order) => {
+    setResendingOrderId(order.id);
+    setResendSuccess("");
+    setResendError("");
+    try {
+      await resendOrderConfirmation(order.id);
+      setResendSuccess(`Confirmation email sent to ${order.customer_email}`);
+      setTimeout(() => {
+        setResendingOrderId(null);
+        setResendSuccess("");
+      }, 3000);
+    } catch (err: unknown) {
+      const msg = (err && typeof err === "object" && "response" in err)
+        ? ((err as { response?: { data?: { detail?: string } } }).response?.data?.detail || "Failed to send email")
+        : "Failed to send confirmation email";
+      setResendError(msg);
+      setTimeout(() => {
+        setResendingOrderId(null);
+        setResendError("");
+      }, 5000);
     }
   };
 
@@ -598,6 +626,15 @@ export default function OnlineOrders() {
                         Print Order
                       </button>
 
+                      <button
+                        onClick={() => handleResendConfirmation(order)}
+                        disabled={resendingOrderId === order.id}
+                        className="flex items-center gap-2 px-4 py-2 bg-blue-100 text-blue-700 rounded-lg hover:bg-blue-200 disabled:opacity-50 transition-colors text-sm font-medium"
+                      >
+                        {resendingOrderId === order.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />}
+                        {resendingOrderId === order.id ? "Sending..." : "Resend Confirmation"}
+                      </button>
+
                       {order.payment_status !== "refunded" && order.payment_status !== "cancelled" && order.charge_id && (
                         <button
                           onClick={() => {
@@ -646,6 +683,20 @@ export default function OnlineOrders() {
                         </button>
                       )}
                     </div>
+
+                    {/* Resend Confirmation Feedback */}
+                    {resendingOrderId === order.id && resendSuccess && (
+                      <div className="mt-4 p-3 bg-green-50 rounded-lg border border-green-200 text-sm text-green-700 flex items-center gap-2">
+                        <CheckCircle className="w-4 h-4" />
+                        {resendSuccess}
+                      </div>
+                    )}
+                    {resendingOrderId === order.id && resendError && (
+                      <div className="mt-4 p-3 bg-red-50 rounded-lg border border-red-200 text-sm text-red-700 flex items-center gap-2">
+                        <AlertTriangle className="w-4 h-4" />
+                        {resendError}
+                      </div>
+                    )}
 
                     {/* Refund Confirmation Panel */}
                     {refundingOrderId === order.id && (
