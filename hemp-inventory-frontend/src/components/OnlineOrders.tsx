@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { getOnlineOrders, updateOrderStatus, updateOrderNotes, createShipment, purchaseLabel, getShippingLabel } from "../lib/api";
+import { getOnlineOrders, updateOrderStatus, updateOrderNotes, createShipment, purchaseLabel, getShippingLabel, refundOrder } from "../lib/api";
 import { MessageSquare, Save } from "lucide-react";
-import { RefreshCw, Search, Package, ChevronDown, ChevronUp, Truck, CheckCircle, XCircle, Clock, ShoppingCart, Printer, Tag, ExternalLink, Loader2 } from "lucide-react";
+import { RefreshCw, Search, Package, ChevronDown, ChevronUp, Truck, CheckCircle, XCircle, Clock, ShoppingCart, Printer, Tag, ExternalLink, Loader2, RotateCcw, AlertTriangle, DollarSign } from "lucide-react";
 
 interface OrderItem {
   product_id: string;
@@ -166,6 +166,13 @@ export default function OnlineOrders() {
   const [notesText, setNotesText] = useState("");
   const [savingNotes, setSavingNotes] = useState(false);
 
+  // Refund state
+  const [refundingOrderId, setRefundingOrderId] = useState<number | null>(null);
+  const [refundConfirm, setRefundConfirm] = useState(false);
+  const [processingRefund, setProcessingRefund] = useState(false);
+  const [refundError, setRefundError] = useState("");
+  const [refundSuccess, setRefundSuccess] = useState("");
+
   const loadOrders = async () => {
     setLoading(true);
     try {
@@ -262,6 +269,34 @@ export default function OnlineOrders() {
       }
     } catch (err) {
       console.error("Error fetching label:", err);
+    }
+  };
+
+  const handleRefund = async (order: Order) => {
+    setProcessingRefund(true);
+    setRefundError("");
+    setRefundSuccess("");
+    try {
+      await refundOrder(order.id);
+      setOrders((prev) =>
+        prev.map((o) =>
+          o.id === order.id ? { ...o, payment_status: "refunded" } : o
+        )
+      );
+      setRefundSuccess(`Refund of ${formatPrice(order.total)} processed successfully.`);
+      setRefundConfirm(false);
+      setTimeout(() => {
+        setRefundingOrderId(null);
+        setRefundSuccess("");
+      }, 3000);
+    } catch (err: unknown) {
+      const msg = (err && typeof err === "object" && "response" in err)
+        ? ((err as { response?: { data?: { detail?: string } } }).response?.data?.detail || "Refund failed")
+        : "Failed to process refund";
+      setRefundError(msg);
+      setRefundConfirm(false);
+    } finally {
+      setProcessingRefund(false);
     }
   };
 
@@ -563,6 +598,27 @@ export default function OnlineOrders() {
                         Print Order
                       </button>
 
+                      {order.payment_status !== "refunded" && order.payment_status !== "cancelled" && order.charge_id && (
+                        <button
+                          onClick={() => {
+                            setRefundingOrderId(order.id);
+                            setRefundConfirm(false);
+                            setRefundError("");
+                            setRefundSuccess("");
+                          }}
+                          className="flex items-center gap-2 px-4 py-2 bg-red-100 text-red-700 rounded-lg hover:bg-red-200 transition-colors text-sm font-medium"
+                        >
+                          <RotateCcw className="w-4 h-4" />
+                          Refund Order
+                        </button>
+                      )}
+                      {order.payment_status === "refunded" && (
+                        <span className="flex items-center gap-2 px-4 py-2 bg-red-50 text-red-600 rounded-lg text-sm font-medium">
+                          <RotateCcw className="w-4 h-4" />
+                          Refunded
+                        </span>
+                      )}
+
                       {order.label_url ? (
                         <button
                           onClick={() => handleViewLabel(order.id)}
@@ -590,6 +646,84 @@ export default function OnlineOrders() {
                         </button>
                       )}
                     </div>
+
+                    {/* Refund Confirmation Panel */}
+                    {refundingOrderId === order.id && (
+                      <div className="mt-4 p-4 bg-red-50 rounded-lg border border-red-200">
+                        <h4 className="text-sm font-semibold text-red-900 mb-2 flex items-center gap-2">
+                          <AlertTriangle className="w-4 h-4 text-red-600" />
+                          Refund Order {order.order_number}
+                        </h4>
+                        {refundSuccess ? (
+                          <div className="text-sm text-green-700 bg-green-50 p-3 rounded-lg flex items-center gap-2">
+                            <CheckCircle className="w-4 h-4" />
+                            {refundSuccess}
+                          </div>
+                        ) : refundConfirm ? (
+                          <div className="space-y-3">
+                            <p className="text-sm text-red-800">
+                              <strong>Are you sure?</strong> This will refund <strong>{formatPrice(order.total)}</strong> to the customer&apos;s original payment method. This action cannot be undone.
+                            </p>
+                            <div className="flex gap-2">
+                              <button
+                                onClick={() => handleRefund(order)}
+                                disabled={processingRefund}
+                                className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 transition-colors text-sm font-medium"
+                              >
+                                {processingRefund ? <Loader2 className="w-4 h-4 animate-spin" /> : <DollarSign className="w-4 h-4" />}
+                                {processingRefund ? "Processing Refund..." : `Yes, Refund ${formatPrice(order.total)}`}
+                              </button>
+                              <button
+                                onClick={() => { setRefundConfirm(false); setRefundingOrderId(null); }}
+                                disabled={processingRefund}
+                                className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm font-medium"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="space-y-3">
+                            <div className="bg-white rounded-lg p-3 border border-red-100">
+                              <div className="flex justify-between text-sm">
+                                <span className="text-gray-600">Subtotal:</span>
+                                <span>{formatPrice(order.subtotal)}</span>
+                              </div>
+                              <div className="flex justify-between text-sm">
+                                <span className="text-gray-600">Shipping:</span>
+                                <span>{order.shipping_cost === 0 ? "Free" : formatPrice(order.shipping_cost)}</span>
+                              </div>
+                              <div className="flex justify-between text-sm">
+                                <span className="text-gray-600">Tax:</span>
+                                <span>{formatPrice(order.tax)}</span>
+                              </div>
+                              <div className="flex justify-between text-sm font-bold mt-1 pt-1 border-t border-gray-200">
+                                <span>Refund Total:</span>
+                                <span className="text-red-600">{formatPrice(order.total)}</span>
+                              </div>
+                            </div>
+                            {refundError && (
+                              <div className="text-sm text-red-600 bg-red-100 p-3 rounded-lg">{refundError}</div>
+                            )}
+                            <div className="flex gap-2">
+                              <button
+                                onClick={() => setRefundConfirm(true)}
+                                className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-sm font-medium"
+                              >
+                                <RotateCcw className="w-4 h-4" />
+                                Process Full Refund
+                              </button>
+                              <button
+                                onClick={() => setRefundingOrderId(null)}
+                                className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm font-medium"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
 
                     {/* Shipping Label Creation Panel */}
                     {isShippingOpen && !order.label_url && (

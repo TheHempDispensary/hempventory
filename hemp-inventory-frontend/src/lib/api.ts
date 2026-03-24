@@ -362,4 +362,8 @@ export const purchaseLabel = (data: {
 export const getShippingLabel = (orderId: number) =>
   api.get(`/api/shipping/label/${orderId}`);
 
+// Refunds
+export const refundOrder = (orderId: number, amount?: number) =>
+  api.post(`/api/ecommerce/orders/${orderId}/refund`, amount ? { amount } : {});
+
 export default api;

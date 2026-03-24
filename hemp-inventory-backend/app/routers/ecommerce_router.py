@@ -936,3 +936,83 @@ async def update_order_notes(
     )
     await db.commit()
     return {"success": True, "order_id": order_id, "staff_notes": staff_notes}
+
+
+@router.post("/orders/{order_id}/refund")
+async def refund_order(
+    order_id: int,
+    request: Request,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Refund an order via Clover (requires admin auth)."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    import jwt
+    token = auth.split(" ", 1)[1]
+    jwt_secret = os.environ.get("JWT_SECRET", "hemp-inventory-secret-key")
+    try:
+        jwt.decode(token, jwt_secret, algorithms=["HS256"])
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    body = await request.json()
+    refund_amount = body.get("amount")  # Optional: partial refund in cents
+
+    # Get order details
+    async with db.execute(
+        "SELECT charge_id, total, payment_status FROM ecommerce_orders WHERE id = ?",
+        (order_id,),
+    ) as cursor:
+        row = await cursor.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    charge_id, order_total, payment_status = row
+
+    if payment_status == "refunded":
+        raise HTTPException(status_code=400, detail="Order has already been refunded")
+
+    if not charge_id:
+        raise HTTPException(status_code=400, detail="No charge ID found for this order — cannot refund")
+
+    amount = refund_amount if refund_amount else order_total
+
+    # Call Clover refund API
+    import httpx
+    refund_url = f"https://scl.clover.com/v1/charges/{charge_id}/refunds"
+    refund_headers = {
+        "Authorization": f"Bearer {HQ_ECOMM_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    refund_data: dict = {}
+    if refund_amount:
+        refund_data["amount"] = refund_amount
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(refund_url, headers=refund_headers, json=refund_data)
+            result = resp.json()
+
+            if resp.status_code in (200, 201):
+                refund_id = result.get("id", "")
+                new_status = "refunded"
+                await db.execute(
+                    "UPDATE ecommerce_orders SET payment_status = ?, refund_id = ?, refund_amount = ? WHERE id = ?",
+                    (new_status, refund_id, amount, order_id),
+                )
+                await db.commit()
+                return {
+                    "success": True,
+                    "order_id": order_id,
+                    "refund_id": refund_id,
+                    "refund_amount": amount,
+                    "status": new_status,
+                }
+            else:
+                error_msg = result.get("message") or result.get("error", {}).get("message", "Refund failed")
+                raise HTTPException(status_code=400, detail=f"Refund failed: {error_msg}")
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=500, detail=f"Refund service error: {str(e)}")
