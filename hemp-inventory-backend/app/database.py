@@ -173,6 +173,8 @@ async def init_db():
             ("refund_id", "TEXT"),
             ("refund_amount", "INTEGER"),
             ("tracking_status", "TEXT"),
+            ("discount", "INTEGER DEFAULT 0"),
+            ("promo_code", "TEXT"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE ecommerce_orders ADD COLUMN {col} {coldef}")

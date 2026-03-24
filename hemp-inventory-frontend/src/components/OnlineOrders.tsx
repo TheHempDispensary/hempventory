@@ -24,6 +24,8 @@ interface Order {
   shipping_state: string;
   shipping_zip: string;
   subtotal: number;
+  discount: number;
+  promo_code: string;
   shipping_cost: number;
   tax: number;
   total: number;
@@ -129,6 +131,7 @@ function printOrder(order: Order) {
       </table>
       <div style="text-align:right;margin-top:12px">
         <p>Subtotal: $${(order.subtotal / 100).toFixed(2)}</p>
+        ${order.discount ? `<p style="color:#059669">Discount (${order.promo_code || 'Promo'}): -$${(order.discount / 100).toFixed(2)}</p>` : ''}
         <p>Shipping: ${order.shipping_cost === 0 ? "Free" : "$" + (order.shipping_cost / 100).toFixed(2)}</p>
         <p>Tax: $${(order.tax / 100).toFixed(2)}</p>
         <p style="font-size:18px"><strong>Total: $${(order.total / 100).toFixed(2)}</strong></p>
@@ -556,6 +559,9 @@ export default function OnlineOrders() {
                       {/* Totals */}
                       <div className="mt-3 pt-3 border-t border-gray-200 space-y-1 text-sm text-right">
                         <p className="text-gray-600">Subtotal: {formatPrice(order.subtotal)}</p>
+                        {order.discount > 0 && (
+                          <p className="text-green-600">Discount ({order.promo_code || 'Promo'}): -{formatPrice(order.discount)}</p>
+                        )}
                         <p className="text-gray-600">Shipping: {order.shipping_cost === 0 ? "Free" : formatPrice(order.shipping_cost)}</p>
                         <p className="text-gray-600">Tax: {formatPrice(order.tax)}</p>
                         <p className="font-bold text-gray-900 text-base">Total: {formatPrice(order.total)}</p>
@@ -740,6 +746,12 @@ export default function OnlineOrders() {
                                 <span className="text-gray-600">Subtotal:</span>
                                 <span>{formatPrice(order.subtotal)}</span>
                               </div>
+                              {order.discount > 0 && (
+                                <div className="flex justify-between text-sm">
+                                  <span className="text-green-600">Discount ({order.promo_code || 'Promo'}):</span>
+                                  <span className="text-green-600">-{formatPrice(order.discount)}</span>
+                                </div>
+                              )}
                               <div className="flex justify-between text-sm">
                                 <span className="text-gray-600">Shipping:</span>
                                 <span>{order.shipping_cost === 0 ? "Free" : formatPrice(order.shipping_cost)}</span>

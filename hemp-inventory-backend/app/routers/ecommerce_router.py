@@ -52,12 +52,15 @@ class CreateOrderRequest(BaseModel):
     shipping_address: OrderShipping
     items: List[OrderItem]
     subtotal: int = 0
+    discount: int = 0
     shipping_cost: int = 0
     tax: int = 0
     total: int = 0
     notes: str = ""
     payment_token: str = ""
     loyalty_number: str = ""
+    promo_code: Optional[str] = None
+    shipping_service: str = ""
 
 router = APIRouter(prefix="/api/ecommerce", tags=["ecommerce"])
 
@@ -444,8 +447,8 @@ async def create_order(
         """INSERT INTO ecommerce_orders
            (order_number, customer_first_name, customer_last_name, customer_email, customer_phone,
             shipping_address, shipping_apartment, shipping_city, shipping_state, shipping_zip,
-            subtotal, shipping_cost, tax, total, notes, charge_id, payment_status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            subtotal, discount, promo_code, shipping_cost, tax, total, notes, charge_id, payment_status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             order_number,
             order.customer.first_name,
@@ -458,6 +461,8 @@ async def create_order(
             order.shipping_address.state,
             order.shipping_address.zip,
             order.subtotal,
+            order.discount,
+            order.promo_code or "",
             order.shipping_cost,
             order.tax,
             order.total,
@@ -691,6 +696,7 @@ async def _send_order_emails(
                         <td style="padding: 8px 12px;">Subtotal</td>
                         <td style="padding: 8px 12px; text-align: right;">{_format_price(order.subtotal)}</td>
                     </tr>
+                    {f'<tr><td style="padding: 8px 12px; color: #059669;">Discount ({order.promo_code})</td><td style="padding: 8px 12px; text-align: right; color: #059669;">-{_format_price(order.discount)}</td></tr>' if order.discount else ''}
                     <tr>
                         <td style="padding: 8px 12px;">Shipping</td>
                         <td style="padding: 8px 12px; text-align: right;">{'Free' if order.shipping_cost == 0 else _format_price(order.shipping_cost)}</td>
@@ -772,6 +778,7 @@ async def _send_order_emails(
                         <td style="padding: 8px 12px;">Subtotal</td>
                         <td style="padding: 8px 12px; text-align: right;">{_format_price(order.subtotal)}</td>
                     </tr>
+                    {f'<tr><td style="padding: 8px 12px; color: #059669;">Discount ({order.promo_code})</td><td style="padding: 8px 12px; text-align: right; color: #059669;">-{_format_price(order.discount)}</td></tr>' if order.discount else ''}
                     <tr>
                         <td style="padding: 8px 12px;">Shipping</td>
                         <td style="padding: 8px 12px; text-align: right;">{'Free' if order.shipping_cost == 0 else _format_price(order.shipping_cost)}</td>
@@ -1051,6 +1058,8 @@ async def resend_order_confirmation(
     order_number = order.get("order_number", f"THD-{order_id}")
     first_name = order.get("customer_first_name", "Customer")
     subtotal = order.get("subtotal", 0)
+    discount = order.get("discount", 0)
+    promo_code = order.get("promo_code", "")
     shipping_cost = order.get("shipping_cost", 0)
     tax = order.get("tax", 0)
     total = order.get("total", 0)
@@ -1100,6 +1109,7 @@ async def resend_order_confirmation(
                     <td style="padding: 8px 12px;">Subtotal</td>
                     <td style="padding: 8px 12px; text-align: right;">{_format_price(subtotal)}</td>
                 </tr>
+                {f'<tr><td style="padding: 8px 12px; color: #059669;">Discount ({promo_code})</td><td style="padding: 8px 12px; text-align: right; color: #059669;">-{_format_price(discount)}</td></tr>' if discount else ''}
                 <tr>
                     <td style="padding: 8px 12px;">Shipping</td>
                     <td style="padding: 8px 12px; text-align: right;">{'Free' if shipping_cost == 0 else _format_price(shipping_cost)}</td>
