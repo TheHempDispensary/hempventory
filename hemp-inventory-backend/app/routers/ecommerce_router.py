@@ -79,7 +79,6 @@ EAST_MERCHANT_ID = os.environ.get("CLOVER_EAST_MERCHANT_ID", "")
 EAST_API_TOKEN = os.environ.get("CLOVER_EAST_API_TOKEN", "")
 
 # Store contact info for pickup notifications
-STORE_PHONES = {"west": os.environ.get("STORE_PHONE_WEST", ""), "east": os.environ.get("STORE_PHONE_EAST", "")}
 STORE_EMAILS_PICKUP = {"west": os.environ.get("STORE_EMAIL_WEST", ""), "east": os.environ.get("STORE_EMAIL_EAST", "")}
 
 # ── In-memory product cache ──────────────────────────────────────────────────
@@ -958,17 +957,12 @@ async def _send_pickup_notifications(smtp_settings: dict, order: CreateOrderRequ
     merchant_id = WEST_MERCHANT_ID if location == "west" else EAST_MERCHANT_ID
     api_token = WEST_API_TOKEN if location == "west" else EAST_API_TOKEN
     store_email = STORE_EMAILS_PICKUP[location]
-    store_phone = STORE_PHONES[location]
 
     customer_name = f"{order.customer.first_name} {order.customer.last_name}"
-    item_lines = [f"{item.name} x{item.quantity}" for item in order.items]
-    items_text = "\n".join(item_lines)
-    total_str = _format_price(order.total)
 
-    # Fire all three channels concurrently
+    # Fire both channels concurrently: Clover POS order + email
     await asyncio.gather(
         _create_pickup_clover_order(merchant_id, api_token, order, order_number, customer_name, store_label),
-        _send_pickup_sms(store_phone, customer_name, items_text, total_str, store_label),
         _send_pickup_email(smtp_settings, store_email, order, order_number, customer_name, store_label),
         return_exceptions=True,
     )
@@ -1003,37 +997,6 @@ async def _create_pickup_clover_order(merchant_id: str, api_token: str, order: C
                 print(f"[pickup] Failed to create Clover order at {store_label}: {resp.status_code} {resp.text}")
     except Exception as e:
         print(f"[pickup] Clover order creation failed at {store_label}: {e}")
-
-
-async def _send_pickup_sms(store_phone: str, customer_name: str, items_text: str, total_str: str, store_label: str):
-    """Send SMS notification to the store for a pickup order via Twilio."""
-    try:
-        twilio_sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
-        twilio_token = os.environ.get("TWILIO_AUTH_TOKEN", "")
-        twilio_from = os.environ.get("TWILIO_FROM_NUMBER", "")
-
-        if not twilio_sid or not twilio_token or not twilio_from:
-            print(f"[pickup] SMS skipped — Twilio not configured. Would send to {store_phone}")
-            return
-
-        message = f"NEW PICKUP ORDER — {customer_name}\nItems: {items_text}\nTotal: {total_str}\nCustomer is on their way."
-
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(
-                f"https://api.twilio.com/2010-04-01/Accounts/{twilio_sid}/Messages.json",
-                auth=(twilio_sid, twilio_token),
-                data={
-                    "To": f"+1{store_phone}",
-                    "From": twilio_from,
-                    "Body": message,
-                },
-            )
-            if resp.status_code in (200, 201):
-                print(f"[pickup] SMS sent to {store_label} ({store_phone})")
-            else:
-                print(f"[pickup] SMS failed to {store_label}: {resp.status_code} {resp.text}")
-    except Exception as e:
-        print(f"[pickup] SMS error for {store_label}: {e}")
 
 
 async def _send_pickup_email(smtp_settings: dict, store_email: str, order: CreateOrderRequest, order_number: str, customer_name: str, store_label: str):
