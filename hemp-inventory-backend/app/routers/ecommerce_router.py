@@ -9,6 +9,7 @@ import json
 import smtplib
 import asyncio
 import os
+from urllib.parse import quote as url_quote
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -73,7 +74,16 @@ _product_cache_json: bytes = b""  # Pre-serialized JSON for the full /products r
 _cache_timestamp: float = 0.0
 _refresh_in_progress: bool = False
 CACHE_TTL = 600  # 10 minutes
+
+
 DISK_CACHE_PATH = os.environ.get("DB_PATH", "").replace("app.db", "product_cache.json") or "/tmp/product_cache.json"
+
+
+def invalidate_product_cache():
+    """Invalidate the in-memory product cache so the next request fetches fresh data.
+    Called from inventory_router when images are uploaded/changed."""
+    global _product_cache_json, _cache_timestamp
+    _cache_timestamp = 0  # Force refresh on next request
 
 
 async def _load_disk_cache() -> bool:
@@ -162,11 +172,11 @@ async def _fetch_and_cache_products() -> dict:
             image_rows = await cursor.fetchall()
         finally:
             await db.close()
-        image_by_sku = {row[0]: f"{image_base_url}/{row[0]}?v=2&t={row[2] or ''}" for row in image_rows}
+        image_by_sku = {row[0]: f"{image_base_url}/{url_quote(row[0], safe='')}?v=2&t={str(row[2] or '').replace(' ', '_')}" for row in image_rows}
         image_by_name = {}
         for row in image_rows:
             if row[1]:
-                image_by_name[row[1].upper()] = f"{image_base_url}/{row[0]}?v=2&t={row[2] or ''}"
+                image_by_name[row[1].upper()] = f"{image_base_url}/{url_quote(row[0], safe='')}?v=2&t={str(row[2] or '').replace(' ', '_')}"
 
         products = []
         categories_set: set = set()
@@ -788,7 +798,7 @@ async def get_product_detail(product_id: str):
         row = await cursor.fetchone()
     finally:
         await db.close()
-    image_url = f"{image_base_url}/{row[0]}?v=2&t={row[1] or ''}" if row else None
+    image_url = f"{image_base_url}/{url_quote(row[0], safe='')}?v=2&t={str(row[1] or '').replace(' ', '_')}" if row else None
 
     is_shipping_only = sku.startswith("LF-") if isinstance(sku, str) else False
 

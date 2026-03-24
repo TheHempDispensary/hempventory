@@ -16,6 +16,7 @@ from PIL import Image as PILImage
 from app.auth import get_current_user
 from app.database import get_db
 from app.clover_client import CloverClient
+from app.routers.ecommerce_router import invalidate_product_cache
 
 router = APIRouter(prefix="/api/inventory", tags=["inventory"])
 
@@ -1090,6 +1091,8 @@ async def upload_image(
         for item in _inventory_cache.get("items", []):
             if item["sku"] == sku:
                 item["has_image"] = True
+    # Invalidate e-commerce product cache so website picks up new image URL
+    invalidate_product_cache()
     return {"status": "ok", "sku": sku}
 
 
@@ -1690,6 +1693,8 @@ async def bulk_assign_images(
             for item in _inventory_cache.get("items", []):
                 if item["sku"] in assigned_skus:
                     item["has_image"] = True
+        # Invalidate e-commerce product cache so website picks up new image URLs
+        invalidate_product_cache()
 
     return {
         "status": "done",
