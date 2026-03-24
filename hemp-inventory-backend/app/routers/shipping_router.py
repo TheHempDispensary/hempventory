@@ -240,6 +240,92 @@ async def get_label(
     }
 
 
+SHIPPING_MARKUP_CENTS = 200  # $2.00 markup on all rates
+
+
+class PublicRatesRequest(BaseModel):
+    street1: str
+    street2: str = ""
+    city: str
+    state: str
+    zip_code: str
+    product_names: list[str] = []
+
+
+@router.post("/rates")
+async def get_public_shipping_rates(body: PublicRatesRequest):
+    """Public endpoint: Get USPS shipping rates for a given address (no auth required)."""
+    to_address = {
+        "name": "Customer",
+        "street1": body.street1,
+        "street2": body.street2,
+        "city": body.city,
+        "state": body.state,
+        "zip": body.zip_code,
+        "country": "US",
+    }
+
+    # Default parcel dimensions for e-commerce orders
+    parcel = {
+        "length": "10",
+        "width": "8",
+        "height": "4",
+        "distance_unit": "in",
+        "weight": "1",
+        "mass_unit": "lb",
+    }
+
+    shipment_data = {
+        "address_from": DEFAULT_FROM_ADDRESS,
+        "address_to": to_address,
+        "parcels": [parcel],
+        "async": False,
+    }
+
+    headers = _get_shippo_headers()
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(f"{SHIPPO_API_URL}/shipments/", headers=headers, json=shipment_data)
+            if resp.status_code not in (200, 201):
+                print(f"[shippo] Public rates failed: {resp.status_code} {resp.text}")
+                raise HTTPException(status_code=400, detail="Unable to get shipping rates for this address")
+
+            shipment = resp.json()
+    except httpx.HTTPError as e:
+        print(f"[shippo] Connection error: {e}")
+        raise HTTPException(status_code=500, detail="Shipping service unavailable")
+
+    # Extract USPS rates only and add $2 markup
+    rates = shipment.get("rates", [])
+    formatted_rates = []
+    for rate in rates:
+        provider = rate.get("provider", "")
+        if "USPS" not in provider.upper():
+            continue
+        base_amount = float(rate.get("amount", "0"))
+        markup_amount = base_amount + (SHIPPING_MARKUP_CENTS / 100)
+        amount_cents = int(round(markup_amount * 100))
+        formatted_rates.append({
+            "id": rate["object_id"],
+            "provider": provider,
+            "service_level": rate.get("servicelevel", {}).get("name", ""),
+            "amount": f"{markup_amount:.2f}",
+            "amount_cents": amount_cents,
+            "currency": rate.get("currency", "USD"),
+            "estimated_days": rate.get("estimated_days"),
+            "duration_terms": rate.get("duration_terms", ""),
+        })
+
+    # Sort by price
+    formatted_rates.sort(key=lambda r: r["amount_cents"])
+
+    if not formatted_rates:
+        raise HTTPException(status_code=400, detail="No USPS shipping rates available for this address")
+
+    return {"rates": formatted_rates}
+
+
 @router.get("/validate-address")
 async def validate_address(
     request: Request,
