@@ -128,6 +128,9 @@ async def lifespan(app: FastAPI):
     # Load disk cache first for instant availability, then refresh from Clover in background
     await ecommerce_router._load_disk_cache()
     asyncio.create_task(ecommerce_router._fetch_and_cache_products())
+    # Register Shippo tracking webhook (non-blocking)
+    from app.routers.shipping_router import register_shippo_tracking_webhook
+    asyncio.create_task(register_shippo_tracking_webhook())
     yield
     scheduler.shutdown()
 

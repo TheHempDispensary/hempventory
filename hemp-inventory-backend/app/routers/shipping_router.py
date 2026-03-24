@@ -1,6 +1,10 @@
 """Shipping integration with Shippo for creating labels and tracking shipments."""
 
+import asyncio
 import os
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from typing import Optional
 
 import httpx
@@ -194,11 +198,29 @@ async def purchase_label(
         await db.execute(
             """UPDATE ecommerce_orders 
                SET tracking_number = ?, tracking_url = ?, label_url = ?, shippo_transaction_id = ?,
+                   tracking_status = 'label_created',
                    payment_status = CASE WHEN payment_status IN ('paid', 'processing') THEN 'shipped' ELSE payment_status END
                WHERE id = ?""",
             (tracking_number, tracking_url, label_url, transaction.get("object_id", ""), body.order_id),
         )
         await db.commit()
+
+        # Send tracking email to customer (non-blocking)
+        cursor = await db.execute(
+            "SELECT order_number, customer_first_name, customer_email FROM ecommerce_orders WHERE id = ?",
+            (body.order_id,),
+        )
+        order_row = await cursor.fetchone()
+        if order_row:
+            order_number, first_name, customer_email = order_row
+            if customer_email:
+                smtp_settings = await _get_smtp_settings(db)
+                asyncio.create_task(
+                    _send_tracking_email(
+                        smtp_settings, customer_email, first_name or "Customer",
+                        order_number or "", tracking_number, tracking_url, "shipped",
+                    )
+                )
 
     return {
         "success": True,
@@ -359,3 +381,274 @@ async def validate_address(
         "is_valid": validation.get("is_valid", False),
         "messages": validation.get("messages", []),
     }
+
+
+# ── SMTP helpers (reuse ecommerce_router patterns) ──────────────────────────
+
+STORE_EMAIL = "Support@TheHempDispensary.com"
+SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = os.environ.get("SMTP_PORT", "587")
+SMTP_USER = os.environ.get("SMTP_USER", "")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+
+
+async def _get_smtp_settings(db: aiosqlite.Connection) -> dict[str, str]:
+    """Get SMTP settings from database, falling back to env vars."""
+    smtp_settings: dict[str, str] = {}
+    for key in ["smtp_host", "smtp_port", "smtp_user", "smtp_password"]:
+        try:
+            cursor = await db.execute("SELECT value FROM settings WHERE key = ?", (key,))
+            row = await cursor.fetchone()
+            if row:
+                smtp_settings[key] = row[0]
+        except Exception:
+            pass
+    if not smtp_settings.get("smtp_host"):
+        smtp_settings["smtp_host"] = SMTP_HOST
+    if not smtp_settings.get("smtp_port"):
+        smtp_settings["smtp_port"] = SMTP_PORT
+    if not smtp_settings.get("smtp_user") and SMTP_USER:
+        smtp_settings["smtp_user"] = SMTP_USER
+    if not smtp_settings.get("smtp_password") and SMTP_PASSWORD:
+        smtp_settings["smtp_password"] = SMTP_PASSWORD
+    return smtp_settings
+
+
+def _send_smtp_email(smtp_settings: dict[str, str], to_email: str, subject: str, html_body: str) -> bool:
+    """Send an email via SMTP (synchronous)."""
+    smtp_host = smtp_settings.get("smtp_host", "smtp.gmail.com")
+    smtp_port = int(smtp_settings.get("smtp_port", "587"))
+    smtp_user = smtp_settings.get("smtp_user", "")
+    smtp_password = smtp_settings.get("smtp_password", "")
+
+    if not smtp_user or not smtp_password:
+        print("[tracking] SMTP credentials not configured, skipping email")
+        return False
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = smtp_user
+    msg["To"] = to_email
+    msg.attach(MIMEText(html_body, "html"))
+
+    try:
+        with smtplib.SMTP(smtp_host, smtp_port) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_password)
+            server.send_message(msg)
+        return True
+    except Exception as e:
+        print(f"[tracking] Failed to send email to {to_email}: {e}")
+        return False
+
+
+# ── Tracking status display names ────────────────────────────────────────────
+
+_STATUS_DISPLAY = {
+    "shipped": ("Your Order Has Shipped!", "Your order is on its way! Here's your tracking information:"),
+    "in_transit": ("Your Package Is In Transit", "Great news — your package is moving through the carrier network:"),
+    "out_for_delivery": ("Out For Delivery!", "Your package is out for delivery and should arrive today:"),
+    "delivered": ("Your Package Has Been Delivered!", "Your package has been delivered. We hope you enjoy your purchase!"),
+    "returned": ("Package Return Notice", "Your package has been returned to us. Please contact us if you have questions:"),
+    "failure": ("Delivery Issue", "There was an issue delivering your package. Please contact us for assistance:"),
+}
+
+
+def _build_tracking_html(
+    first_name: str, order_number: str, tracking_number: str, tracking_url: str, status_key: str
+) -> str:
+    """Build a branded HTML email for tracking notifications."""
+    title, message = _STATUS_DISPLAY.get(status_key, ("Shipping Update", "Here's an update on your order:"))
+
+    tracking_link = ""
+    if tracking_url:
+        tracking_link = f"""
+                <a href="{tracking_url}"
+                   style="display: inline-block; background: #065f46; color: white; padding: 12px 28px;
+                          border-radius: 6px; text-decoration: none; font-weight: bold; margin-top: 12px;">
+                    Track Your Package
+                </a>"""
+
+    return f"""
+    <html>
+    <body style="font-family: 'Helvetica Neue', Arial, sans-serif; color: #1f2937; max-width: 600px; margin: 0 auto;">
+        <div style="background: #065f46; padding: 20px; text-align: center;">
+            <h1 style="color: white; margin: 0; font-size: 22px;">{title}</h1>
+        </div>
+        <div style="padding: 24px; background: #f9fafb;">
+            <p style="font-size: 16px;">Hi {first_name},</p>
+            <p>{message}</p>
+
+            <table style="width: 100%; margin: 16px 0; background: white; border-radius: 8px; overflow: hidden;">
+                <tr style="background: #f3f4f6;">
+                    <td style="padding: 10px 12px; font-weight: bold;">Order Number</td>
+                    <td style="padding: 10px 12px;">{order_number}</td>
+                </tr>
+                <tr>
+                    <td style="padding: 10px 12px; font-weight: bold;">Tracking Number</td>
+                    <td style="padding: 10px 12px; font-family: monospace;">{tracking_number}</td>
+                </tr>
+            </table>
+
+            <div style="text-align: center;">
+                {tracking_link}
+            </div>
+
+            <p style="margin-top: 20px;">If you have any questions, reply to this email or contact us at
+               <a href="mailto:{STORE_EMAIL}">{STORE_EMAIL}</a>.</p>
+            <p>Thank you for choosing The Hemp Dispensary!</p>
+        </div>
+        <div style="padding: 16px; text-align: center; color: #9ca3af; font-size: 12px;">
+            The Hemp Dispensary — Premium Hemp Products<br>
+            Spring Hill, FL
+        </div>
+    </body>
+    </html>
+    """
+
+
+async def _send_tracking_email(
+    smtp_settings: dict[str, str],
+    customer_email: str,
+    first_name: str,
+    order_number: str,
+    tracking_number: str,
+    tracking_url: str,
+    status_key: str,
+) -> None:
+    """Send a tracking notification email to the customer (runs as background task)."""
+    try:
+        title, _ = _STATUS_DISPLAY.get(status_key, ("Shipping Update", ""))
+        subject = f"{title} — Order {order_number} | The Hemp Dispensary"
+        html = _build_tracking_html(first_name, order_number, tracking_number, tracking_url, status_key)
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _send_smtp_email, smtp_settings, customer_email, subject, html)
+        print(f"[tracking] Sent '{status_key}' email to {customer_email} for order {order_number}")
+    except Exception as e:
+        print(f"[tracking] Error sending tracking email: {e}")
+
+
+# ── Shippo Webhook for tracking status updates ──────────────────────────────
+
+@router.post("/webhook/tracking")
+async def shippo_tracking_webhook(request: Request, db: aiosqlite.Connection = Depends(get_db)):
+    """Receive tracking status updates from Shippo webhooks.
+    Shippo sends POST requests when a shipment's tracking status changes.
+    This endpoint is public (no auth) because Shippo calls it directly."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    # Shippo webhook payload structure:
+    # { "data": { "tracking_number": "...", "tracking_status": { "status": "...", ... } }, "event": "track_updated" }
+    event = body.get("event", "")
+    if event != "track_updated":
+        return {"status": "ignored", "event": event}
+
+    data = body.get("data", {})
+    tracking_number = data.get("tracking_number", "")
+    tracking_status_obj = data.get("tracking_status") or {}
+    new_status = tracking_status_obj.get("status", "").upper()
+    status_detail = tracking_status_obj.get("status_details", "")
+
+    if not tracking_number:
+        return {"status": "ignored", "reason": "no_tracking_number"}
+
+    # Map Shippo status to our status keys
+    status_map = {
+        "PRE_TRANSIT": "label_created",
+        "TRANSIT": "in_transit",
+        "DELIVERED": "delivered",
+        "RETURNED": "returned",
+        "FAILURE": "failure",
+    }
+    status_key = status_map.get(new_status, "in_transit")
+
+    # Special case: check for "out for delivery" in status_details
+    if new_status == "TRANSIT" and status_detail and "out for delivery" in status_detail.lower():
+        status_key = "out_for_delivery"
+
+    # Find the order by tracking number
+    cursor = await db.execute(
+        "SELECT id, order_number, customer_first_name, customer_email, tracking_url, tracking_status FROM ecommerce_orders WHERE tracking_number = ?",
+        (tracking_number,),
+    )
+    row = await cursor.fetchone()
+    if not row:
+        print(f"[tracking] Webhook received for unknown tracking number: {tracking_number}")
+        return {"status": "ignored", "reason": "order_not_found"}
+
+    order_id, order_number, first_name, customer_email, tracking_url, current_status = row
+
+    # Only send email if status actually changed
+    if current_status == status_key:
+        return {"status": "ok", "detail": "no_change"}
+
+    # Update tracking status in database
+    await db.execute(
+        "UPDATE ecommerce_orders SET tracking_status = ? WHERE id = ?",
+        (status_key, order_id),
+    )
+    # If delivered, update payment_status too
+    if status_key == "delivered":
+        await db.execute(
+            "UPDATE ecommerce_orders SET payment_status = 'delivered' WHERE id = ? AND payment_status = 'shipped'",
+            (order_id,),
+        )
+    await db.commit()
+
+    # Send email notification to customer
+    if customer_email and status_key in _STATUS_DISPLAY:
+        smtp_settings = await _get_smtp_settings(db)
+        asyncio.create_task(
+            _send_tracking_email(
+                smtp_settings, customer_email, first_name or "Customer",
+                order_number or "", tracking_number, tracking_url or "", status_key,
+            )
+        )
+
+    print(f"[tracking] Order {order_number}: {current_status} -> {status_key} (tracking: {tracking_number})")
+    return {"status": "ok", "order": order_number, "new_status": status_key}
+
+
+async def register_shippo_tracking_webhook() -> None:
+    """Register a webhook with Shippo to receive tracking updates.
+    Called once on app startup."""
+    token = SHIPPO_API_TOKEN
+    if not token:
+        print("[tracking] No Shippo token — skipping webhook registration")
+        return
+
+    base_url = os.environ.get("BASE_URL", "https://thd-inventory-api.fly.dev")
+    webhook_url = f"{base_url}/api/shipping/webhook/tracking"
+
+    headers = {
+        "Authorization": f"ShippoToken {token}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            # Check existing webhooks first
+            resp = await client.get(f"{SHIPPO_API_URL}/webhooks/", headers=headers)
+            if resp.status_code == 200:
+                existing = resp.json().get("results", [])
+                for wh in existing:
+                    if wh.get("url") == webhook_url and wh.get("event") == "track_updated":
+                        print(f"[tracking] Shippo webhook already registered: {webhook_url}")
+                        return
+
+            # Register new webhook
+            resp = await client.post(
+                f"{SHIPPO_API_URL}/webhooks/",
+                headers=headers,
+                json={"url": webhook_url, "event": "track_updated", "is_test": False},
+            )
+            if resp.status_code in (200, 201):
+                print(f"[tracking] Shippo tracking webhook registered: {webhook_url}")
+            else:
+                print(f"[tracking] Failed to register webhook: {resp.status_code} {resp.text}")
+    except Exception as e:
+        print(f"[tracking] Error registering Shippo webhook: {e}")
