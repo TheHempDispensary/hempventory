@@ -485,6 +485,11 @@ async def create_order(
         _send_order_emails(smtp_settings, order, order_number, charge_id, payment_status)
     )
 
+    # Deduct stock from Clover inventory for purchased items (non-blocking)
+    asyncio.create_task(
+        _deduct_stock_for_order(order.items)
+    )
+
     return {
         "success": True,
         "order_number": order_number,
@@ -498,6 +503,53 @@ async def create_order(
 def _format_price(cents: int) -> str:
     """Format cents as dollar string."""
     return f"${cents / 100:.2f}"
+
+
+async def _deduct_stock_for_order(items: List[OrderItem]) -> None:
+    """Deduct stock from Clover HQ inventory for each purchased item (runs as background task)."""
+    try:
+        base = f"{CLOVER_BASE_URL}/merchants/{HQ_MERCHANT_ID}"
+        headers = {"Authorization": f"Bearer {HQ_API_TOKEN}"}
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for item in items:
+                clover_item_id = item.product_id
+                if not clover_item_id:
+                    print(f"[stock] Skipping stock deduction for '{item.name}' — no product_id")
+                    continue
+
+                try:
+                    # Get current stock
+                    resp = await client.get(
+                        f"{base}/item_stocks/{clover_item_id}",
+                        headers=headers,
+                    )
+                    if resp.status_code != 200:
+                        print(f"[stock] Could not get stock for {clover_item_id} ({item.name}): {resp.status_code}")
+                        continue
+
+                    stock_data = resp.json()
+                    current_stock = stock_data.get("quantity", 0)
+                    new_stock = max(0, current_stock - item.quantity)
+
+                    # Update stock
+                    update_resp = await client.post(
+                        f"{base}/item_stocks/{clover_item_id}",
+                        headers={**headers, "Content-Type": "application/json"},
+                        json={"quantity": new_stock},
+                    )
+                    if update_resp.status_code in (200, 201):
+                        print(f"[stock] Deducted {item.quantity} from '{item.name}' ({clover_item_id}): {current_stock} -> {new_stock}")
+                    else:
+                        print(f"[stock] Failed to update stock for {clover_item_id}: {update_resp.status_code} {update_resp.text[:200]}")
+                except Exception as e:
+                    print(f"[stock] Error deducting stock for '{item.name}': {e}")
+
+        # Invalidate product cache so website shows updated stock
+        invalidate_product_cache()
+        print(f"[stock] Stock deduction complete for {len(items)} item(s), cache invalidated")
+    except Exception as e:
+        print(f"[stock] Stock deduction task failed: {e}")
 
 
 async def _get_smtp_settings(db: aiosqlite.Connection) -> dict[str, str]:
