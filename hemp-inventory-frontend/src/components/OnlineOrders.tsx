@@ -160,6 +160,7 @@ export default function OnlineOrders() {
   const [purchasingLabel, setPurchasingLabel] = useState(false);
   const [shippingError, setShippingError] = useState("");
   const [parcelWeight, setParcelWeight] = useState("1.0");
+  const [weightUnit, setWeightUnit] = useState<"lb" | "oz">("lb");
   const [parcelLength, setParcelLength] = useState("10");
   const [parcelWidth, setParcelWidth] = useState("8");
   const [parcelHeight, setParcelHeight] = useState("4");
@@ -222,7 +223,7 @@ export default function OnlineOrders() {
     try {
       const res = await createShipment({
         order_id: orderId,
-        parcel_weight: parseFloat(parcelWeight) || 1.0,
+        parcel_weight: weightUnit === "oz" ? (parseFloat(parcelWeight) || 1.0) / 16 : parseFloat(parcelWeight) || 1.0,
         parcel_length: parseFloat(parcelLength) || 10,
         parcel_width: parseFloat(parcelWidth) || 8,
         parcel_height: parseFloat(parcelHeight) || 4,
@@ -798,9 +799,16 @@ export default function OnlineOrders() {
 
                         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
                           <div>
-                            <label className="text-xs text-gray-500 block mb-1">Weight (lb)</label>
-                            <input type="number" step="0.1" value={parcelWeight} onChange={(e) => setParcelWeight(e.target.value)}
-                              className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-green-500" />
+                            <label className="text-xs text-gray-500 block mb-1">Weight</label>
+                            <div className="flex gap-1">
+                              <input type="number" step={weightUnit === "oz" ? "1" : "0.1"} value={parcelWeight} onChange={(e) => setParcelWeight(e.target.value)}
+                                className="w-full px-3 py-1.5 border border-gray-300 rounded-l text-sm focus:ring-2 focus:ring-green-500" />
+                              <select value={weightUnit} onChange={(e) => setWeightUnit(e.target.value as "lb" | "oz")}
+                                className="px-2 py-1.5 border border-gray-300 rounded-r text-sm bg-gray-50 focus:ring-2 focus:ring-green-500">
+                                <option value="lb">lb</option>
+                                <option value="oz">oz</option>
+                              </select>
+                            </div>
                           </div>
                           <div>
                             <label className="text-xs text-gray-500 block mb-1">Length (in)</label>
