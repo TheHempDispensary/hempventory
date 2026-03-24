@@ -83,8 +83,8 @@ export const createItem = (data: {
 export const getAgeRestrictionTypes = () =>
   api.get("/api/inventory/age-restriction-types");
 
-export const deleteItem = (sku: string) =>
-  api.delete(`/api/inventory/items/${sku}`);
+export const deleteItem = (sku: string, name?: string) =>
+  api.delete(`/api/inventory/items/${sku}`, { params: name ? { name } : undefined });
 
 export const bulkDeleteItems = (skus: string[]) =>
   api.post("/api/inventory/items/bulk-delete", { skus });

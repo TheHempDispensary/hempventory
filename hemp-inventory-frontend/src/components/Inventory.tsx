@@ -498,11 +498,11 @@ export default function Inventory() {
   const handleDeleteItem = async (item: InventoryItem) => {
     setDeleting(item.sku);
     try {
-      await deleteItem(item.sku);
+      await deleteItem(item.sku, item.name);
       setConfirmDelete(null);
       setEditItem(null);
-      // Optimistically remove from state immediately
-      setItems(prev => prev.filter(i => i.sku !== item.sku));
+      // Optimistically remove from state immediately — match by both sku AND name
+      setItems(prev => prev.filter(i => !(i.sku === item.sku && i.name === item.name)));
     } catch (err) {
       console.error("Error deleting item:", err);
       await loadData();

@@ -906,13 +906,18 @@ async def bulk_delete_items(
 @router.delete("/items/{sku}")
 async def delete_item(
     sku: str,
+    name: Optional[str] = None,
     user: dict = Depends(get_current_user),
     db: aiosqlite.Connection = Depends(get_db),
 ):
-    """Delete an item from all locations by SKU."""
+    """Delete an item from all locations by SKU. If name is provided, only delete
+    items matching both SKU and name (to avoid deleting sibling items sharing a SKU)."""
     locations = await _get_locations(db)
     if not locations:
         raise HTTPException(status_code=400, detail="No locations configured")
+
+    # Normalize the name for comparison (collapse whitespace)
+    normalized_name = " ".join(name.split()) if name else None
 
     results = []
     for loc in locations:
@@ -923,6 +928,15 @@ async def delete_item(
             matching = [i for i in data.get("elements", []) if i.get("sku") == sku]
             if not matching:
                 matching = [i for i in data.get("elements", []) if i.get("id") == sku]
+            # If a name was provided, narrow matches to only items with that exact name
+            if normalized_name and matching:
+                name_filtered = [
+                    i for i in matching
+                    if " ".join((i.get("name", "") or "").split()) == normalized_name
+                ]
+                # Only use the filtered list if it found something; otherwise fall back
+                if name_filtered:
+                    matching = name_filtered
             if not matching:
                 results.append({"location": loc_name, "status": "not_found"})
                 continue
