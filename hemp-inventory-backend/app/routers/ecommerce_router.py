@@ -342,6 +342,43 @@ async def refresh_products():
     return {"status": "refreshed", "total": result["total"], "categories": result["categories"]}
 
 
+class ValidatePromoRequest(BaseModel):
+    promo_code: str
+    email: str
+
+
+# Known promo codes: code -> {discount_pct, single_use}
+PROMO_CODES = {
+    "FIRST15": {"discount_pct": 0.15, "single_use": True},
+}
+
+
+@router.post("/validate-promo")
+async def validate_promo(
+    body: ValidatePromoRequest,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Public endpoint: Validate a promo code and check if customer can use it."""
+    code = body.promo_code.strip().upper()
+    email = body.email.strip().lower()
+
+    if code not in PROMO_CODES:
+        return {"valid": False, "reason": "Invalid promo code"}
+
+    promo = PROMO_CODES[code]
+
+    if promo["single_use"] and email:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM ecommerce_orders WHERE LOWER(customer_email) = ? AND promo_code = ? AND payment_status != 'cancelled'",
+            (email, code),
+        )
+        count = (await cursor.fetchone())[0]
+        if count > 0:
+            return {"valid": False, "reason": "This promo code has already been used with this email address"}
+
+    return {"valid": True, "discount_pct": promo["discount_pct"], "code": code}
+
+
 @router.post("/orders")
 async def create_order(
     order: CreateOrderRequest,
@@ -349,6 +386,18 @@ async def create_order(
     db: aiosqlite.Connection = Depends(get_db),
 ):
     """Public endpoint: Create an e-commerce order with Clover payment processing."""
+    # Server-side promo code validation
+    if order.promo_code and order.discount > 0:
+        code = order.promo_code.strip().upper()
+        if code in PROMO_CODES and PROMO_CODES[code]["single_use"]:
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM ecommerce_orders WHERE LOWER(customer_email) = ? AND promo_code = ? AND payment_status != 'cancelled'",
+                (order.customer.email.strip().lower(), code),
+            )
+            count = (await cursor.fetchone())[0]
+            if count > 0:
+                raise HTTPException(status_code=400, detail="This promo code has already been used with this email address")
+
     charge_id = ""
     payment_status = "pending"
 
