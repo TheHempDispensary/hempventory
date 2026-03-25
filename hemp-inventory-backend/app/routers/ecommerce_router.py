@@ -595,14 +595,25 @@ async def create_order(
             "ecomind": "ecom",
         }
 
+        # Determine the correct Clover location for this order
+        if order.fulfillment_type == "pickup_west" and WEST_MERCHANT_ID and WEST_API_TOKEN:
+            order_merchant_id = WEST_MERCHANT_ID
+            order_api_token = WEST_API_TOKEN
+        elif order.fulfillment_type == "pickup_east" and EAST_MERCHANT_ID and EAST_API_TOKEN:
+            order_merchant_id = EAST_MERCHANT_ID
+            order_api_token = EAST_API_TOKEN
+        else:
+            order_merchant_id = HQ_MERCHANT_ID
+            order_api_token = HQ_API_TOKEN
+
         async with httpx.AsyncClient(timeout=30.0) as client:
             # Create a Clover order with line items so the receipt shows actual products
             try:
                 clover_order_headers = {
-                    "Authorization": f"Bearer {HQ_API_TOKEN}",
+                    "Authorization": f"Bearer {order_api_token}",
                     "Content-Type": "application/json",
                 }
-                clover_order_url = f"{CLOVER_BASE_URL}/merchants/{HQ_MERCHANT_ID}/orders"
+                clover_order_url = f"{CLOVER_BASE_URL}/merchants/{order_merchant_id}/orders"
                 order_body = {
                     "state": "open",
                     "manualTransaction": False,
@@ -664,8 +675,8 @@ async def create_order(
         """INSERT INTO ecommerce_orders
            (order_number, customer_first_name, customer_last_name, customer_email, customer_phone,
             shipping_address, shipping_apartment, shipping_city, shipping_state, shipping_zip,
-            subtotal, discount, promo_code, shipping_cost, tax, total, notes, charge_id, payment_status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            subtotal, discount, promo_code, shipping_cost, tax, total, notes, charge_id, payment_status, fulfillment_type)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             order_number,
             order.customer.first_name,
@@ -686,6 +697,7 @@ async def create_order(
             order.notes,
             charge_id,
             payment_status,
+            order.fulfillment_type,
         ),
     )
     order_id = cursor.lastrowid
@@ -707,9 +719,9 @@ async def create_order(
         _send_order_emails(smtp_settings, order, order_number, charge_id, payment_status)
     )
 
-    # Deduct stock from Clover inventory for purchased items (non-blocking)
+    # Deduct stock from correct Clover location based on fulfillment type (non-blocking)
     asyncio.create_task(
-        _deduct_stock_for_order(order.items)
+        _deduct_stock_for_order(order.items, order.fulfillment_type)
     )
 
     return {
@@ -727,11 +739,20 @@ def _format_price(cents: int) -> str:
     return f"${cents / 100:.2f}"
 
 
-async def _deduct_stock_for_order(items: List[OrderItem]) -> None:
-    """Deduct stock from Clover HQ inventory for each purchased item (runs as background task)."""
+async def _deduct_stock_for_order(items: List[OrderItem], fulfillment_type: str = "shipping") -> None:
+    """Deduct stock from the correct Clover location based on fulfillment type."""
     try:
-        base = f"{CLOVER_BASE_URL}/merchants/{HQ_MERCHANT_ID}"
-        headers = {"Authorization": f"Bearer {HQ_API_TOKEN}"}
+        if fulfillment_type == "pickup_west" and WEST_MERCHANT_ID and WEST_API_TOKEN:
+            merchant_id = WEST_MERCHANT_ID
+            api_token = WEST_API_TOKEN
+        elif fulfillment_type == "pickup_east" and EAST_MERCHANT_ID and EAST_API_TOKEN:
+            merchant_id = EAST_MERCHANT_ID
+            api_token = EAST_API_TOKEN
+        else:
+            merchant_id = HQ_MERCHANT_ID
+            api_token = HQ_API_TOKEN
+        base = f"{CLOVER_BASE_URL}/merchants/{merchant_id}"
+        headers = {"Authorization": f"Bearer {api_token}"}
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             for item in items:
