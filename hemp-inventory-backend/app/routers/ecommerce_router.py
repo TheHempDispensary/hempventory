@@ -40,11 +40,11 @@ class OrderCustomer(BaseModel):
 
 
 class OrderShipping(BaseModel):
-    address: str
+    address: str = ""
     apartment: str = ""
-    city: str
-    state: str
-    zip: str
+    city: str = ""
+    state: str = ""
+    zip: str = ""
 
 
 class CreateOrderRequest(BaseModel):
@@ -608,16 +608,10 @@ async def create_order(
             "ecomind": "ecom",
         }
 
-        # Determine the correct Clover location for this order
-        if order.fulfillment_type == "pickup_west" and WEST_MERCHANT_ID and WEST_API_TOKEN:
-            order_merchant_id = WEST_MERCHANT_ID
-            order_api_token = WEST_API_TOKEN
-        elif order.fulfillment_type == "pickup_east" and EAST_MERCHANT_ID and EAST_API_TOKEN:
-            order_merchant_id = EAST_MERCHANT_ID
-            order_api_token = EAST_API_TOKEN
-        else:
-            order_merchant_id = HQ_MERCHANT_ID
-            order_api_token = HQ_API_TOKEN
+        # Always use HQ for payment processing since the card token is generated with HQ's PAKMS key.
+        # Stock deduction to the correct location (West/East/HQ) is handled separately after order creation.
+        order_merchant_id = HQ_MERCHANT_ID
+        order_api_token = HQ_API_TOKEN
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             # Create a Clover order with line items so the receipt shows actual products
