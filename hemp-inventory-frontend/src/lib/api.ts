@@ -352,6 +352,38 @@ export const deleteScheduleByDay = (employeeId: number, dayOfWeek: number) =>
 
 export const getMySchedule = () => api.get("/api/timeclock/my-schedule");
 
+// Employee Self-Service: Time-Off & Notes
+export const getMyTimeOff = () => api.get("/api/timeclock/my-time-off");
+export const submitMyTimeOff = (data: { date: string; reason?: string }) =>
+  api.post("/api/timeclock/my-time-off", data);
+export const cancelMyTimeOff = (requestId: number) =>
+  api.delete(`/api/timeclock/my-time-off/${requestId}`);
+export const getMyScheduleNotes = (params?: { start_date?: string; end_date?: string }) =>
+  api.get("/api/timeclock/my-schedule-notes", { params });
+
+// Time-Off Requests
+export const getTimeOffRequests = (params?: { employee_id?: number; start_date?: string; end_date?: string; status?: string }) =>
+  api.get("/api/timeclock/time-off", { params });
+
+export const createTimeOffRequest = (data: { employee_id: number; date: string; reason?: string }) =>
+  api.post("/api/timeclock/time-off", data);
+
+export const updateTimeOffRequest = (requestId: number, status: string) =>
+  api.put(`/api/timeclock/time-off/${requestId}`, { status });
+
+export const deleteTimeOffRequest = (requestId: number) =>
+  api.delete(`/api/timeclock/time-off/${requestId}`);
+
+// Schedule Notes
+export const getScheduleNotes = (params?: { start_date?: string; end_date?: string }) =>
+  api.get("/api/timeclock/schedule-notes", { params });
+
+export const createScheduleNote = (data: { date: string; note: string }) =>
+  api.post("/api/timeclock/schedule-notes", data);
+
+export const deleteScheduleNote = (noteId: number) =>
+  api.delete(`/api/timeclock/schedule-notes/${noteId}`);
+
 // Online Orders (ecommerce)
 export const getOnlineOrders = (params?: { limit?: number; offset?: number; status?: string }) =>
   api.get("/api/ecommerce/orders", { params });

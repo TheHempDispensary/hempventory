@@ -308,6 +308,32 @@ async def init_db():
             )
         """)
 
+        # Time-off requests table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS time_off_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                employee_id INTEGER NOT NULL,
+                date TEXT NOT NULL,
+                reason TEXT,
+                status TEXT DEFAULT 'pending',
+                reviewed_by TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (employee_id) REFERENCES employees(id),
+                UNIQUE(employee_id, date)
+            )
+        """)
+
+        # Schedule notes table (date-specific notes visible to all)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS schedule_notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                note TEXT NOT NULL,
+                created_by TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Promo codes table for discount management
         await db.execute("""
             CREATE TABLE IF NOT EXISTS promo_codes (

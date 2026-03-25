@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
-import { getMyClockStatus, myClockIn, myClockOut, getMyEntries, getMySchedule } from "../lib/api";
+import { getMyClockStatus, myClockIn, myClockOut, getMyEntries, getMySchedule, getMyTimeOff, submitMyTimeOff, cancelMyTimeOff, getMyScheduleNotes } from "../lib/api";
+import { ChevronLeft, ChevronRight, CalendarOff, MessageSquare, Plus, Trash2 } from "lucide-react";
 
 interface ClockStatus {
   clocked_in: boolean;
@@ -15,6 +16,33 @@ interface TimeEntry {
   hours: number | null;
 }
 
+interface ScheduleItem {
+  id: number;
+  day_of_week: number;
+  day_name: string;
+  start_time: string;
+  end_time: string;
+  location: string | null;
+  notes: string | null;
+}
+
+interface TimeOffItem {
+  id: number;
+  date: string;
+  reason: string | null;
+  status: string;
+  reviewed_by: string | null;
+  created_at: string;
+}
+
+interface ScheduleNote {
+  id: number;
+  date: string;
+  note: string;
+  created_by: string | null;
+  created_at: string;
+}
+
 export default function EmployeeTimeClock() {
   const [status, setStatus] = useState<ClockStatus>({ clocked_in: false });
   const [entries, setEntries] = useState<TimeEntry[]>([]);
@@ -23,9 +51,18 @@ export default function EmployeeTimeClock() {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [tab, setTab] = useState<"clock" | "timesheet" | "schedule">("clock");
-  const [schedule, setSchedule] = useState<{ id: number; day_of_week: number; day_name: string; start_time: string; end_time: string; location: string | null; notes: string | null }[]>([]);
+  const [schedule, setSchedule] = useState<ScheduleItem[]>([]);
   const [scheduleLoading, setScheduleLoading] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
+
+  // Monthly calendar state
+  const [calMonth, setCalMonth] = useState(() => new Date().getMonth());
+  const [calYear, setCalYear] = useState(() => new Date().getFullYear());
+  const [myTimeOff, setMyTimeOff] = useState<TimeOffItem[]>([]);
+  const [scheduleNotes, setScheduleNotes] = useState<ScheduleNote[]>([]);
+  const [showRequestModal, setShowRequestModal] = useState(false);
+  const [requestDate, setRequestDate] = useState("");
+  const [requestReason, setRequestReason] = useState("");
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -65,9 +102,36 @@ export default function EmployeeTimeClock() {
     fetchEntries();
   }, [fetchStatus, fetchEntries]);
 
+  const fetchTimeOff = useCallback(async () => {
+    try {
+      const res = await getMyTimeOff();
+      setMyTimeOff(res.data);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const fetchNotes = useCallback(async () => {
+    try {
+      const start = new Date(calYear, calMonth, 1);
+      const end = new Date(calYear, calMonth + 1, 0);
+      const res = await getMyScheduleNotes({
+        start_date: start.toISOString().split("T")[0],
+        end_date: end.toISOString().split("T")[0],
+      });
+      setScheduleNotes(res.data);
+    } catch {
+      // ignore
+    }
+  }, [calYear, calMonth]);
+
   useEffect(() => {
-    if (tab === "schedule") fetchSchedule();
-  }, [tab, fetchSchedule]);
+    if (tab === "schedule") {
+      fetchSchedule();
+      fetchTimeOff();
+      fetchNotes();
+    }
+  }, [tab, fetchSchedule, fetchTimeOff, fetchNotes]);
 
   // Live timer for elapsed time when clocked in
   useEffect(() => {
@@ -135,8 +199,67 @@ export default function EmployeeTimeClock() {
     });
   };
 
+  const handleSubmitTimeOff = async () => {
+    if (!requestDate) return;
+    try {
+      await submitMyTimeOff({ date: requestDate, reason: requestReason || undefined });
+      setSuccess("Time-off request submitted!");
+      setShowRequestModal(false);
+      setRequestDate("");
+      setRequestReason("");
+      await fetchTimeOff();
+    } catch {
+      setError("Failed to submit time-off request");
+    }
+  };
+
+  const handleCancelTimeOff = async (id: number) => {
+    try {
+      await cancelMyTimeOff(id);
+      setSuccess("Time-off request cancelled");
+      await fetchTimeOff();
+    } catch {
+      setError("Failed to cancel request");
+    }
+  };
+
   // Calculate total hours for visible entries
   const totalHours = entries.reduce((sum, e) => sum + (e.hours || 0), 0);
+
+  // Calendar helpers
+  const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+  const dayNamesShort = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+  const prevMonth = () => {
+    if (calMonth === 0) { setCalMonth(11); setCalYear(calYear - 1); }
+    else setCalMonth(calMonth - 1);
+  };
+  const nextMonth = () => {
+    if (calMonth === 11) { setCalMonth(0); setCalYear(calYear + 1); }
+    else setCalMonth(calMonth + 1);
+  };
+
+  const fmtTime12 = (t: string) => {
+    const [h, mi] = t.split(":").map(Number);
+    const ampm = h >= 12 ? "p" : "a";
+    const hr = h === 0 ? 12 : h > 12 ? h - 12 : h;
+    return mi === 0 ? `${hr}${ampm}` : `${hr}:${mi.toString().padStart(2, "0")}${ampm}`;
+  };
+
+  // Build schedule lookup
+  const scheduleMap: Record<number, ScheduleItem> = {};
+  schedule.forEach(s => { scheduleMap[s.day_of_week] = s; });
+  const timeOffMap: Record<string, TimeOffItem> = {};
+  myTimeOff.forEach(t => { timeOffMap[t.date] = t; });
+  const notesMap: Record<string, ScheduleNote[]> = {};
+  scheduleNotes.forEach(n => { notesMap[n.date] = notesMap[n.date] || []; notesMap[n.date].push(n); });
+
+  // Build calendar days
+  const daysInMonth = new Date(calYear, calMonth + 1, 0).getDate();
+  const firstDow = new Date(calYear, calMonth, 1).getDay();
+  const calendarDays: (Date | null)[] = [];
+  for (let i = 0; i < firstDow; i++) calendarDays.push(null);
+  for (let d = 1; d <= daysInMonth; d++) calendarDays.push(new Date(calYear, calMonth, d));
 
   return (
     <div className="max-w-2xl mx-auto">
@@ -268,48 +391,146 @@ export default function EmployeeTimeClock() {
         </div>
       )}
       {tab === "schedule" && (
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-          <div className="p-4 border-b border-gray-200">
-            <h3 className="font-semibold text-gray-900">My Weekly Schedule</h3>
-          </div>
+        <div className="space-y-4">
           {scheduleLoading ? (
             <div className="p-8 text-center text-gray-400">Loading...</div>
-          ) : schedule.length === 0 ? (
-            <div className="p-8 text-center text-gray-400">No schedule set yet. Check with your manager.</div>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead className="bg-gray-50">
-                  <tr>
-                    <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Day</th>
-                    <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Start</th>
-                    <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">End</th>
-                    <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Location</th>
-                    <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Notes</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {[0, 1, 2, 3, 4, 5, 6].map((day) => {
-                    const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-                    const entry = schedule.find(s => s.day_of_week === day);
+            <>
+              {/* Month Navigation */}
+              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-3 flex items-center justify-between">
+                <button onClick={prevMonth} className="p-1.5 hover:bg-gray-100 rounded-lg"><ChevronLeft className="w-5 h-5" /></button>
+                <span className="font-semibold text-gray-900">{monthNames[calMonth]} {calYear}</span>
+                <button onClick={nextMonth} className="p-1.5 hover:bg-gray-100 rounded-lg"><ChevronRight className="w-5 h-5" /></button>
+              </div>
+
+              {/* Monthly Calendar */}
+              <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                <div className="grid grid-cols-7 bg-gray-50 border-b border-gray-200">
+                  {dayNamesShort.map(d => (
+                    <div key={d} className="text-center py-2 text-xs font-semibold text-gray-500">{d}</div>
+                  ))}
+                </div>
+                <div className="grid grid-cols-7">
+                  {calendarDays.map((day, i) => {
+                    if (!day) return <div key={`empty-${i}`} className="border-b border-r border-gray-100 p-2 min-h-[5rem] bg-gray-50/50" />;
+                    const dateStr = day.toISOString().split("T")[0];
+                    const dow = day.getDay();
+                    const sched = scheduleMap[dow];
+                    const timeOff = timeOffMap[dateStr];
+                    const dayNotes = notesMap[dateStr];
+                    const isToday = dateStr === new Date().toISOString().split("T")[0];
+                    const isWeekend = dow === 0 || dow === 6;
+
                     return (
-                      <tr key={day} className={entry ? "hover:bg-gray-50" : "bg-gray-50/50"}>
-                        <td className="px-4 py-3 text-sm font-medium text-gray-900">{dayNames[day]}</td>
-                        {entry ? (
-                          <>
-                            <td className="px-4 py-3 text-sm text-gray-700">{entry.start_time}</td>
-                            <td className="px-4 py-3 text-sm text-gray-700">{entry.end_time}</td>
-                            <td className="px-4 py-3 text-sm text-gray-500">{entry.location || "\u2014"}</td>
-                            <td className="px-4 py-3 text-sm text-gray-500">{entry.notes || "\u2014"}</td>
-                          </>
+                      <div key={dateStr} className={`border-b border-r border-gray-100 p-1.5 min-h-[5rem] ${isToday ? "bg-green-50 ring-1 ring-inset ring-green-300" : isWeekend ? "bg-gray-50/50" : ""}`}>
+                        <div className={`text-xs font-bold mb-0.5 ${isToday ? "text-green-700" : "text-gray-900"}`}>{day.getDate()}</div>
+                        {timeOff && timeOff.status === "approved" ? (
+                          <div className="bg-red-100 text-red-700 rounded px-1 py-0.5 text-xs font-bold text-center">OFF</div>
+                        ) : sched ? (
+                          <div className="space-y-0.5">
+                            <div className="text-xs text-gray-800 font-medium">{fmtTime12(sched.start_time)}-{fmtTime12(sched.end_time)}</div>
+                            {sched.location && <div className="text-xs text-blue-600 truncate">{sched.location}</div>}
+                          </div>
                         ) : (
-                          <td colSpan={4} className="px-4 py-3 text-sm text-gray-400 italic">Off</td>
+                          <div className="text-xs text-gray-300">Off</div>
                         )}
-                      </tr>
+                        {timeOff && timeOff.status === "pending" && (
+                          <div className="bg-amber-100 text-amber-700 rounded px-1 py-0.5 text-xs text-center mt-0.5">Pending</div>
+                        )}
+                        {timeOff && timeOff.status === "denied" && (
+                          <div className="bg-red-50 text-red-500 rounded px-1 py-0.5 text-xs text-center mt-0.5 line-through">Denied</div>
+                        )}
+                        {dayNotes && dayNotes.map(n => (
+                          <div key={n.id} className="bg-blue-50 text-blue-600 rounded px-1 py-0.5 text-xs mt-0.5 truncate" title={n.note}>
+                            <MessageSquare className="w-2.5 h-2.5 inline mr-0.5" />{n.note}
+                          </div>
+                        ))}
+                      </div>
                     );
                   })}
-                </tbody>
-              </table>
+                </div>
+                {/* Legend */}
+                <div className="p-2 border-t border-gray-200 flex flex-wrap gap-3 text-xs text-gray-500">
+                  <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-green-100 border border-green-300" /> Today</span>
+                  <span className="flex items-center gap-1"><span className="inline-block px-1 rounded text-xs font-bold bg-red-100 text-red-700">OFF</span> Approved Off</span>
+                  <span className="flex items-center gap-1"><span className="inline-block px-1 rounded text-xs bg-amber-100 text-amber-700">Pending</span> Awaiting Approval</span>
+                </div>
+              </div>
+
+              {/* Request Time Off */}
+              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="font-semibold text-gray-900 flex items-center gap-2">
+                    <CalendarOff className="w-4 h-4 text-amber-600" />My Time-Off Requests
+                  </h3>
+                  <button onClick={() => { setShowRequestModal(true); setRequestDate(new Date().toISOString().split("T")[0]); }}
+                    className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium bg-amber-50 text-amber-700 rounded-lg hover:bg-amber-100">
+                    <Plus className="w-3.5 h-3.5" />Request Off
+                  </button>
+                </div>
+                {myTimeOff.length === 0 ? (
+                  <p className="text-sm text-gray-400">No time-off requests submitted.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {myTimeOff.map(req => (
+                      <div key={req.id} className="flex items-center justify-between bg-gray-50 rounded-lg p-2.5">
+                        <div>
+                          <span className="text-sm font-medium text-gray-900">
+                            {new Date(req.date + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
+                          </span>
+                          {req.reason && <span className="text-sm text-gray-500 ml-2">&mdash; {req.reason}</span>}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                            req.status === "approved" ? "bg-green-100 text-green-700" :
+                            req.status === "denied" ? "bg-red-100 text-red-700" :
+                            "bg-amber-100 text-amber-700"
+                          }`}>{req.status}</span>
+                          {req.status === "pending" && (
+                            <button onClick={() => handleCancelTimeOff(req.id)} className="p-1 text-gray-400 hover:text-red-500 rounded" title="Cancel request">
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+
+          {/* Request Modal */}
+          {showRequestModal && (
+            <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => setShowRequestModal(false)}>
+              <div className="bg-white rounded-xl shadow-xl p-6 w-full max-w-sm" onClick={e => e.stopPropagation()}>
+                <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                  <CalendarOff className="w-5 h-5 text-amber-600" />Request Time Off
+                </h3>
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Date</label>
+                    <input type="date" value={requestDate} onChange={e => setRequestDate(e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Reason (optional)</label>
+                    <input type="text" value={requestReason} onChange={e => setRequestReason(e.target.value)}
+                      placeholder="Vacation, appointment, etc."
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500" />
+                  </div>
+                  <div className="flex gap-2 pt-2">
+                    <button onClick={handleSubmitTimeOff} disabled={!requestDate}
+                      className="flex-1 px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 disabled:opacity-50 font-medium text-sm">
+                      Submit Request
+                    </button>
+                    <button onClick={() => setShowRequestModal(false)}
+                      className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 font-medium text-sm">
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
           )}
         </div>
