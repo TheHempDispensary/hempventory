@@ -1689,6 +1689,10 @@ async def bulk_assign_images(
     # Update cache in-place to reflect new images without full re-sync
     if assigned > 0:
         assigned_skus = set(matching_skus.keys())
+        # Clear processed image cache for all assigned SKUs so fresh images are served
+        for sku in assigned_skus:
+            for key in [k for k in _image_cache if k[0] == sku]:
+                del _image_cache[key]
         async with _cache_lock:
             for item in _inventory_cache.get("items", []):
                 if item["sku"] in assigned_skus:

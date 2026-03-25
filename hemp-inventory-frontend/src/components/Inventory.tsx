@@ -960,8 +960,8 @@ export default function Inventory() {
         setToast({ type: "success", text: `Image assigned to ${d.assigned} of ${bulkImageMatches.length} products` });
         setTimeout(() => setToast(null), 6000);
         setImageCacheBust(Date.now());
-        // Refresh data in background — don't block the UI
-        loadData().catch(() => {});
+        // Force sync (not cached) so has_image flags are fresh
+        loadData(true).catch(() => {});
       } else {
         setToast({ type: "error", text: `No products found matching "${bulkImageKeyword}"` });
         setTimeout(() => setToast(null), 4000);
