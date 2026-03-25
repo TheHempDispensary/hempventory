@@ -370,4 +370,28 @@ export const resendOrderConfirmation = (orderId: number) =>
 export const refundOrder = (orderId: number, amount?: number) =>
   api.post(`/api/ecommerce/orders/${orderId}/refund`, amount ? { amount } : {});
 
+// Promo / Discount Management
+export const getPromos = () => api.get("/api/ecommerce/promos");
+
+export const createPromo = (data: {
+  code: string;
+  discount_pct?: number;
+  discount_amount?: number;
+  single_use?: boolean;
+  max_uses?: number;
+  expires_at?: string | null;
+}) => api.post("/api/ecommerce/promos", data);
+
+export const updatePromo = (promoId: number, data: {
+  discount_pct?: number;
+  discount_amount?: number;
+  single_use?: boolean;
+  is_active?: boolean;
+  max_uses?: number;
+  expires_at?: string | null;
+}) => api.put(`/api/ecommerce/promos/${promoId}`, data);
+
+export const deletePromo = (promoId: number) =>
+  api.delete(`/api/ecommerce/promos/${promoId}`);
+
 export default api;

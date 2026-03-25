@@ -416,12 +416,6 @@ class ValidatePromoRequest(BaseModel):
     email: str
 
 
-# Known promo codes: code -> {discount_pct, single_use}
-PROMO_CODES = {
-    "FIRST15": {"discount_pct": 0.15, "single_use": True},
-}
-
-
 @router.post("/validate-promo")
 async def validate_promo(
     body: ValidatePromoRequest,
@@ -431,11 +425,26 @@ async def validate_promo(
     code = body.promo_code.strip().upper()
     email = body.email.strip().lower()
 
-    if code not in PROMO_CODES:
+    cursor = await db.execute("SELECT * FROM promo_codes WHERE code = ? AND is_active = 1", (code,))
+    promo = await cursor.fetchone()
+    if not promo:
         return {"valid": False, "reason": "Invalid promo code"}
 
-    promo = PROMO_CODES[code]
+    # Check expiration
+    if promo["expires_at"]:
+        from datetime import datetime
+        try:
+            exp = datetime.fromisoformat(promo["expires_at"])
+            if datetime.utcnow() > exp:
+                return {"valid": False, "reason": "This promo code has expired"}
+        except Exception:
+            pass
 
+    # Check max uses
+    if promo["max_uses"] > 0 and promo["times_used"] >= promo["max_uses"]:
+        return {"valid": False, "reason": "This promo code has reached its usage limit"}
+
+    # Check single-use per customer
     if promo["single_use"] and email:
         cursor = await db.execute(
             "SELECT COUNT(*) FROM ecommerce_orders WHERE LOWER(customer_email) = ? AND promo_code = ? AND payment_status != 'cancelled'",
@@ -445,7 +454,109 @@ async def validate_promo(
         if count > 0:
             return {"valid": False, "reason": "This promo code has already been used with this email address"}
 
-    return {"valid": True, "discount_pct": promo["discount_pct"], "code": code}
+    return {"valid": True, "discount_pct": promo["discount_pct"], "discount_amount": promo["discount_amount"], "code": code}
+
+
+# ── Promo Code Management (Admin) ────────────────────────────────────────────
+
+@router.get("/promos")
+async def list_promos(db: aiosqlite.Connection = Depends(get_db)):
+    """Admin: List all promo codes."""
+    cursor = await db.execute("SELECT * FROM promo_codes ORDER BY created_at DESC")
+    rows = await cursor.fetchall()
+    # Count usage from orders for each promo
+    promos = []
+    for row in rows:
+        cursor2 = await db.execute(
+            "SELECT COUNT(*) FROM ecommerce_orders WHERE promo_code = ? AND payment_status != 'cancelled'",
+            (row["code"],),
+        )
+        order_count = (await cursor2.fetchone())[0]
+        promos.append({
+            "id": row["id"],
+            "code": row["code"],
+            "discount_pct": row["discount_pct"],
+            "discount_amount": row["discount_amount"],
+            "single_use": bool(row["single_use"]),
+            "is_active": bool(row["is_active"]),
+            "max_uses": row["max_uses"],
+            "times_used": order_count,
+            "expires_at": row["expires_at"],
+            "created_at": row["created_at"],
+        })
+    return promos
+
+
+class PromoCreateRequest(BaseModel):
+    code: str
+    discount_pct: float = 0
+    discount_amount: int = 0
+    single_use: bool = False
+    max_uses: int = 0
+    expires_at: Optional[str] = None
+
+
+@router.post("/promos")
+async def create_promo(body: PromoCreateRequest, db: aiosqlite.Connection = Depends(get_db)):
+    """Admin: Create a new promo code."""
+    code = body.code.strip().upper()
+    try:
+        await db.execute(
+            "INSERT INTO promo_codes (code, discount_pct, discount_amount, single_use, max_uses, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (code, body.discount_pct, body.discount_amount, int(body.single_use), body.max_uses, body.expires_at),
+        )
+        await db.commit()
+    except Exception:
+        raise HTTPException(status_code=400, detail=f"Promo code '{code}' already exists")
+    return {"status": "created", "code": code}
+
+
+class PromoUpdateRequest(BaseModel):
+    discount_pct: Optional[float] = None
+    discount_amount: Optional[int] = None
+    single_use: Optional[bool] = None
+    is_active: Optional[bool] = None
+    max_uses: Optional[int] = None
+    expires_at: Optional[str] = None
+
+
+@router.put("/promos/{promo_id}")
+async def update_promo(promo_id: int, body: PromoUpdateRequest, db: aiosqlite.Connection = Depends(get_db)):
+    """Admin: Update an existing promo code."""
+    updates = []
+    params = []
+    if body.discount_pct is not None:
+        updates.append("discount_pct = ?")
+        params.append(body.discount_pct)
+    if body.discount_amount is not None:
+        updates.append("discount_amount = ?")
+        params.append(body.discount_amount)
+    if body.single_use is not None:
+        updates.append("single_use = ?")
+        params.append(int(body.single_use))
+    if body.is_active is not None:
+        updates.append("is_active = ?")
+        params.append(int(body.is_active))
+    if body.max_uses is not None:
+        updates.append("max_uses = ?")
+        params.append(body.max_uses)
+    if body.expires_at is not None:
+        updates.append("expires_at = ?")
+        params.append(body.expires_at if body.expires_at else None)
+    if not updates:
+        return {"status": "no changes"}
+    params.append(promo_id)
+    await db.execute(f"UPDATE promo_codes SET {', '.join(updates)} WHERE id = ?", params)
+    await db.commit()
+    return {"status": "updated"}
+
+
+@router.delete("/promos/{promo_id}")
+async def delete_promo(promo_id: int, db: aiosqlite.Connection = Depends(get_db)):
+    """Admin: Delete a promo code."""
+    await db.execute("DELETE FROM promo_codes WHERE id = ?", (promo_id,))
+    await db.commit()
+    return {"status": "deleted"}
 
 
 @router.post("/orders")
