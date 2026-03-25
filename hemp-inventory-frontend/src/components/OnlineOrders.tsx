@@ -73,6 +73,85 @@ function getStatusInfo(status: string) {
   return STATUS_OPTIONS.find((s) => s.value === status) || STATUS_OPTIONS[5];
 }
 
+function printMultipleOrders(orders: Order[]) {
+  if (orders.length === 0) return;
+  const printWindow = window.open("", "_blank", "width=800,height=600");
+  if (!printWindow) return;
+
+  const pages = orders.map((order) => {
+    const itemRows = order.items
+      .map(
+        (item) => `
+        <tr>
+          <td style="padding:8px;border-bottom:1px solid #eee">${item.product_name}</td>
+          <td style="padding:8px;border-bottom:1px solid #eee;text-align:center">${item.quantity}</td>
+          <td style="padding:8px;border-bottom:1px solid #eee;text-align:right">$${(item.price / 100).toFixed(2)}</td>
+          <td style="padding:8px;border-bottom:1px solid #eee;text-align:right">$${((item.price * item.quantity) / 100).toFixed(2)}</td>
+        </tr>`
+      )
+      .join("");
+
+    return `
+      <div style="page-break-after:always;max-width:700px;margin:0 auto;padding:20px">
+        <div style="text-align:center;margin-bottom:20px">
+          <h1 style="margin:0;font-size:24px">The Hemp Dispensary</h1>
+          <p style="margin:4px 0;color:#666">Order Packing Slip</p>
+        </div>
+        <hr style="border:1px solid #ddd">
+        <div style="display:flex;justify-content:space-between;margin:16px 0">
+          <div>
+            <strong>Order:</strong> ${order.order_number}<br>
+            <strong>Date:</strong> ${formatDate(order.created_at)}<br>
+            <strong>Status:</strong> ${order.payment_status.toUpperCase()}
+          </div>
+          <div style="text-align:right">
+            <strong>Customer:</strong><br>
+            ${order.customer_first_name} ${order.customer_last_name}<br>
+            ${order.customer_email}<br>
+            ${order.customer_phone || ""}
+          </div>
+        </div>
+        <div style="background:#f9f9f9;padding:12px;border-radius:6px;margin-bottom:16px">
+          <strong>Ship To:</strong><br>
+          ${order.customer_first_name} ${order.customer_last_name}<br>
+          ${order.shipping_address}${order.shipping_apartment ? ", " + order.shipping_apartment : ""}<br>
+          ${order.shipping_city}, ${order.shipping_state} ${order.shipping_zip}
+        </div>
+        ${order.tracking_number ? "<p><strong>Tracking:</strong> " + order.tracking_number + "</p>" : ""}
+        <table style="width:100%;border-collapse:collapse;margin-top:12px">
+          <thead>
+            <tr style="background:#f3f4f6">
+              <th style="padding:8px;text-align:left">Product</th>
+              <th style="padding:8px;text-align:center">Qty</th>
+              <th style="padding:8px;text-align:right">Price</th>
+              <th style="padding:8px;text-align:right">Total</th>
+            </tr>
+          </thead>
+          <tbody>${itemRows}</tbody>
+        </table>
+        <div style="text-align:right;margin-top:12px">
+          <p>Subtotal: $${(order.subtotal / 100).toFixed(2)}</p>
+          ${order.discount ? `<p style="color:#059669">Discount (${order.promo_code || 'Promo'}): -$${(order.discount / 100).toFixed(2)}</p>` : ''}
+          <p>Shipping: ${order.shipping_cost === 0 ? "Free" : "$" + (order.shipping_cost / 100).toFixed(2)}</p>
+          <p>Tax: $${(order.tax / 100).toFixed(2)}</p>
+          <p style="font-size:18px"><strong>Total: $${(order.total / 100).toFixed(2)}</strong></p>
+        </div>
+        ${order.notes ? "<div style=\"margin-top:16px;padding:12px;background:#fffbeb;border-radius:6px\"><strong>Notes:</strong> " + order.notes + "</div>" : ""}
+      </div>`;
+  }).join("");
+
+  printWindow.document.write(`
+    <html>
+    <head><title>Orders - The Hemp Dispensary</title></head>
+    <body style="font-family:Arial,sans-serif;margin:0;padding:0">
+      ${pages}
+      <` + `script>window.print();</` + `script>
+    </body>
+    </html>
+  `);
+  printWindow.document.close();
+}
+
 function printOrder(order: Order) {
   const printWindow = window.open("", "_blank", "width=800,height=600");
   if (!printWindow) return;
@@ -152,6 +231,7 @@ export default function OnlineOrders() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [expandedOrder, setExpandedOrder] = useState<number | null>(null);
   const [updatingStatus, setUpdatingStatus] = useState<number | null>(null);
+  const [selectedOrders, setSelectedOrders] = useState<Set<number>>(new Set());
 
   // Shipping state
   const [shippingOrderId, setShippingOrderId] = useState<number | null>(null);
@@ -359,6 +439,23 @@ export default function OnlineOrders() {
     );
   });
 
+  const toggleSelectOrder = (orderId: number) => {
+    setSelectedOrders((prev) => {
+      const next = new Set(prev);
+      if (next.has(orderId)) next.delete(orderId);
+      else next.add(orderId);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (selectedOrders.size === filteredOrders.length) {
+      setSelectedOrders(new Set());
+    } else {
+      setSelectedOrders(new Set(filteredOrders.map((o) => o.id)));
+    }
+  };
+
   const stats = {
     total: orders.length,
     paid: orders.filter((o) => o.payment_status === "paid").length,
@@ -380,14 +477,28 @@ export default function OnlineOrders() {
           </h2>
           <p className="text-sm text-gray-500 mt-1">{total} total orders</p>
         </div>
-        <button
-          onClick={loadOrders}
-          disabled={loading}
-          className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors"
-        >
-          <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          {selectedOrders.size > 0 && (
+            <button
+              onClick={() => {
+                const ordersToPrint = filteredOrders.filter((o) => selectedOrders.has(o.id));
+                printMultipleOrders(ordersToPrint);
+              }}
+              className="flex items-center gap-2 px-4 py-2 bg-gray-700 text-white rounded-lg hover:bg-gray-800 transition-colors"
+            >
+              <Printer className="w-4 h-4" />
+              Print Selected ({selectedOrders.size})
+            </button>
+          )}
+          <button
+            onClick={loadOrders}
+            disabled={loading}
+            className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors"
+          >
+            <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
+            Refresh
+          </button>
+        </div>
       </div>
 
       {/* Stats */}
@@ -448,6 +559,16 @@ export default function OnlineOrders() {
         </div>
       ) : (
         <div className="space-y-3">
+          {/* Select All */}
+          <div className="flex items-center gap-2 px-2">
+            <input
+              type="checkbox"
+              checked={filteredOrders.length > 0 && selectedOrders.size === filteredOrders.length}
+              onChange={toggleSelectAll}
+              className="w-4 h-4 rounded border-gray-300 text-green-600 focus:ring-green-500 cursor-pointer"
+            />
+            <span className="text-sm text-gray-500">Select All ({filteredOrders.length})</span>
+          </div>
           {filteredOrders.map((order) => {
             const statusInfo = getStatusInfo(order.payment_status);
             const StatusIcon = statusInfo.icon;
@@ -457,9 +578,18 @@ export default function OnlineOrders() {
             return (
               <div key={order.id} className="bg-white rounded-lg border border-gray-200 overflow-hidden">
                 {/* Order Header Row */}
+                <div className="flex items-center">
+                  <div className="pl-4 pr-1 py-4 flex items-center" onClick={(e) => e.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      checked={selectedOrders.has(order.id)}
+                      onChange={() => toggleSelectOrder(order.id)}
+                      className="w-4 h-4 rounded border-gray-300 text-green-600 focus:ring-green-500 cursor-pointer"
+                    />
+                  </div>
                 <button
                   onClick={() => setExpandedOrder(isExpanded ? null : order.id)}
-                  className="w-full flex items-center justify-between p-4 hover:bg-gray-50 transition-colors text-left"
+                  className="w-full flex items-center justify-between p-4 pl-2 hover:bg-gray-50 transition-colors text-left"
                 >
                   <div className="flex items-center gap-4 flex-1 min-w-0">
                     <div className="min-w-0">
@@ -489,6 +619,7 @@ export default function OnlineOrders() {
                     {isExpanded ? <ChevronUp className="w-5 h-5 text-gray-400" /> : <ChevronDown className="w-5 h-5 text-gray-400" />}
                   </div>
                 </button>
+                </div>
 
                 {/* Expanded Detail */}
                 {isExpanded && (
