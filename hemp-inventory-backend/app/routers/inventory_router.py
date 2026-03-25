@@ -154,7 +154,14 @@ async def _do_sync(db: aiosqlite.Connection) -> dict:
             clover_id = item.get("id", "")
             item_name = " ".join((item.get("name", "") or "").split())  # normalize whitespace
             display_sku = raw_sku or clover_id
-            merge_key = f"{display_sku}::{item_name}"
+            # When an item has no user-assigned SKU, merge by name so that
+            # the same product (e.g. item-group variants) created across
+            # multiple locations shows as ONE row with stock at each location
+            # instead of separate rows per location.
+            if raw_sku:
+                merge_key = f"{raw_sku}::{item_name}"
+            else:
+                merge_key = f"name::{item_name}"
 
             item_stock = item.get("itemStock", {})
             quantity = item_stock.get("quantity", 0) if item_stock else 0
