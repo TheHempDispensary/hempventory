@@ -83,8 +83,8 @@ export const createItem = (data: {
 export const getAgeRestrictionTypes = () =>
   api.get("/api/inventory/age-restriction-types");
 
-export const deleteItem = (sku: string) =>
-  api.delete(`/api/inventory/items/${sku}`);
+export const deleteItem = (sku: string, name?: string) =>
+  api.delete(`/api/inventory/items/${sku}`, { params: name ? { name } : undefined });
 
 export const bulkDeleteItems = (skus: string[]) =>
   api.post("/api/inventory/items/bulk-delete", { skus });
@@ -340,5 +340,34 @@ export const getOnlineOrders = (params?: { limit?: number; offset?: number; stat
 
 export const updateOrderStatus = (orderId: number, status: string) =>
   api.patch(`/api/ecommerce/orders/${orderId}/status`, { status });
+
+export const updateOrderNotes = (orderId: number, staffNotes: string) =>
+  api.patch(`/api/ecommerce/orders/${orderId}/notes`, { staff_notes: staffNotes });
+
+// Shipping (Shippo)
+export const createShipment = (data: {
+  order_id: number;
+  parcel_length?: number;
+  parcel_width?: number;
+  parcel_height?: number;
+  parcel_weight?: number;
+}) => api.post("/api/shipping/create-shipment", data);
+
+export const purchaseLabel = (data: {
+  rate_id: string;
+  order_id: number;
+  label_file_type?: string;
+}) => api.post("/api/shipping/purchase-label", data);
+
+export const getShippingLabel = (orderId: number) =>
+  api.get(`/api/shipping/label/${orderId}`);
+
+// Resend Confirmation
+export const resendOrderConfirmation = (orderId: number) =>
+  api.post(`/api/ecommerce/orders/${orderId}/resend-confirmation`);
+
+// Refunds
+export const refundOrder = (orderId: number, amount?: number) =>
+  api.post(`/api/ecommerce/orders/${orderId}/refund`, amount ? { amount } : {});
 
 export default api;
