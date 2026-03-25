@@ -61,15 +61,22 @@ class CreateOrderRequest(BaseModel):
     loyalty_number: str = ""
     promo_code: Optional[str] = None
     shipping_service: str = ""
+    fulfillment_type: str = "shipping"  # "shipping", "pickup_west", "pickup_east"
 
 router = APIRouter(prefix="/api/ecommerce", tags=["ecommerce"])
 
 # HQ location Clover credentials (public endpoint - no auth required)
-HQ_MERCHANT_ID = "0AJ4FF0G1YFM1"
-HQ_API_TOKEN = "9a06267a-6998-3f5a-521c-ca235f704856"
-HQ_ECOMM_TOKEN = "81e997e6-89d0-0ff7-522d-d195e6cd9138"
+HQ_MERCHANT_ID = os.environ.get("CLOVER_HQ_MERCHANT_ID", "0AJ4FF0G1YFM1")
+HQ_API_TOKEN = os.environ.get("CLOVER_HQ_API_TOKEN", "9a06267a-6998-3f5a-521c-ca235f704856")
+HQ_ECOMM_TOKEN = os.environ.get("CLOVER_HQ_ECOMM_TOKEN", "81e997e6-89d0-0ff7-522d-d195e6cd9138")
 CLOVER_BASE_URL = "https://api.clover.com/v3"
 CLOVER_CHARGES_URL = "https://scl.clover.com/v1/charges"
+
+# Store location Clover credentials for pickup orders & stock lookup
+WEST_MERCHANT_ID = os.environ.get("CLOVER_WEST_MERCHANT_ID", "")
+WEST_API_TOKEN = os.environ.get("CLOVER_WEST_API_TOKEN", "")
+EAST_MERCHANT_ID = os.environ.get("CLOVER_EAST_MERCHANT_ID", "")
+EAST_API_TOKEN = os.environ.get("CLOVER_EAST_API_TOKEN", "")
 
 # ── In-memory product cache ──────────────────────────────────────────────────
 _product_cache: dict = {}  # {"products": [...], "total": int, "categories": [...]}
@@ -83,10 +90,19 @@ DISK_CACHE_PATH = os.environ.get("DB_PATH", "").replace("app.db", "product_cache
 
 
 def invalidate_product_cache():
-    """Invalidate the in-memory product cache so the next request fetches fresh data.
+    """Invalidate ALL product cache layers so the next request fetches fresh data.
     Called from inventory_router when images are uploaded/changed."""
-    global _product_cache_json, _cache_timestamp
+    global _product_cache, _product_cache_json, _cache_timestamp
     _cache_timestamp = 0  # Force refresh on next request
+    _product_cache_json = b""  # Clear pre-serialized JSON so fast path doesn't serve stale data
+    _product_cache = {}  # Clear cached dict so _get_cached_products does a full re-fetch
+    # Delete disk cache so it doesn't reload stale data
+    try:
+        if os.path.exists(DISK_CACHE_PATH):
+            os.remove(DISK_CACHE_PATH)
+            print("[cache] Disk cache deleted after image update")
+    except Exception as e:
+        print(f"[cache] Failed to delete disk cache: {e}")
 
 
 async def _load_disk_cache() -> bool:
@@ -124,6 +140,39 @@ def _save_disk_cache(result: dict) -> None:
 _fetch_event: Optional[asyncio.Event] = None  # Signals when an in-flight fetch completes
 
 
+async def _fetch_location_stock(client: httpx.AsyncClient, merchant_id: str, api_token: str, label: str) -> dict[str, int]:
+    """Fetch stock quantities from a Clover location. Returns {sku_or_name: quantity}."""
+    stock_map: dict[str, int] = {}
+    try:
+        base = f"{CLOVER_BASE_URL}/merchants/{merchant_id}"
+        headers = {"Authorization": f"Bearer {api_token}"}
+        offset = 0
+        while True:
+            resp = await client.get(
+                f"{base}/items",
+                headers=headers,
+                params={"expand": "itemStock", "limit": 1000, "offset": offset, "filter": "deleted=false"},
+            )
+            resp.raise_for_status()
+            elements = resp.json().get("elements", [])
+            for item in elements:
+                sku = item.get("sku", "") or ""
+                name = " ".join((item.get("name", "") or "").split())
+                key = sku if sku else name
+                if not key:
+                    continue
+                stock_info = item.get("itemStock", {})
+                qty = stock_info.get("quantity", 0) if stock_info else 0
+                stock_map[key] = stock_map.get(key, 0) + qty
+            if len(elements) < 1000:
+                break
+            offset += 1000
+        print(f"[cache] {label} stock: {len(stock_map)} items")
+    except Exception as e:
+        print(f"[cache] Failed to fetch {label} stock: {e}")
+    return stock_map
+
+
 async def _fetch_and_cache_products() -> dict:
     """Fetch all products from Clover API + image DB and cache in memory."""
     global _product_cache, _product_cache_json, _cache_timestamp, _refresh_in_progress, _fetch_event
@@ -140,31 +189,35 @@ async def _fetch_and_cache_products() -> dict:
         base = f"{CLOVER_BASE_URL}/merchants/{HQ_MERCHANT_ID}"
         headers = {"Authorization": f"Bearer {HQ_API_TOKEN}"}
 
-        # Sequential pagination — avoids Clover 429 rate limits
         async with httpx.AsyncClient(timeout=120.0) as client:
-            all_items: list = []
-            current_offset = 0
-            while True:
-                resp = await client.get(
-                    f"{base}/items",
-                    headers=headers,
-                    params={
-                        "expand": "categories,itemStock",
-                        "limit": 1000,
-                        "offset": current_offset,
-                        "filter": "deleted=false",
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                elements = data.get("elements", [])
-                all_items.extend(elements)
-                if len(elements) < 1000:
-                    break
-                current_offset += 1000
+            # Fetch HQ items + West/East stock in parallel
+            async def _fetch_hq() -> list:
+                all_items: list = []
+                current_offset = 0
+                while True:
+                    resp = await client.get(
+                        f"{base}/items",
+                        headers=headers,
+                        params={"expand": "categories,itemStock", "limit": 1000, "offset": current_offset, "filter": "deleted=false"},
+                    )
+                    resp.raise_for_status()
+                    elements = resp.json().get("elements", [])
+                    all_items.extend(elements)
+                    if len(elements) < 1000:
+                        break
+                    current_offset += 1000
+                return all_items
+
+            hq_task = asyncio.ensure_future(_fetch_hq())
+            west_task = asyncio.ensure_future(_fetch_location_stock(client, WEST_MERCHANT_ID, WEST_API_TOKEN, "West")) if WEST_MERCHANT_ID and WEST_API_TOKEN else None
+            east_task = asyncio.ensure_future(_fetch_location_stock(client, EAST_MERCHANT_ID, EAST_API_TOKEN, "East")) if EAST_MERCHANT_ID and EAST_API_TOKEN else None
+
+            all_items = await hq_task
+            west_stock = await west_task if west_task else {}
+            east_stock = await east_task if east_task else {}
 
         fetch_time = time.time() - start_time
-        print(f"[cache] Clover API fetched {len(all_items)} items in {fetch_time:.1f}s")
+        print(f"[cache] Clover API fetched {len(all_items)} HQ items in {fetch_time:.1f}s")
 
         # Get image map from our database
         from app.database import DB_PATH
@@ -193,9 +246,20 @@ async def _fetch_and_cache_products() -> dict:
             price = item.get("price", 0)
             item_categories = [c.get("name", "") for c in item.get("categories", {}).get("elements", [])]
             stock_info = item.get("itemStock", {})
-            stock = stock_info.get("quantity", 0) if stock_info else 0
+            hq_stock = stock_info.get("quantity", 0) if stock_info else 0
             description = item.get("description", "")
             online_name = item.get("onlineName", "") or name
+
+            # Look up stock at West and East by SKU first, then by name
+            lookup_key = sku if sku else name
+            w_stock = west_stock.get(lookup_key, 0)
+            e_stock = east_stock.get(lookup_key, 0)
+            if w_stock == 0 and sku:
+                normalized_name = " ".join(name.split())
+                w_stock = west_stock.get(normalized_name, 0)
+            if e_stock == 0 and sku:
+                normalized_name = " ".join(name.split())
+                e_stock = east_stock.get(normalized_name, 0)
 
             for cat in item_categories:
                 categories_set.add(cat)
@@ -210,6 +274,8 @@ async def _fetch_and_cache_products() -> dict:
             # LeafLife products (SKU starts with LF-) are shipped from supplier, not available for pickup
             is_shipping_only = sku.startswith("LF-") if isinstance(sku, str) else False
 
+            total_stock = max(hq_stock, w_stock, e_stock)
+
             products.append({
                 "id": item.get("id", ""),
                 "name": name,
@@ -219,8 +285,11 @@ async def _fetch_and_cache_products() -> dict:
                 "price": price,
                 "description": description,
                 "categories": item_categories,
-                "stock": stock,
-                "available": item.get("available", True) and stock > 0,
+                "stock": total_stock,
+                "stock_hq": hq_stock,
+                "stock_west": w_stock,
+                "stock_east": e_stock,
+                "available": item.get("available", True) and total_stock > 0,
                 "image_url": image_url,
                 "is_age_restricted": item.get("isAgeRestricted", False),
                 "shipping_only": is_shipping_only,
@@ -340,6 +409,43 @@ async def refresh_products():
         pass
     result = await _fetch_and_cache_products()
     return {"status": "refreshed", "total": result["total"], "categories": result["categories"]}
+
+
+class ValidatePromoRequest(BaseModel):
+    promo_code: str
+    email: str
+
+
+# Known promo codes: code -> {discount_pct, single_use}
+PROMO_CODES = {
+    "FIRST15": {"discount_pct": 0.15, "single_use": True},
+}
+
+
+@router.post("/validate-promo")
+async def validate_promo(
+    body: ValidatePromoRequest,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Public endpoint: Validate a promo code and check if customer can use it."""
+    code = body.promo_code.strip().upper()
+    email = body.email.strip().lower()
+
+    if code not in PROMO_CODES:
+        return {"valid": False, "reason": "Invalid promo code"}
+
+    promo = PROMO_CODES[code]
+
+    if promo["single_use"] and email:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM ecommerce_orders WHERE LOWER(customer_email) = ? AND promo_code = ? AND payment_status != 'cancelled'",
+            (email, code),
+        )
+        count = (await cursor.fetchone())[0]
+        if count > 0:
+            return {"valid": False, "reason": "This promo code has already been used with this email address"}
+
+    return {"valid": True, "discount_pct": promo["discount_pct"], "code": code}
 
 
 @router.post("/orders")
