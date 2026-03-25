@@ -383,7 +383,7 @@ async def get_products(
         return Response(
             content=_product_cache_json,
             media_type="application/json",
-            headers={"Cache-Control": "public, max-age=120, stale-while-revalidate=300"},
+            headers={"Cache-Control": "public, max-age=30, stale-while-revalidate=60"},
         )
 
     cached = await _get_cached_products()
@@ -397,7 +397,7 @@ async def get_products(
 
     return JSONResponse(
         content={"products": products, "total": len(products), "categories": cached["categories"]},
-        headers={"Cache-Control": "public, max-age=120, stale-while-revalidate=300"},
+        headers={"Cache-Control": "public, max-age=30, stale-while-revalidate=60"},
     )
 
 
