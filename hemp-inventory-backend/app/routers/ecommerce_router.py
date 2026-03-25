@@ -95,8 +95,10 @@ DISK_CACHE_PATH = os.environ.get("DB_PATH", "").replace("app.db", "product_cache
 def invalidate_product_cache():
     """Invalidate the in-memory product cache so the next request fetches fresh data.
     Called from inventory_router when images are uploaded/changed."""
-    global _product_cache_json, _cache_timestamp
+    global _product_cache, _product_cache_json, _cache_timestamp
     _cache_timestamp = 0  # Force refresh on next request
+    _product_cache_json = None  # Clear pre-serialized JSON so fast path doesn't serve stale data
+    _product_cache = None  # Clear cached dict so _get_cached_products does a full re-fetch
 
 
 async def _load_disk_cache() -> bool:
