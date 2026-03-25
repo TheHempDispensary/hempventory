@@ -880,10 +880,20 @@ async def _send_order_emails(
             </tr>
             """
 
-        shipping_line = f"{order.shipping_address.address}"
-        if order.shipping_address.apartment:
-            shipping_line += f", {order.shipping_address.apartment}"
-        shipping_line += f"<br>{order.shipping_address.city}, {order.shipping_address.state} {order.shipping_address.zip}"
+        is_pickup = order.fulfillment_type and order.fulfillment_type.startswith("pickup")
+        if is_pickup:
+            if order.fulfillment_type == "pickup_west":
+                shipping_label = "Pickup Location"
+                shipping_line = "The Hemp Dispensary — West<br>6175 Deltona Blvd, Suite 104<br>Spring Hill, FL 34606"
+            else:
+                shipping_label = "Pickup Location"
+                shipping_line = "The Hemp Dispensary — East<br>14312 Spring Hill Dr<br>Spring Hill, FL 34609"
+        else:
+            shipping_label = "Shipping To"
+            shipping_line = f"{order.shipping_address.address}"
+            if order.shipping_address.apartment:
+                shipping_line += f", {order.shipping_address.apartment}"
+            shipping_line += f"<br>{order.shipping_address.city}, {order.shipping_address.state} {order.shipping_address.zip}"
 
         # --- Store notification email ---
         store_html = f"""
@@ -913,7 +923,7 @@ async def _send_order_emails(
                         <td style="padding: 10px 12px;">{order.customer.phone}</td>
                     </tr>
                     <tr style="background: #f3f4f6;">
-                        <td style="padding: 10px 12px; font-weight: bold;">Shipping To</td>
+                        <td style="padding: 10px 12px; font-weight: bold;">{shipping_label}</td>
                         <td style="padding: 10px 12px;">{shipping_line}</td>
                     </tr>
                     <tr>
@@ -966,17 +976,24 @@ async def _send_order_emails(
         </html>
         """
 
-        # Send to store
+        # Send to store — route to location-specific email for pickup orders
+        if order.fulfillment_type == "pickup_west":
+            store_recipient = "west@thehempdispensary.com"
+        elif order.fulfillment_type == "pickup_east":
+            store_recipient = "east@thehempdispensary.com"
+        else:
+            store_recipient = STORE_EMAIL
+
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(
             None,
             _send_smtp_email,
             smtp_settings,
-            STORE_EMAIL,
+            store_recipient,
             f"New Order {order_number} — {_format_price(order.total)} from {order.customer.first_name} {order.customer.last_name}",
             store_html,
         )
-        print(f"Store notification sent to {STORE_EMAIL} for order {order_number}")
+        print(f"Store notification sent to {store_recipient} for order {order_number}")
 
         # --- Customer confirmation email ---
         customer_html = f"""
@@ -999,7 +1016,7 @@ async def _send_order_emails(
                         <td style="padding: 10px 12px; color: #059669; font-weight: bold;">Paid</td>
                     </tr>
                     <tr style="background: #f3f4f6;">
-                        <td style="padding: 10px 12px; font-weight: bold;">Shipping To</td>
+                        <td style="padding: 10px 12px; font-weight: bold;">{shipping_label}</td>
                         <td style="padding: 10px 12px;">{shipping_line}</td>
                     </tr>
                 </table>
