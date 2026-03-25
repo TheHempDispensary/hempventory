@@ -675,8 +675,8 @@ async def create_order(
         """INSERT INTO ecommerce_orders
            (order_number, customer_first_name, customer_last_name, customer_email, customer_phone,
             shipping_address, shipping_apartment, shipping_city, shipping_state, shipping_zip,
-            subtotal, discount, promo_code, shipping_cost, tax, total, notes, charge_id, payment_status, fulfillment_type)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            subtotal, discount, promo_code, shipping_cost, tax, total, notes, charge_id, payment_status, fulfillment_type, shipping_service)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             order_number,
             order.customer.first_name,
@@ -698,6 +698,7 @@ async def create_order(
             charge_id,
             payment_status,
             order.fulfillment_type,
+            order.shipping_service,
         ),
     )
     order_id = cursor.lastrowid

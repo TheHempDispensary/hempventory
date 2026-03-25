@@ -37,6 +37,8 @@ interface Order {
   tracking_url?: string;
   label_url?: string;
   staff_notes?: string;
+  shipping_service?: string;
+  fulfillment_type?: string;
   items: OrderItem[];
 }
 
@@ -308,9 +310,20 @@ export default function OnlineOrders() {
         parcel_width: parseFloat(parcelWidth) || 8,
         parcel_height: parseFloat(parcelHeight) || 4,
       });
-      setRates(res.data.rates || []);
-      if ((res.data.rates || []).length === 0) {
+      const fetchedRates = res.data.rates || [];
+      setRates(fetchedRates);
+      if (fetchedRates.length === 0) {
         setShippingError("No shipping rates available for this address.");
+      } else {
+        // Auto-select and purchase the rate matching what the customer chose at checkout
+        const orderObj = orders.find(o => o.id === orderId);
+        if (orderObj?.shipping_service) {
+          const match = fetchedRates.find((r: ShippingRate) => r.service_level === orderObj.shipping_service);
+          if (match) {
+            handlePurchaseLabel(match.id, orderId);
+            return;
+          }
+        }
       }
     } catch (err: unknown) {
       const msg = (err && typeof err === "object" && "response" in err)
