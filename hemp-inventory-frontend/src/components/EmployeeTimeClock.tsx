@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { getMyClockStatus, myClockIn, myClockOut, getMyEntries } from "../lib/api";
+import { getMyClockStatus, myClockIn, myClockOut, getMyEntries, getMySchedule } from "../lib/api";
 
 interface ClockStatus {
   clocked_in: boolean;
@@ -22,7 +22,9 @@ export default function EmployeeTimeClock() {
   const [actionLoading, setActionLoading] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
-  const [tab, setTab] = useState<"clock" | "timesheet">("clock");
+  const [tab, setTab] = useState<"clock" | "timesheet" | "schedule">("clock");
+  const [schedule, setSchedule] = useState<{ id: number; day_of_week: number; day_name: string; start_time: string; end_time: string; location: string | null; notes: string | null }[]>([]);
+  const [scheduleLoading, setScheduleLoading] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
 
   const fetchStatus = useCallback(async () => {
@@ -46,10 +48,26 @@ export default function EmployeeTimeClock() {
     }
   }, []);
 
+  const fetchSchedule = useCallback(async () => {
+    setScheduleLoading(true);
+    try {
+      const res = await getMySchedule();
+      setSchedule(res.data);
+    } catch {
+      // ignore
+    } finally {
+      setScheduleLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     fetchStatus();
     fetchEntries();
   }, [fetchStatus, fetchEntries]);
+
+  useEffect(() => {
+    if (tab === "schedule") fetchSchedule();
+  }, [tab, fetchSchedule]);
 
   // Live timer for elapsed time when clocked in
   useEffect(() => {
@@ -139,6 +157,14 @@ export default function EmployeeTimeClock() {
           }`}
         >
           My Timesheet
+        </button>
+        <button
+          onClick={() => setTab("schedule")}
+          className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition-colors ${
+            tab === "schedule" ? "bg-white shadow text-green-700" : "text-gray-500 hover:text-gray-700"
+          }`}
+        >
+          My Schedule
         </button>
       </div>
 
@@ -235,6 +261,53 @@ export default function EmployeeTimeClock() {
                       </td>
                     </tr>
                   ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+      {tab === "schedule" && (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+          <div className="p-4 border-b border-gray-200">
+            <h3 className="font-semibold text-gray-900">My Weekly Schedule</h3>
+          </div>
+          {scheduleLoading ? (
+            <div className="p-8 text-center text-gray-400">Loading...</div>
+          ) : schedule.length === 0 ? (
+            <div className="p-8 text-center text-gray-400">No schedule set yet. Check with your manager.</div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Day</th>
+                    <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Start</th>
+                    <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">End</th>
+                    <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Location</th>
+                    <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Notes</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {[0, 1, 2, 3, 4, 5, 6].map((day) => {
+                    const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+                    const entry = schedule.find(s => s.day_of_week === day);
+                    return (
+                      <tr key={day} className={entry ? "hover:bg-gray-50" : "bg-gray-50/50"}>
+                        <td className="px-4 py-3 text-sm font-medium text-gray-900">{dayNames[day]}</td>
+                        {entry ? (
+                          <>
+                            <td className="px-4 py-3 text-sm text-gray-700">{entry.start_time}</td>
+                            <td className="px-4 py-3 text-sm text-gray-700">{entry.end_time}</td>
+                            <td className="px-4 py-3 text-sm text-gray-500">{entry.location || "\u2014"}</td>
+                            <td className="px-4 py-3 text-sm text-gray-500">{entry.notes || "\u2014"}</td>
+                          </>
+                        ) : (
+                          <td colSpan={4} className="px-4 py-3 text-sm text-gray-400 italic">Off</td>
+                        )}
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

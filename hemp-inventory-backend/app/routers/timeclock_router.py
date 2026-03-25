@@ -52,6 +52,14 @@ class ClockInRequest(BaseModel):
 class ClockOutRequest(BaseModel):
     employee_id: int
 
+class ScheduleEntry(BaseModel):
+    employee_id: int
+    day_of_week: int  # 0=Sunday, 1=Monday, ..., 6=Saturday
+    start_time: str   # "09:00"
+    end_time: str      # "17:00"
+    location: Optional[str] = None
+    notes: Optional[str] = None
+
 
 # ---------- Employee CRUD ----------
 
@@ -705,6 +713,134 @@ async def get_my_entries(
             "clock_in": r[2],
             "clock_out": r[3],
             "hours": r[4],
+        }
+        for r in rows
+    ]
+
+
+# ---------- Schedules (Admin) ----------
+
+DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+
+@router.get("/schedules")
+async def list_schedules(
+    employee_id: Optional[int] = None,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Admin: List all schedules, optionally filtered by employee."""
+    query = """
+        SELECT s.id, s.employee_id, e.name, s.day_of_week, s.start_time, s.end_time, s.location, s.notes
+        FROM employee_schedules s
+        JOIN employees e ON e.id = s.employee_id
+    """
+    params: list = []
+    if employee_id:
+        query += " WHERE s.employee_id = ?"
+        params.append(employee_id)
+    query += " ORDER BY e.name, s.day_of_week"
+
+    cursor = await db.execute(query, params)
+    rows = await cursor.fetchall()
+    return [
+        {
+            "id": r[0],
+            "employee_id": r[1],
+            "employee_name": r[2],
+            "day_of_week": r[3],
+            "day_name": DAY_NAMES[r[3]] if 0 <= r[3] <= 6 else str(r[3]),
+            "start_time": r[4],
+            "end_time": r[5],
+            "location": r[6],
+            "notes": r[7],
+        }
+        for r in rows
+    ]
+
+
+@router.post("/schedules")
+async def save_schedule(
+    entry: ScheduleEntry,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Admin: Create or update a schedule entry (upserts by employee_id + day_of_week)."""
+    if entry.day_of_week < 0 or entry.day_of_week > 6:
+        raise HTTPException(status_code=400, detail="day_of_week must be 0-6 (Sun-Sat)")
+    # Verify employee exists
+    cursor = await db.execute("SELECT id FROM employees WHERE id = ?", (entry.employee_id,))
+    if not await cursor.fetchone():
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    await db.execute(
+        """INSERT INTO employee_schedules (employee_id, day_of_week, start_time, end_time, location, notes, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT(employee_id, day_of_week) DO UPDATE SET
+             start_time = excluded.start_time,
+             end_time = excluded.end_time,
+             location = excluded.location,
+             notes = excluded.notes,
+             updated_at = CURRENT_TIMESTAMP""",
+        (entry.employee_id, entry.day_of_week, entry.start_time, entry.end_time, entry.location, entry.notes),
+    )
+    await db.commit()
+    return {"status": "saved"}
+
+
+@router.delete("/schedules/{schedule_id}")
+async def delete_schedule(
+    schedule_id: int,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Admin: Delete a schedule entry."""
+    await db.execute("DELETE FROM employee_schedules WHERE id = ?", (schedule_id,))
+    await db.commit()
+    return {"status": "deleted"}
+
+
+@router.delete("/schedules/employee/{employee_id}/day/{day_of_week}")
+async def delete_schedule_by_day(
+    employee_id: int,
+    day_of_week: int,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Admin: Delete a schedule entry by employee and day."""
+    await db.execute(
+        "DELETE FROM employee_schedules WHERE employee_id = ? AND day_of_week = ?",
+        (employee_id, day_of_week),
+    )
+    await db.commit()
+    return {"status": "deleted"}
+
+
+# ---------- My Schedule (Employee) ----------
+
+@router.get("/my-schedule")
+async def get_my_schedule(
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Employee: Get my weekly schedule."""
+    if user.get("role") != "employee":
+        raise HTTPException(status_code=403, detail="Employee access only")
+    emp_id = user.get("employee_id")
+    cursor = await db.execute(
+        """SELECT id, day_of_week, start_time, end_time, location, notes
+           FROM employee_schedules WHERE employee_id = ? ORDER BY day_of_week""",
+        (emp_id,),
+    )
+    rows = await cursor.fetchall()
+    return [
+        {
+            "id": r[0],
+            "day_of_week": r[1],
+            "day_name": DAY_NAMES[r[1]] if 0 <= r[1] <= 6 else str(r[1]),
+            "start_time": r[2],
+            "end_time": r[3],
+            "location": r[4],
+            "notes": r[5],
         }
         for r in rows
     ]

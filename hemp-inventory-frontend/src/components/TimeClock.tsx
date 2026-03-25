@@ -28,7 +28,10 @@ import {
   Edit2,
   Check,
   RefreshCw,
+  Calendar,
+  Save,
 } from "lucide-react";
+import { getSchedules, saveSchedule, deleteScheduleByDay } from "../lib/api";
 
 interface Employee {
   id: number;
@@ -55,7 +58,19 @@ interface TimeEntry {
   hours: number | null;
 }
 
-type Tab = "clock" | "timesheet" | "employees";
+type Tab = "clock" | "timesheet" | "employees" | "schedule";
+
+interface ScheduleItem {
+  id: number;
+  employee_id: number;
+  employee_name: string;
+  day_of_week: number;
+  day_name: string;
+  start_time: string;
+  end_time: string;
+  location: string | null;
+  notes: string | null;
+}
 
 export default function TimeClock() {
   const [tab, setTab] = useState<Tab>("clock");
@@ -87,6 +102,12 @@ export default function TimeClock() {
 
   // Sync
   const [syncing, setSyncing] = useState(false);
+
+  // Schedule state
+  const [schedules, setSchedules] = useState<ScheduleItem[]>([]);
+  const [scheduleEmployee, setScheduleEmployee] = useState<number>(0);
+  const [editingSchedule, setEditingSchedule] = useState<{ day: number; start: string; end: string; location: string; notes: string } | null>(null);
+  const [savingSchedule, setSavingSchedule] = useState(false);
 
   // Toast
   const [toast, setToast] = useState<{ type: "success" | "error"; text: string } | null>(null);
@@ -241,6 +262,45 @@ export default function TimeClock() {
     }
   };
 
+  const loadSchedules = useCallback(async () => {
+    try {
+      const res = await getSchedules(scheduleEmployee || undefined);
+      setSchedules(res.data);
+    } catch (err) {
+      console.error("Error loading schedules:", err);
+    }
+  }, [scheduleEmployee]);
+
+  useEffect(() => {
+    if (tab === "schedule") loadSchedules();
+  }, [tab, loadSchedules]);
+
+  const handleSaveSchedule = async (empId: number, day: number, start: string, end: string, location: string, notes: string) => {
+    setSavingSchedule(true);
+    try {
+      await saveSchedule({ employee_id: empId, day_of_week: day, start_time: start, end_time: end, location: location || undefined, notes: notes || undefined });
+      showToast("success", "Schedule saved");
+      setEditingSchedule(null);
+      await loadSchedules();
+    } catch (err) {
+      console.error(err);
+      showToast("error", "Failed to save schedule");
+    } finally {
+      setSavingSchedule(false);
+    }
+  };
+
+  const handleDeleteSchedule = async (empId: number, day: number) => {
+    try {
+      await deleteScheduleByDay(empId, day);
+      showToast("success", "Schedule entry removed");
+      await loadSchedules();
+    } catch (err) {
+      console.error(err);
+      showToast("error", "Failed to delete schedule");
+    }
+  };
+
   const handleExport = () => {
     const params: { start_date?: string; end_date?: string; employee_id?: number } = {};
     if (startDate) params.start_date = startDate;
@@ -340,6 +400,7 @@ export default function TimeClock() {
         {([
           { id: "clock" as Tab, label: "Clock In/Out", icon: Clock },
           { id: "timesheet" as Tab, label: "Timesheet", icon: CalendarDays },
+          { id: "schedule" as Tab, label: "Schedule", icon: Calendar },
           { id: "employees" as Tab, label: "Employees", icon: Users },
         ]).map((t) => (
           <button
@@ -786,6 +847,166 @@ export default function TimeClock() {
               </tbody>
             </table>
           </div>
+        </div>
+      )}
+      {/* =================== SCHEDULE TAB =================== */}
+      {tab === "schedule" && (
+        <div className="space-y-4">
+          {/* Employee filter */}
+          <div className="bg-white border border-gray-200 rounded-lg p-4">
+            <div className="flex flex-wrap gap-3 items-end">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Employee</label>
+                <select
+                  value={scheduleEmployee}
+                  onChange={(e) => setScheduleEmployee(Number(e.target.value))}
+                  className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
+                >
+                  <option value={0}>All Employees</option>
+                  {employees.filter((e) => e.active).map((e) => (
+                    <option key={e.id} value={e.id}>{e.name}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          </div>
+
+          {/* Schedule Grid */}
+          {scheduleEmployee > 0 ? (
+            <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+              <div className="p-4 border-b border-gray-200">
+                <h3 className="font-semibold text-gray-900">Weekly Schedule — {employees.find(e => e.id === scheduleEmployee)?.name}</h3>
+              </div>
+              <table className="w-full">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Day</th>
+                    <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Start</th>
+                    <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">End</th>
+                    <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Location</th>
+                    <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Notes</th>
+                    <th className="text-right px-4 py-3 text-xs font-medium text-gray-500 uppercase">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {[0, 1, 2, 3, 4, 5, 6].map((day) => {
+                    const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+                    const existing = schedules.find(s => s.employee_id === scheduleEmployee && s.day_of_week === day);
+                    const isEditing = editingSchedule?.day === day;
+                    return (
+                      <tr key={day} className="hover:bg-gray-50">
+                        <td className="px-4 py-3 text-sm font-medium text-gray-900">{dayNames[day]}</td>
+                        {isEditing ? (
+                          <>
+                            <td className="px-4 py-3">
+                              <input type="time" value={editingSchedule.start} onChange={(e) => setEditingSchedule({ ...editingSchedule, start: e.target.value })} className="px-2 py-1 border border-gray-300 rounded text-sm" />
+                            </td>
+                            <td className="px-4 py-3">
+                              <input type="time" value={editingSchedule.end} onChange={(e) => setEditingSchedule({ ...editingSchedule, end: e.target.value })} className="px-2 py-1 border border-gray-300 rounded text-sm" />
+                            </td>
+                            <td className="px-4 py-3">
+                              <input type="text" value={editingSchedule.location} onChange={(e) => setEditingSchedule({ ...editingSchedule, location: e.target.value })} placeholder="Location" className="px-2 py-1 border border-gray-300 rounded text-sm w-full" />
+                            </td>
+                            <td className="px-4 py-3">
+                              <input type="text" value={editingSchedule.notes} onChange={(e) => setEditingSchedule({ ...editingSchedule, notes: e.target.value })} placeholder="Notes" className="px-2 py-1 border border-gray-300 rounded text-sm w-full" />
+                            </td>
+                            <td className="px-4 py-3 text-right">
+                              <div className="flex items-center justify-end gap-1">
+                                <button
+                                  disabled={savingSchedule || !editingSchedule.start || !editingSchedule.end}
+                                  onClick={() => handleSaveSchedule(scheduleEmployee, day, editingSchedule.start, editingSchedule.end, editingSchedule.location, editingSchedule.notes)}
+                                  className="p-1.5 text-green-600 hover:bg-green-50 rounded-lg disabled:opacity-50"
+                                  title="Save"
+                                >
+                                  <Save className="w-4 h-4" />
+                                </button>
+                                <button onClick={() => setEditingSchedule(null)} className="p-1.5 text-gray-400 hover:bg-gray-100 rounded-lg" title="Cancel">
+                                  <X className="w-4 h-4" />
+                                </button>
+                              </div>
+                            </td>
+                          </>
+                        ) : existing ? (
+                          <>
+                            <td className="px-4 py-3 text-sm text-gray-700">{existing.start_time}</td>
+                            <td className="px-4 py-3 text-sm text-gray-700">{existing.end_time}</td>
+                            <td className="px-4 py-3 text-sm text-gray-500">{existing.location || "—"}</td>
+                            <td className="px-4 py-3 text-sm text-gray-500">{existing.notes || "—"}</td>
+                            <td className="px-4 py-3 text-right">
+                              <div className="flex items-center justify-end gap-1">
+                                <button
+                                  onClick={() => setEditingSchedule({ day, start: existing.start_time, end: existing.end_time, location: existing.location || "", notes: existing.notes || "" })}
+                                  className="p-1.5 text-blue-600 hover:bg-blue-50 rounded-lg" title="Edit"
+                                >
+                                  <Edit2 className="w-4 h-4" />
+                                </button>
+                                <button
+                                  onClick={() => handleDeleteSchedule(scheduleEmployee, day)}
+                                  className="p-1.5 text-red-600 hover:bg-red-50 rounded-lg" title="Remove"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </div>
+                            </td>
+                          </>
+                        ) : (
+                          <>
+                            <td colSpan={4} className="px-4 py-3 text-sm text-gray-400 italic">Off</td>
+                            <td className="px-4 py-3 text-right">
+                              <button
+                                onClick={() => setEditingSchedule({ day, start: "09:00", end: "17:00", location: "", notes: "" })}
+                                className="text-xs text-green-600 hover:text-green-700 font-medium"
+                              >
+                                + Add Shift
+                              </button>
+                            </td>
+                          </>
+                        )}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            /* All employees overview */
+            <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+              <div className="p-4 border-b border-gray-200">
+                <h3 className="font-semibold text-gray-900">All Employee Schedules</h3>
+              </div>
+              {schedules.length === 0 ? (
+                <div className="p-8 text-center text-gray-400">
+                  <Calendar className="w-12 h-12 mx-auto mb-3 text-gray-300" />
+                  <p>No schedules set yet. Select an employee above to create their schedule.</p>
+                </div>
+              ) : (
+                <table className="w-full">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Employee</th>
+                      <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Day</th>
+                      <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Start</th>
+                      <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">End</th>
+                      <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Location</th>
+                      <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Notes</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {schedules.map((s) => (
+                      <tr key={s.id} className="hover:bg-gray-50">
+                        <td className="px-4 py-3 text-sm font-medium text-gray-900">{s.employee_name}</td>
+                        <td className="px-4 py-3 text-sm text-gray-700">{s.day_name}</td>
+                        <td className="px-4 py-3 text-sm text-gray-700">{s.start_time}</td>
+                        <td className="px-4 py-3 text-sm text-gray-700">{s.end_time}</td>
+                        <td className="px-4 py-3 text-sm text-gray-500">{s.location || "—"}</td>
+                        <td className="px-4 py-3 text-sm text-gray-500">{s.notes || "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>

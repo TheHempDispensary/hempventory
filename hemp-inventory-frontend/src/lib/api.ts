@@ -334,6 +334,24 @@ export const getMyEntries = (params?: { start_date?: string; end_date?: string }
 // Seed employees
 export const seedEmployees = () => api.post("/api/timeclock/seed-employees");
 
+// Schedules
+export const getSchedules = (employeeId?: number) =>
+  api.get("/api/timeclock/schedules", { params: employeeId ? { employee_id: employeeId } : {} });
+
+export const saveSchedule = (data: {
+  employee_id: number;
+  day_of_week: number;
+  start_time: string;
+  end_time: string;
+  location?: string;
+  notes?: string;
+}) => api.post("/api/timeclock/schedules", data);
+
+export const deleteScheduleByDay = (employeeId: number, dayOfWeek: number) =>
+  api.delete(`/api/timeclock/schedules/employee/${employeeId}/day/${dayOfWeek}`);
+
+export const getMySchedule = () => api.get("/api/timeclock/my-schedule");
+
 // Online Orders (ecommerce)
 export const getOnlineOrders = (params?: { limit?: number; offset?: number; status?: string }) =>
   api.get("/api/ecommerce/orders", { params });

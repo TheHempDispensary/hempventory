@@ -290,6 +290,23 @@ async def init_db():
             )
         """)
 
+        # Employee schedules table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS employee_schedules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                employee_id INTEGER NOT NULL,
+                day_of_week INTEGER NOT NULL,
+                start_time TEXT NOT NULL,
+                end_time TEXT NOT NULL,
+                location TEXT,
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (employee_id) REFERENCES employees(id),
+                UNIQUE(employee_id, day_of_week)
+            )
+        """)
+
         # Promo codes table for discount management
         await db.execute("""
             CREATE TABLE IF NOT EXISTS promo_codes (
