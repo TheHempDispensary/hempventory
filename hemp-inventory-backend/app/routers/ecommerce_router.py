@@ -274,6 +274,19 @@ async def _fetch_and_cache_products() -> dict:
             # LeafLife products (SKU starts with LF-) are shipped from supplier, not available for pickup
             is_shipping_only = sku.startswith("LF-") if isinstance(sku, str) else False
 
+            # Enforce minimum price floors for LeafLife products by weight
+            if is_shipping_only:
+                sku_upper = sku.upper()
+                name_upper = name.upper()
+                if sku_upper.endswith("-28") or "28 GRAM" in name_upper:
+                    price = max(price, 10000)  # $100.00 minimum for 28g
+                elif sku_upper.endswith("-14") or "14 GRAM" in name_upper:
+                    price = max(price, 9500)   # $95.00 minimum for 14g
+                elif sku_upper.endswith("-7 G") or sku_upper.endswith("-7G") or "7 GRAM" in name_upper:
+                    price = max(price, 5500)   # $55.00 minimum for 7g
+                elif sku_upper.endswith("-3.5") or "3.5 GRAM" in name_upper:
+                    price = max(price, 2500)   # $25.00 minimum for 3.5g
+
             total_stock = max(hq_stock, w_stock, e_stock)
 
             products.append({
