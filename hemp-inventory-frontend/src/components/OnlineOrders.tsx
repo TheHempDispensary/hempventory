@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { getOnlineOrders, updateOrderStatus, updateOrderNotes, createShipment, purchaseLabel, getShippingLabel, refundOrder, resendOrderConfirmation } from "../lib/api";
 import { MessageSquare, Save } from "lucide-react";
-import { RefreshCw, Search, Package, ChevronDown, ChevronUp, Truck, CheckCircle, XCircle, Clock, ShoppingCart, Printer, Tag, ExternalLink, Loader2, RotateCcw, AlertTriangle, DollarSign, Mail } from "lucide-react";
+import { RefreshCw, Search, Package, ChevronDown, ChevronUp, Truck, CheckCircle, XCircle, Clock, ShoppingCart, Printer, Tag, ExternalLink, Loader2, RotateCcw, AlertTriangle, DollarSign, Mail, MapPin } from "lucide-react";
 
 interface OrderItem {
   product_id: string;
@@ -114,10 +114,10 @@ function printMultipleOrders(orders: Order[]) {
           </div>
         </div>
         <div style="background:#f9f9f9;padding:12px;border-radius:6px;margin-bottom:16px">
-          <strong>Ship To:</strong><br>
-          ${order.customer_first_name} ${order.customer_last_name}<br>
-          ${order.shipping_address}${order.shipping_apartment ? ", " + order.shipping_apartment : ""}<br>
-          ${order.shipping_city}, ${order.shipping_state} ${order.shipping_zip}
+          ${order.fulfillment_type && order.fulfillment_type.startsWith("pickup")
+            ? `<strong>Pickup Location:</strong><br>${order.fulfillment_type === "pickup_west" ? "The Hemp Dispensary \u2014 West<br>6175 Deltona Blvd, Suite 104<br>Spring Hill, FL 34606" : "The Hemp Dispensary \u2014 East<br>14312 Spring Hill Dr<br>Spring Hill, FL 34609"}`
+            : `<strong>Ship To:</strong><br>${order.customer_first_name} ${order.customer_last_name}<br>${order.shipping_address}${order.shipping_apartment ? ", " + order.shipping_apartment : ""}<br>${order.shipping_city}, ${order.shipping_state} ${order.shipping_zip}`
+          }
         </div>
         ${order.tracking_number ? "<p><strong>Tracking:</strong> " + order.tracking_number + "</p>" : ""}
         <table style="width:100%;border-collapse:collapse;margin-top:12px">
@@ -193,10 +193,10 @@ function printOrder(order: Order) {
         </div>
       </div>
       <div style="background:#f9f9f9;padding:12px;border-radius:6px;margin-bottom:16px">
-        <strong>Ship To:</strong><br>
-        ${order.customer_first_name} ${order.customer_last_name}<br>
-        ${order.shipping_address}${order.shipping_apartment ? ", " + order.shipping_apartment : ""}<br>
-        ${order.shipping_city}, ${order.shipping_state} ${order.shipping_zip}
+        ${order.fulfillment_type && order.fulfillment_type.startsWith("pickup")
+          ? `<strong>Pickup Location:</strong><br>${order.fulfillment_type === "pickup_west" ? "The Hemp Dispensary \u2014 West<br>6175 Deltona Blvd, Suite 104<br>Spring Hill, FL 34606" : "The Hemp Dispensary \u2014 East<br>14312 Spring Hill Dr<br>Spring Hill, FL 34609"}`
+          : `<strong>Ship To:</strong><br>${order.customer_first_name} ${order.customer_last_name}<br>${order.shipping_address}${order.shipping_apartment ? ", " + order.shipping_apartment : ""}<br>${order.shipping_city}, ${order.shipping_state} ${order.shipping_zip}`
+        }
       </div>
       ${order.tracking_number ? "<p><strong>Tracking:</strong> " + order.tracking_number + "</p>" : ""}
       <table style="width:100%;border-collapse:collapse;margin-top:12px">
@@ -612,6 +612,17 @@ export default function OnlineOrders() {
                           <StatusIcon className="w-3 h-3" />
                           {statusInfo.label}
                         </span>
+                        {order.fulfillment_type && order.fulfillment_type.startsWith("pickup") ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800">
+                            <MapPin className="w-3 h-3" />
+                            {order.fulfillment_type === "pickup_west" ? "Pickup — West" : "Pickup — East"}
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                            <Truck className="w-3 h-3" />
+                            Shipping
+                          </span>
+                        )}
                         {order.tracking_number && (
                           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
                             <Truck className="w-3 h-3" />
@@ -646,14 +657,25 @@ export default function OnlineOrders() {
                         <p className="text-sm text-gray-600">{order.customer_phone}</p>
                       </div>
 
-                      {/* Shipping */}
+                      {/* Shipping / Pickup */}
                       <div>
-                        <h4 className="text-xs font-semibold text-gray-500 uppercase mb-2">Ship To</h4>
-                        <p className="text-sm text-gray-900">{order.shipping_address}</p>
-                        {order.shipping_apartment && <p className="text-sm text-gray-600">{order.shipping_apartment}</p>}
-                        <p className="text-sm text-gray-600">
-                          {order.shipping_city}, {order.shipping_state} {order.shipping_zip}
-                        </p>
+                        {order.fulfillment_type && order.fulfillment_type.startsWith("pickup") ? (
+                          <>
+                            <h4 className="text-xs font-semibold text-gray-500 uppercase mb-2 flex items-center gap-1"><MapPin className="w-3.5 h-3.5" /> Pickup Location</h4>
+                            <p className="text-sm font-medium text-gray-900">{order.fulfillment_type === "pickup_west" ? "West Location" : "East Location"}</p>
+                            <p className="text-sm text-gray-600">{order.fulfillment_type === "pickup_west" ? "6175 Deltona Blvd, Suite 104" : "14312 Spring Hill Dr"}</p>
+                            <p className="text-sm text-gray-600">Spring Hill, FL {order.fulfillment_type === "pickup_west" ? "34606" : "34609"}</p>
+                          </>
+                        ) : (
+                          <>
+                            <h4 className="text-xs font-semibold text-gray-500 uppercase mb-2">Ship To</h4>
+                            <p className="text-sm text-gray-900">{order.shipping_address}</p>
+                            {order.shipping_apartment && <p className="text-sm text-gray-600">{order.shipping_apartment}</p>}
+                            <p className="text-sm text-gray-600">
+                              {order.shipping_city}, {order.shipping_state} {order.shipping_zip}
+                            </p>
+                          </>
+                        )}
                       </div>
 
                       {/* Order Info */}
@@ -807,31 +829,33 @@ export default function OnlineOrders() {
                         </span>
                       )}
 
-                      {order.label_url ? (
-                        <button
-                          onClick={() => handleViewLabel(order.id)}
-                          className="flex items-center gap-2 px-4 py-2 bg-indigo-100 text-indigo-700 rounded-lg hover:bg-indigo-200 transition-colors text-sm font-medium"
-                        >
-                          <Tag className="w-4 h-4" />
-                          View / Print Label
-                        </button>
-                      ) : (
-                        <button
-                          onClick={() => {
-                            if (isShippingOpen) {
-                              setShippingOrderId(null);
-                              setRates([]);
-                            } else {
-                              setShippingOrderId(order.id);
-                              setRates([]);
-                              setShippingError("");
-                            }
-                          }}
-                          className="flex items-center gap-2 px-4 py-2 bg-green-100 text-green-700 rounded-lg hover:bg-green-200 transition-colors text-sm font-medium"
-                        >
-                          <Tag className="w-4 h-4" />
-                          {isShippingOpen ? "Cancel" : "Create Shipping Label"}
-                        </button>
+                      {!(order.fulfillment_type && order.fulfillment_type.startsWith("pickup")) && (
+                        order.label_url ? (
+                          <button
+                            onClick={() => handleViewLabel(order.id)}
+                            className="flex items-center gap-2 px-4 py-2 bg-indigo-100 text-indigo-700 rounded-lg hover:bg-indigo-200 transition-colors text-sm font-medium"
+                          >
+                            <Tag className="w-4 h-4" />
+                            View / Print Label
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => {
+                              if (isShippingOpen) {
+                                setShippingOrderId(null);
+                                setRates([]);
+                              } else {
+                                setShippingOrderId(order.id);
+                                setRates([]);
+                                setShippingError("");
+                              }
+                            }}
+                            className="flex items-center gap-2 px-4 py-2 bg-green-100 text-green-700 rounded-lg hover:bg-green-200 transition-colors text-sm font-medium"
+                          >
+                            <Tag className="w-4 h-4" />
+                            {isShippingOpen ? "Cancel" : "Create Shipping Label"}
+                          </button>
+                        )
                       )}
                     </div>
 
