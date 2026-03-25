@@ -335,22 +335,23 @@ export const getMyEntries = (params?: { start_date?: string; end_date?: string }
 export const seedEmployees = () => api.post("/api/timeclock/seed-employees");
 
 // Schedules
-export const getSchedules = (employeeId?: number) =>
-  api.get("/api/timeclock/schedules", { params: employeeId ? { employee_id: employeeId } : {} });
+export const getSchedules = (params?: { employee_id?: number; start_date?: string; end_date?: string }) =>
+  api.get("/api/timeclock/schedules", { params });
 
 export const saveSchedule = (data: {
   employee_id: number;
-  day_of_week: number;
+  date: string;
   start_time: string;
   end_time: string;
   location?: string;
   notes?: string;
 }) => api.post("/api/timeclock/schedules", data);
 
-export const deleteScheduleByDay = (employeeId: number, dayOfWeek: number) =>
-  api.delete(`/api/timeclock/schedules/employee/${employeeId}/day/${dayOfWeek}`);
+export const deleteScheduleByDate = (employeeId: number, date: string) =>
+  api.delete(`/api/timeclock/schedules/employee/${employeeId}/date/${date}`);
 
-export const getMySchedule = () => api.get("/api/timeclock/my-schedule");
+export const getMySchedule = (params?: { start_date?: string; end_date?: string }) =>
+  api.get("/api/timeclock/my-schedule", { params });
 
 // Employee Self-Service: Time-Off & Notes
 export const getMyTimeOff = () => api.get("/api/timeclock/my-time-off");

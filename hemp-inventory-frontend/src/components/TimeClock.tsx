@@ -13,7 +13,7 @@ import {
   syncEmployeesFromClover,
   getSchedules,
   saveSchedule,
-  deleteScheduleByDay,
+  deleteScheduleByDate,
   getTimeOffRequests,
   createTimeOffRequest,
   updateTimeOffRequest,
@@ -76,8 +76,7 @@ interface ScheduleItem {
   id: number;
   employee_id: number;
   employee_name: string;
-  day_of_week: number;
-  day_name: string;
+  date: string;
   start_time: string;
   end_time: string;
   location: string | null;
@@ -136,8 +135,7 @@ export default function TimeClock() {
 
   // Schedule state
   const [schedules, setSchedules] = useState<ScheduleItem[]>([]);
-  const [scheduleEmployee, setScheduleEmployee] = useState<number>(0);
-  const [editingSchedule, setEditingSchedule] = useState<{ day: number; start: string; end: string; location: string; notes: string } | null>(null);
+  const [editingSchedule, setEditingSchedule] = useState<{ empId: number; date: string; start: string; end: string; location: string } | null>(null);
   const [savingSchedule, setSavingSchedule] = useState(false);
 
   // Monthly calendar state
@@ -152,11 +150,7 @@ export default function TimeClock() {
   const [timeOffEmpId, setTimeOffEmpId] = useState(0);
   const [timeOffReason, setTimeOffReason] = useState("");
   const [noteText, setNoteText] = useState("");
-  const [scheduleSubTab, setScheduleSubTab] = useState<"calendar" | "edit" | "requests">("calendar");
-  const [, setEditCellKey] = useState<string | null>(null);
-  const [editCellStart, setEditCellStart] = useState("");
-  const [editCellEnd, setEditCellEnd] = useState("");
-  const [editCellLoc, setEditCellLoc] = useState("");
+  const [scheduleSubTab, setScheduleSubTab] = useState<"calendar" | "requests">("calendar");
 
   // Toast
   const [toast, setToast] = useState<{ type: "success" | "error"; text: string } | null>(null);
@@ -311,15 +305,6 @@ export default function TimeClock() {
     }
   };
 
-  const loadSchedules = useCallback(async () => {
-    try {
-      const res = await getSchedules(scheduleEmployee || undefined);
-      setSchedules(res.data);
-    } catch (err) {
-      console.error("Error loading schedules:", err);
-    }
-  }, [scheduleEmployee]);
-
   // Compute date range for all visible months
   const getVisibleDateRange = useCallback(() => {
     const start = new Date(calYear, calMonth, 1);
@@ -329,6 +314,16 @@ export default function TimeClock() {
       end_date: end.toISOString().split("T")[0],
     };
   }, [calYear, calMonth, monthsToShow]);
+
+  const loadSchedules = useCallback(async () => {
+    try {
+      const range = getVisibleDateRange();
+      const res = await getSchedules({ start_date: range.start_date, end_date: range.end_date });
+      setSchedules(res.data);
+    } catch (err) {
+      console.error("Error loading schedules:", err);
+    }
+  }, [getVisibleDateRange]);
 
   const loadTimeOff = useCallback(async () => {
     try {
@@ -358,10 +353,10 @@ export default function TimeClock() {
     }
   }, [tab, loadSchedules, loadTimeOff, loadNotes]);
 
-  const handleSaveSchedule = async (empId: number, day: number, start: string, end: string, location: string, notes: string) => {
+  const handleSaveSchedule = async (empId: number, date: string, start: string, end: string, location: string) => {
     setSavingSchedule(true);
     try {
-      await saveSchedule({ employee_id: empId, day_of_week: day, start_time: start, end_time: end, location: location || undefined, notes: notes || undefined });
+      await saveSchedule({ employee_id: empId, date, start_time: start, end_time: end, location: location || undefined });
       showToast("success", "Schedule saved");
       setEditingSchedule(null);
       await loadSchedules();
@@ -373,10 +368,11 @@ export default function TimeClock() {
     }
   };
 
-  const handleDeleteSchedule = async (empId: number, day: number) => {
+  const handleDeleteSchedule = async (empId: number, date: string) => {
     try {
-      await deleteScheduleByDay(empId, day);
+      await deleteScheduleByDate(empId, date);
       showToast("success", "Schedule entry removed");
+      setEditingSchedule(null);
       await loadSchedules();
     } catch (err) {
       console.error(err);
@@ -950,9 +946,9 @@ export default function TimeClock() {
           renderMonths.push({ month: mo, year: yr, days });
         }
 
-        // Build lookup maps
+        // Build lookup maps — keyed by employee_id + date (YYYY-MM-DD)
         const scheduleMap: Record<string, ScheduleItem> = {};
-        schedules.forEach(s => { scheduleMap[`${s.employee_id}-${s.day_of_week}`] = s; });
+        schedules.forEach(s => { scheduleMap[`${s.employee_id}-${s.date}`] = s; });
         const timeOffMap: Record<string, TimeOffItem> = {};
         timeOffRequests.forEach(t => { timeOffMap[`${t.employee_id}-${t.date}`] = t; });
         const notesMap: Record<string, ScheduleNote[]> = {};
@@ -1022,19 +1018,6 @@ export default function TimeClock() {
           } catch { showToast("error", "Failed to delete note"); }
         };
 
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        const handleInlineSave = async (empId: number, dow: number) => {
-          if (!editCellStart || !editCellEnd) return;
-          setSavingSchedule(true);
-          try {
-            await saveSchedule({ employee_id: empId, day_of_week: dow, start_time: editCellStart, end_time: editCellEnd, location: editCellLoc || undefined });
-            showToast("success", "Schedule saved");
-            setEditCellKey(null);
-            await loadSchedules();
-          } catch { showToast("error", "Failed to save"); }
-          setSavingSchedule(false);
-        };
-
         const prevMonth = () => {
           if (calMonth === 0) { setCalMonth(11); setCalYear(calYear - 1); }
           else setCalMonth(calMonth - 1);
@@ -1056,7 +1039,6 @@ export default function TimeClock() {
             <div className="flex gap-1 bg-gray-100 p-1 rounded-lg">
               {([
                 { id: "calendar" as const, label: "Monthly View", icon: Calendar },
-                { id: "edit" as const, label: "Edit Schedules", icon: Edit2 },
                 { id: "requests" as const, label: "Time-Off Requests", icon: CalendarOff },
               ]).map(st => (
                 <button key={st.id} onClick={() => setScheduleSubTab(st.id)}
@@ -1137,10 +1119,11 @@ export default function TimeClock() {
                               {days.map((d, i) => {
                                 const dow = d.getDay();
                                 const dateStr = d.toISOString().split("T")[0];
-                                const sched = scheduleMap[`${emp.id}-${dow}`];
+                                const sched = scheduleMap[`${emp.id}-${dateStr}`];
                                 const timeOff = timeOffMap[`${emp.id}-${dateStr}`];
                                 const isToday = dateStr === new Date().toISOString().split("T")[0];
                                 const isWeekend = dow === 0 || dow === 6;
+                                const isEditingThis = editingSchedule?.empId === emp.id && editingSchedule?.date === dateStr;
 
                                 if (timeOff && timeOff.status === "approved") {
                                   return (
@@ -1150,9 +1133,34 @@ export default function TimeClock() {
                                   );
                                 }
 
+                                if (isEditingThis) {
+                                  return (
+                                    <td key={i} className="px-1 py-1 border-r border-b border-gray-200 bg-yellow-50 min-w-32">
+                                      <div className="space-y-0.5">
+                                        <input type="time" value={editingSchedule.start} onChange={e => setEditingSchedule({ ...editingSchedule, start: e.target.value })}
+                                          className="w-full px-1 py-0.5 border border-gray-300 rounded text-xs" />
+                                        <input type="time" value={editingSchedule.end} onChange={e => setEditingSchedule({ ...editingSchedule, end: e.target.value })}
+                                          className="w-full px-1 py-0.5 border border-gray-300 rounded text-xs" />
+                                        <input type="text" value={editingSchedule.location} onChange={e => setEditingSchedule({ ...editingSchedule, location: e.target.value })}
+                                          placeholder="Loc" className="w-full px-1 py-0.5 border border-gray-300 rounded text-xs" />
+                                        <div className="flex gap-0.5 justify-center pt-0.5">
+                                          <button disabled={savingSchedule || !editingSchedule.start || !editingSchedule.end}
+                                            onClick={() => handleSaveSchedule(emp.id, dateStr, editingSchedule.start, editingSchedule.end, editingSchedule.location)}
+                                            className="p-0.5 text-green-600 hover:bg-green-100 rounded disabled:opacity-50" title="Save"><Save className="w-3.5 h-3.5" /></button>
+                                          {sched && <button onClick={() => handleDeleteSchedule(emp.id, dateStr)}
+                                            className="p-0.5 text-red-600 hover:bg-red-100 rounded" title="Remove"><Trash2 className="w-3.5 h-3.5" /></button>}
+                                          <button onClick={() => setEditingSchedule(null)}
+                                            className="p-0.5 text-gray-400 hover:bg-gray-100 rounded" title="Cancel"><X className="w-3.5 h-3.5" /></button>
+                                        </div>
+                                      </div>
+                                    </td>
+                                  );
+                                }
+
                                 if (sched) {
                                   return (
-                                    <td key={i} className={`px-1 py-1 text-center border-r border-b border-gray-200 ${isToday ? "bg-green-50" : ""}`}>
+                                    <td key={i} className={`px-1 py-1 text-center border-r border-b border-gray-200 cursor-pointer hover:bg-blue-50 ${isToday ? "bg-green-50" : ""}`}
+                                      onClick={() => setEditingSchedule({ empId: emp.id, date: dateStr, start: sched.start_time, end: sched.end_time, location: sched.location || "" })}>
                                       <div className="text-xs text-gray-800 leading-tight font-medium">{fmtTime12(sched.start_time)}</div>
                                       <div className="text-xs text-gray-500 leading-tight">{fmtTime12(sched.end_time)}</div>
                                       {sched.location && <div className="text-xs text-blue-600 leading-tight truncate" title={sched.location}>{sched.location}</div>}
@@ -1164,7 +1172,8 @@ export default function TimeClock() {
                                 }
 
                                 return (
-                                  <td key={i} className={`px-1 py-1 text-center border-r border-b border-gray-200 ${isToday ? "bg-green-50" : isWeekend ? "bg-gray-50" : ""}`}>
+                                  <td key={i} className={`px-1 py-1 text-center border-r border-b border-gray-200 cursor-pointer hover:bg-blue-50 ${isToday ? "bg-green-50" : isWeekend ? "bg-gray-50" : ""}`}
+                                    onClick={() => setEditingSchedule({ empId: emp.id, date: dateStr, start: "09:00", end: "17:00", location: "" })}>
                                     <span className="text-gray-300 text-xs">—</span>
                                     {timeOff && timeOff.status === "pending" && (
                                       <span className="inline-block w-2 h-2 rounded-full bg-amber-400 mt-0.5" title="Pending time-off request" />
@@ -1210,98 +1219,6 @@ export default function TimeClock() {
                   </div>
                 );
               })}
-            </div>
-          )}
-
-          {/* =================== EDIT SCHEDULES (per-employee weekly) =================== */}
-          {scheduleSubTab === "edit" && (
-            <div className="space-y-4">
-              <div className="bg-white border border-gray-200 rounded-lg p-4">
-                <div className="flex flex-wrap gap-3 items-end">
-                  <div>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">Employee</label>
-                    <select value={scheduleEmployee} onChange={(e) => setScheduleEmployee(Number(e.target.value))}
-                      className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500">
-                      <option value={0}>— Select Employee —</option>
-                      {activeEmps.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
-                    </select>
-                  </div>
-                </div>
-              </div>
-              {scheduleEmployee > 0 ? (
-                <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
-                  <div className="p-4 border-b border-gray-200">
-                    <h3 className="font-semibold text-gray-900">Weekly Schedule — {employees.find(e => e.id === scheduleEmployee)?.name}</h3>
-                  </div>
-                  <table className="w-full">
-                    <thead className="bg-gray-50">
-                      <tr>
-                        <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Day</th>
-                        <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Start</th>
-                        <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">End</th>
-                        <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Location</th>
-                        <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Notes</th>
-                        <th className="text-right px-4 py-3 text-xs font-medium text-gray-500 uppercase">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-100">
-                      {[0, 1, 2, 3, 4, 5, 6].map((day) => {
-                        const fullDayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-                        const existing = schedules.find(s => s.employee_id === scheduleEmployee && s.day_of_week === day);
-                        const isEditing = editingSchedule?.day === day;
-                        return (
-                          <tr key={day} className="hover:bg-gray-50">
-                            <td className="px-4 py-3 text-sm font-medium text-gray-900">{fullDayNames[day]}</td>
-                            {isEditing ? (
-                              <>
-                                <td className="px-4 py-3"><input type="time" value={editingSchedule.start} onChange={(e) => setEditingSchedule({ ...editingSchedule, start: e.target.value })} className="px-2 py-1 border border-gray-300 rounded text-sm" /></td>
-                                <td className="px-4 py-3"><input type="time" value={editingSchedule.end} onChange={(e) => setEditingSchedule({ ...editingSchedule, end: e.target.value })} className="px-2 py-1 border border-gray-300 rounded text-sm" /></td>
-                                <td className="px-4 py-3"><input type="text" value={editingSchedule.location} onChange={(e) => setEditingSchedule({ ...editingSchedule, location: e.target.value })} placeholder="Location" className="px-2 py-1 border border-gray-300 rounded text-sm w-full" /></td>
-                                <td className="px-4 py-3"><input type="text" value={editingSchedule.notes} onChange={(e) => setEditingSchedule({ ...editingSchedule, notes: e.target.value })} placeholder="Notes" className="px-2 py-1 border border-gray-300 rounded text-sm w-full" /></td>
-                                <td className="px-4 py-3 text-right">
-                                  <div className="flex items-center justify-end gap-1">
-                                    <button disabled={savingSchedule || !editingSchedule.start || !editingSchedule.end}
-                                      onClick={() => handleSaveSchedule(scheduleEmployee, day, editingSchedule.start, editingSchedule.end, editingSchedule.location, editingSchedule.notes)}
-                                      className="p-1.5 text-green-600 hover:bg-green-50 rounded-lg disabled:opacity-50" title="Save"><Save className="w-4 h-4" /></button>
-                                    <button onClick={() => setEditingSchedule(null)} className="p-1.5 text-gray-400 hover:bg-gray-100 rounded-lg" title="Cancel"><X className="w-4 h-4" /></button>
-                                  </div>
-                                </td>
-                              </>
-                            ) : existing ? (
-                              <>
-                                <td className="px-4 py-3 text-sm text-gray-700">{existing.start_time}</td>
-                                <td className="px-4 py-3 text-sm text-gray-700">{existing.end_time}</td>
-                                <td className="px-4 py-3 text-sm text-gray-500">{existing.location || "—"}</td>
-                                <td className="px-4 py-3 text-sm text-gray-500">{existing.notes || "—"}</td>
-                                <td className="px-4 py-3 text-right">
-                                  <div className="flex items-center justify-end gap-1">
-                                    <button onClick={() => setEditingSchedule({ day, start: existing.start_time, end: existing.end_time, location: existing.location || "", notes: existing.notes || "" })}
-                                      className="p-1.5 text-blue-600 hover:bg-blue-50 rounded-lg" title="Edit"><Edit2 className="w-4 h-4" /></button>
-                                    <button onClick={() => handleDeleteSchedule(scheduleEmployee, day)} className="p-1.5 text-red-600 hover:bg-red-50 rounded-lg" title="Remove"><Trash2 className="w-4 h-4" /></button>
-                                  </div>
-                                </td>
-                              </>
-                            ) : (
-                              <>
-                                <td colSpan={4} className="px-4 py-3 text-sm text-gray-400 italic">Off</td>
-                                <td className="px-4 py-3 text-right">
-                                  <button onClick={() => setEditingSchedule({ day, start: "09:00", end: "17:00", location: "", notes: "" })}
-                                    className="text-xs text-green-600 hover:text-green-700 font-medium">+ Add Shift</button>
-                                </td>
-                              </>
-                            )}
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <div className="bg-white border border-gray-200 rounded-lg p-8 text-center text-gray-400">
-                  <Calendar className="w-12 h-12 mx-auto mb-3 text-gray-300" />
-                  <p>Select an employee above to edit their weekly schedule.</p>
-                </div>
-              )}
             </div>
           )}
 

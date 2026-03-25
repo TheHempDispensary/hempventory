@@ -18,8 +18,7 @@ interface TimeEntry {
 
 interface ScheduleItem {
   id: number;
-  day_of_week: number;
-  day_name: string;
+  date: string;
   start_time: string;
   end_time: string;
   location: string | null;
@@ -88,14 +87,19 @@ export default function EmployeeTimeClock() {
   const fetchSchedule = useCallback(async () => {
     setScheduleLoading(true);
     try {
-      const res = await getMySchedule();
+      const start = new Date(calYear, calMonth, 1);
+      const end = new Date(calYear, calMonth + 1, 0);
+      const res = await getMySchedule({
+        start_date: start.toISOString().split("T")[0],
+        end_date: end.toISOString().split("T")[0],
+      });
       setSchedule(res.data);
     } catch {
       // ignore
     } finally {
       setScheduleLoading(false);
     }
-  }, []);
+  }, [calYear, calMonth]);
 
   useEffect(() => {
     fetchStatus();
@@ -246,9 +250,9 @@ export default function EmployeeTimeClock() {
     return mi === 0 ? `${hr}${ampm}` : `${hr}:${mi.toString().padStart(2, "0")}${ampm}`;
   };
 
-  // Build schedule lookup
-  const scheduleMap: Record<number, ScheduleItem> = {};
-  schedule.forEach(s => { scheduleMap[s.day_of_week] = s; });
+  // Build schedule lookup — keyed by date string (YYYY-MM-DD)
+  const scheduleMap: Record<string, ScheduleItem> = {};
+  schedule.forEach(s => { scheduleMap[s.date] = s; });
   const timeOffMap: Record<string, TimeOffItem> = {};
   myTimeOff.forEach(t => { timeOffMap[t.date] = t; });
   const notesMap: Record<string, ScheduleNote[]> = {};
@@ -415,7 +419,7 @@ export default function EmployeeTimeClock() {
                     if (!day) return <div key={`empty-${i}`} className="border-b border-r border-gray-100 p-2 min-h-[5rem] bg-gray-50/50" />;
                     const dateStr = day.toISOString().split("T")[0];
                     const dow = day.getDay();
-                    const sched = scheduleMap[dow];
+                    const sched = scheduleMap[dateStr];
                     const timeOff = timeOffMap[dateStr];
                     const dayNotes = notesMap[dateStr];
                     const isToday = dateStr === new Date().toISOString().split("T")[0];

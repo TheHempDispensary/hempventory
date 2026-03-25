@@ -308,6 +308,23 @@ async def init_db():
             )
         """)
 
+        # Date-specific employee schedules (replaces recurring day_of_week model)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS date_schedules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                employee_id INTEGER NOT NULL,
+                date TEXT NOT NULL,
+                start_time TEXT NOT NULL,
+                end_time TEXT NOT NULL,
+                location TEXT,
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (employee_id) REFERENCES employees(id),
+                UNIQUE(employee_id, date)
+            )
+        """)
+
         # Time-off requests table
         await db.execute("""
             CREATE TABLE IF NOT EXISTS time_off_requests (
