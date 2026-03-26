@@ -68,7 +68,7 @@ function formatPrice(cents: number): string {
 function formatDate(dateStr: string): string {
   if (!dateStr) return "N/A";
   const d = new Date(dateStr);
-  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
+  return d.toLocaleDateString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
 function getStatusInfo(status: string) {

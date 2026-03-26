@@ -8,6 +8,7 @@ import {
   clockOut,
   getActiveClocks,
   getTimeEntries,
+  updateTimeEntry,
   deleteTimeEntry,
   getTimeclockExportUrl,
   syncEmployeesFromClover,
@@ -51,6 +52,7 @@ interface Employee {
   pin: string | null;
   active: boolean;
   created_at: string;
+  pay_rate: number | null;
 }
 
 interface ActiveClock {
@@ -129,6 +131,11 @@ export default function TimeClock() {
   // Pagination for timesheet
   const [page, setPage] = useState(1);
   const perPage = 25;
+
+  // Timesheet edit
+  const [editingEntry, setEditingEntry] = useState<number | null>(null);
+  const [editClockIn, setEditClockIn] = useState("");
+  const [editClockOut, setEditClockOut] = useState("");
 
   // Sync
   const [syncing, setSyncing] = useState(false);
@@ -302,6 +309,49 @@ export default function TimeClock() {
       await loadEntries();
     } catch (err) {
       console.error(err);
+    }
+  };
+
+  const handleStartEditEntry = (entry: TimeEntry) => {
+    setEditingEntry(entry.id);
+    // Convert ISO to datetime-local format in EST
+    const toLocal = (iso: string) => {
+      const d = new Date(iso);
+      const est = new Date(d.toLocaleString("en-US", { timeZone: "America/New_York" }));
+      const y = est.getFullYear();
+      const mo = String(est.getMonth() + 1).padStart(2, "0");
+      const da = String(est.getDate()).padStart(2, "0");
+      const h = String(est.getHours()).padStart(2, "0");
+      const mi = String(est.getMinutes()).padStart(2, "0");
+      return `${y}-${mo}-${da}T${h}:${mi}`;
+    };
+    setEditClockIn(toLocal(entry.clock_in));
+    setEditClockOut(entry.clock_out ? toLocal(entry.clock_out) : "");
+  };
+
+  const handleSaveEditEntry = async (entryId: number) => {
+    try {
+      // Convert datetime-local (EST) back to UTC ISO
+      const toUTC = (local: string) => {
+        // Parse as EST then convert to UTC
+        const d = new Date(local + ":00");
+        // Create date in EST by interpreting the input as EST
+        const estStr = d.toLocaleString("en-US", { timeZone: "America/New_York" });
+        const estDate = new Date(estStr);
+        const diff = d.getTime() - estDate.getTime();
+        const utc = new Date(d.getTime() + diff);
+        return utc.toISOString();
+      };
+      const data: { clock_in?: string; clock_out?: string } = {};
+      if (editClockIn) data.clock_in = toUTC(editClockIn);
+      if (editClockOut) data.clock_out = toUTC(editClockOut);
+      await updateTimeEntry(entryId, data);
+      showToast("success", "Entry updated");
+      setEditingEntry(null);
+      await loadEntries();
+    } catch (err) {
+      console.error(err);
+      showToast("error", "Failed to update entry");
     }
   };
 
@@ -684,18 +734,30 @@ export default function TimeClock() {
                 <thead>
                   <tr className="bg-gray-50 border-b border-gray-200">
                     <th className="text-left px-4 py-2 font-medium text-gray-600">Employee</th>
+                    <th className="text-right px-4 py-2 font-medium text-gray-600">Pay Rate</th>
                     <th className="text-right px-4 py-2 font-medium text-gray-600">Total Hours</th>
+                    <th className="text-right px-4 py-2 font-medium text-gray-600">Est. Pay</th>
                   </tr>
                 </thead>
                 <tbody>
                   {Object.entries(employeeSummary)
                     .sort(([a], [b]) => a.localeCompare(b))
-                    .map(([name, hrs]) => (
-                      <tr key={name} className="border-b border-gray-100">
-                        <td className="px-4 py-2 text-gray-900">{name}</td>
-                        <td className="px-4 py-2 text-right font-medium text-gray-900">{formatHours(hrs)}</td>
-                      </tr>
-                    ))}
+                    .map(([name, hrs]) => {
+                      const emp = employees.find((e) => e.name === name);
+                      const rate = emp?.pay_rate ?? null;
+                      return (
+                        <tr key={name} className="border-b border-gray-100">
+                          <td className="px-4 py-2 text-gray-900">{name}</td>
+                          <td className="px-4 py-2 text-right text-gray-600">
+                            {rate !== null ? `$${rate.toFixed(2)}/hr` : "—"}
+                          </td>
+                          <td className="px-4 py-2 text-right font-medium text-gray-900">{formatHours(hrs)}</td>
+                          <td className="px-4 py-2 text-right font-medium text-green-700">
+                            {rate !== null ? `$${(hrs * rate).toFixed(2)}` : "—"}
+                          </td>
+                        </tr>
+                      );
+                    })}
                 </tbody>
               </table>
             </div>
@@ -719,9 +781,27 @@ export default function TimeClock() {
                   <tr key={e.id} className="border-b border-gray-100 hover:bg-gray-50">
                     <td className="px-4 py-2 text-gray-900">{e.employee_name}</td>
                     <td className="px-4 py-2 text-gray-600">{formatDate(e.clock_in)}</td>
-                    <td className="px-4 py-2 text-gray-600">{formatTime(e.clock_in)}</td>
                     <td className="px-4 py-2 text-gray-600">
-                      {e.clock_out ? formatTime(e.clock_out) : (
+                      {editingEntry === e.id ? (
+                        <input
+                          type="datetime-local"
+                          value={editClockIn}
+                          onChange={(ev) => setEditClockIn(ev.target.value)}
+                          className="border border-gray-300 rounded px-2 py-1 text-xs w-44 focus:ring-2 focus:ring-green-500"
+                        />
+                      ) : (
+                        formatTime(e.clock_in)
+                      )}
+                    </td>
+                    <td className="px-4 py-2 text-gray-600">
+                      {editingEntry === e.id ? (
+                        <input
+                          type="datetime-local"
+                          value={editClockOut}
+                          onChange={(ev) => setEditClockOut(ev.target.value)}
+                          className="border border-gray-300 rounded px-2 py-1 text-xs w-44 focus:ring-2 focus:ring-green-500"
+                        />
+                      ) : e.clock_out ? formatTime(e.clock_out) : (
                         <span className="text-green-600 font-medium">Active</span>
                       )}
                     </td>
@@ -729,13 +809,43 @@ export default function TimeClock() {
                       {e.hours !== null ? formatHours(e.hours) : "---"}
                     </td>
                     <td className="px-4 py-2 text-right">
-                      <button
-                        onClick={() => handleDeleteEntry(e.id)}
-                        className="text-gray-400 hover:text-red-600 transition-colors"
-                        title="Delete entry"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+                      <div className="flex items-center justify-end gap-1">
+                        {editingEntry === e.id ? (
+                          <>
+                            <button
+                              onClick={() => handleSaveEditEntry(e.id)}
+                              className="text-green-600 hover:text-green-800 transition-colors"
+                              title="Save changes"
+                            >
+                              <Check className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={() => setEditingEntry(null)}
+                              className="text-gray-400 hover:text-gray-600 transition-colors"
+                              title="Cancel"
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <button
+                              onClick={() => handleStartEditEntry(e)}
+                              className="text-gray-400 hover:text-blue-600 transition-colors"
+                              title="Edit entry"
+                            >
+                              <Edit2 className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={() => handleDeleteEntry(e.id)}
+                              className="text-gray-400 hover:text-red-600 transition-colors"
+                              title="Delete entry"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}

@@ -18,6 +18,9 @@ export default function Login({ onLogin }: LoginProps) {
     try {
       const res = await login(username, password);
       localStorage.setItem("token", res.data.access_token);
+      // Also store under domain-specific key for login separation
+      const mode = window.location.hostname.toLowerCase().startsWith("timeclock") ? "timeclock" : "inventory";
+      localStorage.setItem(`${mode}_token`, res.data.access_token);
       onLogin();
     } catch {
       setError("Invalid username or password");
