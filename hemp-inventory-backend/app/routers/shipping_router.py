@@ -24,13 +24,13 @@ SHIPPO_API_TOKEN = os.environ.get("SHIPPO_API_TOKEN", "")
 DEFAULT_FROM_ADDRESS = {
     "name": "The Hemp Dispensary",
     "company": "The Hemp Dispensary",
-    "street1": "6175 Deltona Blvd",
-    "street2": "Ste 104",
+    "street1": "4119 Lamson Ave",
+    "street2": "",
     "city": "Spring Hill",
     "state": "FL",
-    "zip": "34606",
+    "zip": "34608",
     "country": "US",
-    "phone": "352-340-2439",
+    "phone": "352-842-6185",
     "email": "support@thehempdispensary.com",
 }
 
