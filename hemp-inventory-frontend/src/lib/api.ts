@@ -402,6 +402,7 @@ export const createShipment = (data: {
   parcel_width?: number;
   parcel_height?: number;
   parcel_weight?: number;
+  is_hazmat?: boolean;
 }) => api.post("/api/shipping/create-shipment", data);
 
 export const purchaseLabel = (data: {
@@ -431,6 +432,11 @@ export const createPromo = (data: {
   single_use?: boolean;
   max_uses?: number;
   expires_at?: string | null;
+  starts_at?: string | null;
+  applies_to?: string;
+  product_ids?: string;
+  exclude_from_other_coupons?: boolean;
+  sync_to_clover?: boolean;
 }) => api.post("/api/ecommerce/promos", data);
 
 export const updatePromo = (promoId: number, data: {
@@ -440,6 +446,11 @@ export const updatePromo = (promoId: number, data: {
   is_active?: boolean;
   max_uses?: number;
   expires_at?: string | null;
+  starts_at?: string | null;
+  applies_to?: string;
+  product_ids?: string;
+  exclude_from_other_coupons?: boolean;
+  sync_to_clover?: boolean;
 }) => api.put(`/api/ecommerce/promos/${promoId}`, data);
 
 export const deletePromo = (promoId: number) =>

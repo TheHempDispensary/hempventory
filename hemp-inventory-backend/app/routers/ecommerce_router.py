@@ -14,6 +14,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 from app.database import get_db
+from app.clover_client import CloverClient
 
 STORE_EMAIL = "Support@TheHempDispensary.com"
 
@@ -444,12 +445,22 @@ async def validate_promo(
         return {"valid": False, "reason": "Invalid promo code"}
 
     # Check expiration
+    from datetime import datetime
     if promo["expires_at"]:
-        from datetime import datetime
         try:
             exp = datetime.fromisoformat(promo["expires_at"])
             if datetime.utcnow() > exp:
                 return {"valid": False, "reason": "This promo code has expired"}
+        except Exception:
+            pass
+
+    # Check start date
+    starts_at = promo["starts_at"] if "starts_at" in promo.keys() else None
+    if starts_at:
+        try:
+            start = datetime.fromisoformat(starts_at)
+            if datetime.utcnow() < start:
+                return {"valid": False, "reason": "This promo code is not yet active"}
         except Exception:
             pass
 
@@ -467,7 +478,19 @@ async def validate_promo(
         if count > 0:
             return {"valid": False, "reason": "This promo code has already been used with this email address"}
 
-    return {"valid": True, "discount_pct": promo["discount_pct"], "discount_amount": promo["discount_amount"], "code": code}
+    applies_to = promo["applies_to"] if "applies_to" in promo.keys() else "all"
+    product_ids = promo["product_ids"] if "product_ids" in promo.keys() else ""
+    exclude_coupons = bool(promo["exclude_from_other_coupons"]) if "exclude_from_other_coupons" in promo.keys() else False
+
+    return {
+        "valid": True,
+        "discount_pct": promo["discount_pct"],
+        "discount_amount": promo["discount_amount"],
+        "code": code,
+        "applies_to": applies_to,
+        "product_ids": product_ids,
+        "exclude_from_other_coupons": exclude_coupons,
+    }
 
 
 # ── Promo Code Management (Admin) ────────────────────────────────────────────
@@ -495,6 +518,11 @@ async def list_promos(db: aiosqlite.Connection = Depends(get_db)):
             "max_uses": row["max_uses"],
             "times_used": order_count,
             "expires_at": row["expires_at"],
+            "starts_at": row["starts_at"] if "starts_at" in row.keys() else None,
+            "applies_to": row["applies_to"] if "applies_to" in row.keys() else "all",
+            "product_ids": row["product_ids"] if "product_ids" in row.keys() else "",
+            "exclude_from_other_coupons": bool(row["exclude_from_other_coupons"]) if "exclude_from_other_coupons" in row.keys() else False,
+            "clover_discount_id": row["clover_discount_id"] if "clover_discount_id" in row.keys() else "",
             "created_at": row["created_at"],
         })
     return promos
@@ -507,21 +535,53 @@ class PromoCreateRequest(BaseModel):
     single_use: bool = False
     max_uses: int = 0
     expires_at: Optional[str] = None
+    starts_at: Optional[str] = None
+    applies_to: str = "all"  # "all", "specific", or "individual"
+    product_ids: str = ""  # comma-separated Clover item IDs
+    exclude_from_other_coupons: bool = False
+    sync_to_clover: bool = False
+
+
+async def _get_hq_clover_client(db: aiosqlite.Connection) -> Optional[CloverClient]:
+    """Get CloverClient for HQ location."""
+    cursor = await db.execute("SELECT merchant_id, api_token FROM locations WHERE name LIKE '%HQ%' OR id = 1 LIMIT 1")
+    row = await cursor.fetchone()
+    if row and row["merchant_id"] and row["api_token"]:
+        return CloverClient(row["merchant_id"], row["api_token"])
+    return None
 
 
 @router.post("/promos")
 async def create_promo(body: PromoCreateRequest, db: aiosqlite.Connection = Depends(get_db)):
     """Admin: Create a new promo code."""
     code = body.code.strip().upper()
+    clover_discount_id = ""
+
+    # Sync to Clover POS if requested
+    if body.sync_to_clover:
+        try:
+            client = await _get_hq_clover_client(db)
+            if client:
+                pct = int(round(body.discount_pct * 100)) if body.discount_pct > 0 else 0
+                amt = body.discount_amount if body.discount_amount > 0 else 0
+                result = await client.create_discount(name=code, percentage=pct, amount=amt)
+                clover_discount_id = result.get("id", "")
+        except Exception as e:
+            print(f"[promo] Clover sync failed: {e}")
+
     try:
         await db.execute(
-            "INSERT INTO promo_codes (code, discount_pct, discount_amount, single_use, max_uses, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (code, body.discount_pct, body.discount_amount, int(body.single_use), body.max_uses, body.expires_at),
+            """INSERT INTO promo_codes (code, discount_pct, discount_amount, single_use, max_uses,
+               expires_at, starts_at, applies_to, product_ids, exclude_from_other_coupons, clover_discount_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (code, body.discount_pct, body.discount_amount, int(body.single_use), body.max_uses,
+             body.expires_at, body.starts_at, body.applies_to, body.product_ids,
+             int(body.exclude_from_other_coupons), clover_discount_id),
         )
         await db.commit()
     except Exception:
         raise HTTPException(status_code=400, detail=f"Promo code '{code}' already exists")
-    return {"status": "created", "code": code}
+    return {"status": "created", "code": code, "clover_discount_id": clover_discount_id}
 
 
 class PromoUpdateRequest(BaseModel):
@@ -531,6 +591,11 @@ class PromoUpdateRequest(BaseModel):
     is_active: Optional[bool] = None
     max_uses: Optional[int] = None
     expires_at: Optional[str] = None
+    starts_at: Optional[str] = None
+    applies_to: Optional[str] = None
+    product_ids: Optional[str] = None
+    exclude_from_other_coupons: Optional[bool] = None
+    sync_to_clover: bool = False
 
 
 @router.put("/promos/{promo_id}")
@@ -556,17 +621,65 @@ async def update_promo(promo_id: int, body: PromoUpdateRequest, db: aiosqlite.Co
     if body.expires_at is not None:
         updates.append("expires_at = ?")
         params.append(body.expires_at if body.expires_at else None)
+    if body.starts_at is not None:
+        updates.append("starts_at = ?")
+        params.append(body.starts_at if body.starts_at else None)
+    if body.applies_to is not None:
+        updates.append("applies_to = ?")
+        params.append(body.applies_to)
+    if body.product_ids is not None:
+        updates.append("product_ids = ?")
+        params.append(body.product_ids)
+    if body.exclude_from_other_coupons is not None:
+        updates.append("exclude_from_other_coupons = ?")
+        params.append(int(body.exclude_from_other_coupons))
     if not updates:
         return {"status": "no changes"}
     params.append(promo_id)
     await db.execute(f"UPDATE promo_codes SET {', '.join(updates)} WHERE id = ?", params)
     await db.commit()
+
+    # Sync to Clover POS if requested
+    if body.sync_to_clover:
+        try:
+            cursor = await db.execute("SELECT * FROM promo_codes WHERE id = ?", (promo_id,))
+            promo = await cursor.fetchone()
+            if promo:
+                client = await _get_hq_clover_client(db)
+                if client:
+                    clover_id = promo["clover_discount_id"] if "clover_discount_id" in promo.keys() else ""
+                    pct_val = body.discount_pct if body.discount_pct is not None else promo["discount_pct"]
+                    amt_val = body.discount_amount if body.discount_amount is not None else promo["discount_amount"]
+                    pct = int(round(pct_val * 100)) if pct_val > 0 else 0
+                    amt = amt_val if amt_val > 0 else 0
+                    if clover_id:
+                        await client.update_discount(clover_id, name=promo["code"], percentage=pct, amount=amt)
+                    else:
+                        result = await client.create_discount(name=promo["code"], percentage=pct, amount=amt)
+                        new_id = result.get("id", "")
+                        if new_id:
+                            await db.execute("UPDATE promo_codes SET clover_discount_id = ? WHERE id = ?", (new_id, promo_id))
+                            await db.commit()
+        except Exception as e:
+            print(f"[promo] Clover sync failed: {e}")
+
     return {"status": "updated"}
 
 
 @router.delete("/promos/{promo_id}")
 async def delete_promo(promo_id: int, db: aiosqlite.Connection = Depends(get_db)):
-    """Admin: Delete a promo code."""
+    """Admin: Delete a promo code (also removes from Clover POS if synced)."""
+    cursor = await db.execute("SELECT * FROM promo_codes WHERE id = ?", (promo_id,))
+    promo = await cursor.fetchone()
+    if promo:
+        clover_id = promo["clover_discount_id"] if "clover_discount_id" in promo.keys() else ""
+        if clover_id:
+            try:
+                client = await _get_hq_clover_client(db)
+                if client:
+                    await client.delete_discount(clover_id)
+            except Exception as e:
+                print(f"[promo] Clover delete failed: {e}")
     await db.execute("DELETE FROM promo_codes WHERE id = ?", (promo_id,))
     await db.commit()
     return {"status": "deleted"}

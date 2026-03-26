@@ -67,6 +67,7 @@ class CreateShipmentRequest(BaseModel):
     parcel_distance_unit: str = "in"
     parcel_weight: float = 1.0
     parcel_mass_unit: str = "lb"
+    is_hazmat: bool = False
 
 
 class PurchaseLabelRequest(BaseModel):
@@ -105,13 +106,13 @@ async def create_shipment(
         "phone": order.get("customer_phone", ""),
     }
 
-    # Build parcel
+    # Build parcel — Shippo allows max 4 decimal places for weight
     parcel = {
-        "length": str(body.parcel_length),
-        "width": str(body.parcel_width),
-        "height": str(body.parcel_height),
+        "length": str(round(body.parcel_length, 4)),
+        "width": str(round(body.parcel_width, 4)),
+        "height": str(round(body.parcel_height, 4)),
         "distance_unit": body.parcel_distance_unit,
-        "weight": str(body.parcel_weight),
+        "weight": str(round(body.parcel_weight, 4)),
         "mass_unit": body.parcel_mass_unit,
     }
 
@@ -121,6 +122,11 @@ async def create_shipment(
         "parcels": [parcel],
         "async": False,
     }
+
+    # If hazmat, add metadata for carrier compliance (ORM-D Consumer Commodity)
+    if body.is_hazmat:
+        shipment_data["extra"] = {"is_return": False}
+        parcel["metadata"] = "HAZMAT - ORM-D Consumer Commodity"
 
     headers = _get_shippo_headers()
 

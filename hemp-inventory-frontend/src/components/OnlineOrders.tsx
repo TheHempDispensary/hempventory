@@ -246,6 +246,7 @@ export default function OnlineOrders() {
   const [parcelLength, setParcelLength] = useState("10");
   const [parcelWidth, setParcelWidth] = useState("8");
   const [parcelHeight, setParcelHeight] = useState("4");
+  const [isHazmat, setIsHazmat] = useState(false);
 
   // Staff notes state
   const [editingNotes, setEditingNotes] = useState<number | null>(null);
@@ -305,10 +306,11 @@ export default function OnlineOrders() {
     try {
       const res = await createShipment({
         order_id: orderId,
-        parcel_weight: weightUnit === "oz" ? (parseFloat(parcelWeight) || 1.0) / 16 : parseFloat(parcelWeight) || 1.0,
+        parcel_weight: Math.round((weightUnit === "oz" ? (parseFloat(parcelWeight) || 1.0) / 16 : parseFloat(parcelWeight) || 1.0) * 10000) / 10000,
         parcel_length: parseFloat(parcelLength) || 10,
         parcel_width: parseFloat(parcelWidth) || 8,
         parcel_height: parseFloat(parcelHeight) || 4,
+        is_hazmat: isHazmat,
       });
       const fetchedRates = res.data.rates || [];
       setRates(fetchedRates);
@@ -965,7 +967,7 @@ export default function OnlineOrders() {
                           Create Shipping Label via Shippo
                         </h4>
 
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+                        <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
                           <div>
                             <label className="text-xs text-gray-500 block mb-1">Weight</label>
                             <div className="flex gap-1">
@@ -992,6 +994,13 @@ export default function OnlineOrders() {
                             <label className="text-xs text-gray-500 block mb-1">Height (in)</label>
                             <input type="number" step="0.5" value={parcelHeight} onChange={(e) => setParcelHeight(e.target.value)}
                               className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-green-500" />
+                          </div>
+                          <div className="flex items-end">
+                            <label className="flex items-center gap-2 cursor-pointer px-3 py-1.5">
+                              <input type="checkbox" checked={isHazmat} onChange={(e) => setIsHazmat(e.target.checked)}
+                                className="w-4 h-4 rounded border-gray-300 text-orange-600 focus:ring-orange-500" />
+                              <span className="text-sm text-gray-700 whitespace-nowrap">Hazmat</span>
+                            </label>
                           </div>
                         </div>
 

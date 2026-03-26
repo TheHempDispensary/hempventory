@@ -363,9 +363,36 @@ async def init_db():
                 max_uses INTEGER DEFAULT 0,
                 times_used INTEGER DEFAULT 0,
                 expires_at TEXT,
+                starts_at TEXT,
+                applies_to TEXT DEFAULT 'all',
+                product_ids TEXT DEFAULT '',
+                exclude_from_other_coupons INTEGER DEFAULT 0,
+                clover_discount_id TEXT DEFAULT '',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # Migration: add new columns if they don't exist yet
+        try:
+            await db.execute("ALTER TABLE promo_codes ADD COLUMN starts_at TEXT")
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE promo_codes ADD COLUMN applies_to TEXT DEFAULT 'all'")
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE promo_codes ADD COLUMN product_ids TEXT DEFAULT ''")
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE promo_codes ADD COLUMN exclude_from_other_coupons INTEGER DEFAULT 0")
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE promo_codes ADD COLUMN clover_discount_id TEXT DEFAULT ''")
+        except Exception:
+            pass
         # Seed FIRST15 if promo_codes table is empty
         cursor = await db.execute("SELECT COUNT(*) FROM promo_codes")
         count = (await cursor.fetchone())[0]
