@@ -523,14 +523,16 @@ async def list_promos(db: aiosqlite.Connection = Depends(get_db)):
             "product_ids": row["product_ids"] if "product_ids" in row.keys() else "",
             "exclude_from_other_coupons": bool(row["exclude_from_other_coupons"]) if "exclude_from_other_coupons" in row.keys() else False,
             "clover_discount_id": row["clover_discount_id"] if "clover_discount_id" in row.keys() else "",
+            "is_direct_discount": bool(row["is_direct_discount"]) if "is_direct_discount" in row.keys() else False,
             "created_at": row["created_at"],
         })
     return promos
 
 
 class PromoCreateRequest(BaseModel):
-    code: str
+    code: str = ""  # empty for direct discounts
     discount_pct: float = 0
+    is_direct_discount: bool = False  # True = no promo code, applied directly to products
     discount_amount: int = 0
     single_use: bool = False
     max_uses: int = 0
@@ -553,8 +555,15 @@ async def _get_hq_clover_client(db: aiosqlite.Connection) -> Optional[CloverClie
 
 @router.post("/promos")
 async def create_promo(body: PromoCreateRequest, db: aiosqlite.Connection = Depends(get_db)):
-    """Admin: Create a new promo code."""
-    code = body.code.strip().upper()
+    """Admin: Create a new promo code or direct discount."""
+    if body.is_direct_discount:
+        # Auto-generate an internal code for direct discounts
+        import uuid
+        code = "DIRECT-" + uuid.uuid4().hex[:8].upper()
+    else:
+        code = body.code.strip().upper()
+        if not code:
+            raise HTTPException(status_code=400, detail="Promo code is required")
     clover_discount_id = ""
 
     # Sync to Clover POS if requested
@@ -572,11 +581,11 @@ async def create_promo(body: PromoCreateRequest, db: aiosqlite.Connection = Depe
     try:
         await db.execute(
             """INSERT INTO promo_codes (code, discount_pct, discount_amount, single_use, max_uses,
-               expires_at, starts_at, applies_to, product_ids, exclude_from_other_coupons, clover_discount_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               expires_at, starts_at, applies_to, product_ids, exclude_from_other_coupons, clover_discount_id, is_direct_discount)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (code, body.discount_pct, body.discount_amount, int(body.single_use), body.max_uses,
              body.expires_at, body.starts_at, body.applies_to, body.product_ids,
-             int(body.exclude_from_other_coupons), clover_discount_id),
+             int(body.exclude_from_other_coupons), clover_discount_id, int(body.is_direct_discount)),
         )
         await db.commit()
     except Exception:

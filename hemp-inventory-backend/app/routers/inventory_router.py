@@ -1033,7 +1033,7 @@ async def update_item(
                 # that have different Clover IDs at each location)
                 matching = [
                     i for i in elements
-                    if " ".join((i.get("name", "") or "").split()) == item_name_fallback
+                    if " ".join((i.get("name", "") or "").split()).lower() == item_name_fallback.lower()
                 ]
             if not matching:
                 results.append({"location": loc_name, "status": "not_found"})
@@ -1085,7 +1085,7 @@ async def update_item(
             elements = loc_items_cache.get(loc_id, [])
             matching = [
                 i for i in elements
-                if " ".join((i.get("name", "") or "").split()) == item_name_fallback
+                if " ".join((i.get("name", "") or "").split()).lower() == item_name_fallback.lower()
             ]
             if not matching:
                 continue

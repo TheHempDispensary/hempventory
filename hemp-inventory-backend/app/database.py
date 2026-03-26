@@ -393,6 +393,10 @@ async def init_db():
             await db.execute("ALTER TABLE promo_codes ADD COLUMN clover_discount_id TEXT DEFAULT ''")
         except Exception:
             pass
+        try:
+            await db.execute("ALTER TABLE promo_codes ADD COLUMN is_direct_discount INTEGER DEFAULT 0")
+        except Exception:
+            pass
         # Seed FIRST15 if promo_codes table is empty
         cursor = await db.execute("SELECT COUNT(*) FROM promo_codes")
         count = (await cursor.fetchone())[0]

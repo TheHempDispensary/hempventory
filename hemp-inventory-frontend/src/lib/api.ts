@@ -426,7 +426,7 @@ export const refundOrder = (orderId: number, amount?: number) =>
 export const getPromos = () => api.get("/api/ecommerce/promos");
 
 export const createPromo = (data: {
-  code: string;
+  code?: string;
   discount_pct?: number;
   discount_amount?: number;
   single_use?: boolean;
@@ -437,6 +437,7 @@ export const createPromo = (data: {
   product_ids?: string;
   exclude_from_other_coupons?: boolean;
   sync_to_clover?: boolean;
+  is_direct_discount?: boolean;
 }) => api.post("/api/ecommerce/promos", data);
 
 export const updatePromo = (promoId: number, data: {
