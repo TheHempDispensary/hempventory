@@ -281,7 +281,7 @@ export const getEmployees = () => api.get("/api/timeclock/employees");
 export const createEmployee = (data: { name: string; pin?: string }) =>
   api.post("/api/timeclock/employees", data);
 
-export const updateEmployee = (id: number, data: { name?: string; pin?: string; active?: boolean }) =>
+export const updateEmployee = (id: number, data: { name?: string; pin?: string; active?: boolean; pay_rate?: number }) =>
   api.put(`/api/timeclock/employees/${id}`, data);
 
 export const deleteEmployee = (id: number) =>

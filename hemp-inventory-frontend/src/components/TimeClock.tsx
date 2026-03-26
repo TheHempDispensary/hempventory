@@ -117,6 +117,7 @@ export default function TimeClock() {
   const [newEmpPin, setNewEmpPin] = useState("");
   const [editingEmp, setEditingEmp] = useState<number | null>(null);
   const [editEmpName, setEditEmpName] = useState("");
+  const [editEmpPayRate, setEditEmpPayRate] = useState("");
 
   // Timesheet filters
   const [startDate, setStartDate] = useState(() => {
@@ -252,7 +253,9 @@ export default function TimeClock() {
   const handleSaveEditEmp = async (id: number) => {
     if (!editEmpName.trim()) return;
     try {
-      await updateEmployee(id, { name: editEmpName.trim() });
+      const data: { name: string; pay_rate?: number } = { name: editEmpName.trim() };
+      if (editEmpPayRate !== "") data.pay_rate = parseFloat(editEmpPayRate);
+      await updateEmployee(id, data);
       setEditingEmp(null);
       showToast("success", "Employee updated");
       await loadEmployees();
@@ -964,6 +967,7 @@ export default function TimeClock() {
                 <tr className="bg-gray-50 border-b border-gray-200">
                   <th className="text-left px-4 py-2 font-medium text-gray-600">Name</th>
                   <th className="text-left px-4 py-2 font-medium text-gray-600">PIN</th>
+                  <th className="text-right px-4 py-2 font-medium text-gray-600">Pay Rate</th>
                   <th className="text-center px-4 py-2 font-medium text-gray-600">Status</th>
                   <th className="text-right px-4 py-2 font-medium text-gray-600">Actions</th>
                 </tr>
@@ -994,6 +998,23 @@ export default function TimeClock() {
                       )}
                     </td>
                     <td className="px-4 py-3 text-gray-500">{emp.pin || "---"}</td>
+                    <td className="px-4 py-3 text-right">
+                      {editingEmp === emp.id ? (
+                        <input
+                          type="number"
+                          step="0.25"
+                          min="0"
+                          value={editEmpPayRate}
+                          onChange={(e) => setEditEmpPayRate(e.target.value)}
+                          className="border border-gray-300 rounded px-2 py-1 text-sm w-24 text-right"
+                          placeholder="0.00"
+                        />
+                      ) : (
+                        <span className="text-gray-600">
+                          {emp.pay_rate !== null ? `$${emp.pay_rate.toFixed(2)}/hr` : "—"}
+                        </span>
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-center">
                       <button
                         onClick={() => handleToggleActive(emp)}
@@ -1009,9 +1030,9 @@ export default function TimeClock() {
                     <td className="px-4 py-3 text-right">
                       <div className="flex items-center justify-end gap-2">
                         <button
-                          onClick={() => { setEditingEmp(emp.id); setEditEmpName(emp.name); }}
+                          onClick={() => { setEditingEmp(emp.id); setEditEmpName(emp.name); setEditEmpPayRate(emp.pay_rate !== null ? String(emp.pay_rate) : ""); }}
                           className="text-gray-400 hover:text-blue-600 transition-colors"
-                          title="Edit name"
+                          title="Edit employee"
                         >
                           <Edit2 className="w-4 h-4" />
                         </button>
@@ -1028,7 +1049,7 @@ export default function TimeClock() {
                 ))}
                 {employees.length === 0 && (
                   <tr>
-                    <td colSpan={4} className="px-4 py-8 text-center text-gray-400">
+                    <td colSpan={5} className="px-4 py-8 text-center text-gray-400">
                       No employees yet. Click "Add Employee" to get started.
                     </td>
                   </tr>
