@@ -52,6 +52,26 @@ class ClockInRequest(BaseModel):
 class ClockOutRequest(BaseModel):
     employee_id: int
 
+class ScheduleEntry(BaseModel):
+    employee_id: int
+    date: str          # "YYYY-MM-DD"
+    start_time: str    # "09:00"
+    end_time: str      # "17:00"
+    location: Optional[str] = None
+    notes: Optional[str] = None
+
+class TimeOffRequest(BaseModel):
+    employee_id: int
+    date: str  # "YYYY-MM-DD"
+    reason: Optional[str] = None
+
+class TimeOffUpdate(BaseModel):
+    status: str  # "approved" or "denied"
+
+class ScheduleNoteCreate(BaseModel):
+    date: str  # "YYYY-MM-DD"
+    note: str
+
 
 # ---------- Employee CRUD ----------
 
@@ -708,3 +728,399 @@ async def get_my_entries(
         }
         for r in rows
     ]
+
+
+# ---------- Schedules (Admin) ----------
+
+DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+
+@router.get("/schedules")
+async def list_schedules(
+    employee_id: Optional[int] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Admin: List date-specific schedules, optionally filtered by employee and date range."""
+    query = """
+        SELECT s.id, s.employee_id, e.name, s.date, s.start_time, s.end_time, s.location, s.notes
+        FROM date_schedules s
+        JOIN employees e ON e.id = s.employee_id
+        WHERE 1=1
+    """
+    params: list = []
+    if employee_id:
+        query += " AND s.employee_id = ?"
+        params.append(employee_id)
+    if start_date:
+        query += " AND s.date >= ?"
+        params.append(start_date)
+    if end_date:
+        query += " AND s.date <= ?"
+        params.append(end_date)
+    query += " ORDER BY s.date, e.name"
+
+    cursor = await db.execute(query, params)
+    rows = await cursor.fetchall()
+    return [
+        {
+            "id": r[0],
+            "employee_id": r[1],
+            "employee_name": r[2],
+            "date": r[3],
+            "start_time": r[4],
+            "end_time": r[5],
+            "location": r[6],
+            "notes": r[7],
+        }
+        for r in rows
+    ]
+
+
+@router.post("/schedules")
+async def save_schedule(
+    entry: ScheduleEntry,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Admin: Create or update a date-specific schedule entry (upserts by employee_id + date)."""
+    # Verify employee exists
+    cursor = await db.execute("SELECT id FROM employees WHERE id = ?", (entry.employee_id,))
+    if not await cursor.fetchone():
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    await db.execute(
+        """INSERT INTO date_schedules (employee_id, date, start_time, end_time, location, notes, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT(employee_id, date) DO UPDATE SET
+             start_time = excluded.start_time,
+             end_time = excluded.end_time,
+             location = excluded.location,
+             notes = excluded.notes,
+             updated_at = CURRENT_TIMESTAMP""",
+        (entry.employee_id, entry.date, entry.start_time, entry.end_time, entry.location, entry.notes),
+    )
+    await db.commit()
+    return {"status": "saved"}
+
+
+@router.delete("/schedules/{schedule_id}")
+async def delete_schedule(
+    schedule_id: int,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Admin: Delete a schedule entry."""
+    await db.execute("DELETE FROM date_schedules WHERE id = ?", (schedule_id,))
+    await db.commit()
+    return {"status": "deleted"}
+
+
+@router.delete("/schedules/employee/{employee_id}/date/{date}")
+async def delete_schedule_by_date(
+    employee_id: int,
+    date: str,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Admin: Delete a schedule entry by employee and date."""
+    await db.execute(
+        "DELETE FROM date_schedules WHERE employee_id = ? AND date = ?",
+        (employee_id, date),
+    )
+    await db.commit()
+    return {"status": "deleted"}
+
+
+# ---------- My Schedule (Employee) ----------
+
+@router.get("/my-schedule")
+async def get_my_schedule(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Employee: Get my date-specific schedule."""
+    if user.get("role") != "employee":
+        raise HTTPException(status_code=403, detail="Employee access only")
+    emp_id = user.get("employee_id")
+    query = """SELECT id, date, start_time, end_time, location, notes
+               FROM date_schedules WHERE employee_id = ?"""
+    params: list = [emp_id]
+    if start_date:
+        query += " AND date >= ?"
+        params.append(start_date)
+    if end_date:
+        query += " AND date <= ?"
+        params.append(end_date)
+    query += " ORDER BY date"
+    cursor = await db.execute(query, params)
+    rows = await cursor.fetchall()
+    return [
+        {
+            "id": r[0],
+            "date": r[1],
+            "start_time": r[2],
+            "end_time": r[3],
+            "location": r[4],
+            "notes": r[5],
+        }
+        for r in rows
+    ]
+
+
+# ---------- Employee Self-Service: Time-Off & Notes ----------
+
+class MyTimeOffRequest(BaseModel):
+    date: str  # "YYYY-MM-DD"
+    reason: Optional[str] = None
+
+@router.get("/my-time-off")
+async def get_my_time_off(
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Employee: Get my time-off requests."""
+    if user.get("role") != "employee":
+        raise HTTPException(status_code=403, detail="Employee access only")
+    emp_id = user.get("employee_id")
+    cursor = await db.execute(
+        """SELECT id, date, reason, status, reviewed_by, created_at
+           FROM time_off_requests WHERE employee_id = ? ORDER BY date""",
+        (emp_id,),
+    )
+    rows = await cursor.fetchall()
+    return [
+        {"id": r[0], "date": r[1], "reason": r[2], "status": r[3], "reviewed_by": r[4], "created_at": r[5]}
+        for r in rows
+    ]
+
+
+@router.post("/my-time-off")
+async def submit_my_time_off(
+    req: MyTimeOffRequest,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Employee: Submit a time-off request."""
+    if user.get("role") != "employee":
+        raise HTTPException(status_code=403, detail="Employee access only")
+    emp_id = user.get("employee_id")
+    try:
+        await db.execute(
+            "INSERT INTO time_off_requests (employee_id, date, reason) VALUES (?, ?, ?)",
+            (emp_id, req.date, req.reason),
+        )
+        await db.commit()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Request already exists for this date")
+    return {"status": "created"}
+
+
+@router.delete("/my-time-off/{request_id}")
+async def cancel_my_time_off(
+    request_id: int,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Employee: Cancel a pending time-off request."""
+    if user.get("role") != "employee":
+        raise HTTPException(status_code=403, detail="Employee access only")
+    emp_id = user.get("employee_id")
+    cursor = await db.execute(
+        "SELECT status FROM time_off_requests WHERE id = ? AND employee_id = ?",
+        (request_id, emp_id),
+    )
+    row = await cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Request not found")
+    if row[0] != "pending":
+        raise HTTPException(status_code=400, detail="Can only cancel pending requests")
+    await db.execute("DELETE FROM time_off_requests WHERE id = ?", (request_id,))
+    await db.commit()
+    return {"status": "deleted"}
+
+
+@router.get("/my-schedule-notes")
+async def get_my_schedule_notes(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Employee: Get schedule notes."""
+    if user.get("role") != "employee":
+        raise HTTPException(status_code=403, detail="Employee access only")
+    query = "SELECT id, date, note, created_by, created_at FROM schedule_notes WHERE 1=1"
+    params: list = []
+    if start_date:
+        query += " AND date >= ?"
+        params.append(start_date)
+    if end_date:
+        query += " AND date <= ?"
+        params.append(end_date)
+    query += " ORDER BY date"
+    cursor = await db.execute(query, params)
+    rows = await cursor.fetchall()
+    return [
+        {"id": r[0], "date": r[1], "note": r[2], "created_by": r[3], "created_at": r[4]}
+        for r in rows
+    ]
+
+
+# ---------- Time-Off Requests ----------
+
+@router.get("/time-off")
+async def list_time_off_requests(
+    employee_id: Optional[int] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    status: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Admin: List time-off requests with optional filters."""
+    query = """
+        SELECT t.id, t.employee_id, e.name, t.date, t.reason, t.status, t.reviewed_by, t.created_at
+        FROM time_off_requests t
+        JOIN employees e ON e.id = t.employee_id
+        WHERE 1=1
+    """
+    params: list = []
+    if employee_id:
+        query += " AND t.employee_id = ?"
+        params.append(employee_id)
+    if start_date:
+        query += " AND t.date >= ?"
+        params.append(start_date)
+    if end_date:
+        query += " AND t.date <= ?"
+        params.append(end_date)
+    if status:
+        query += " AND t.status = ?"
+        params.append(status)
+    query += " ORDER BY t.date, e.name"
+
+    cursor = await db.execute(query, params)
+    rows = await cursor.fetchall()
+    return [
+        {
+            "id": r[0],
+            "employee_id": r[1],
+            "employee_name": r[2],
+            "date": r[3],
+            "reason": r[4],
+            "status": r[5],
+            "reviewed_by": r[6],
+            "created_at": r[7],
+        }
+        for r in rows
+    ]
+
+
+@router.post("/time-off")
+async def create_time_off_request(
+    req: TimeOffRequest,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Admin: Create a time-off request for an employee."""
+    cursor = await db.execute("SELECT id FROM employees WHERE id = ?", (req.employee_id,))
+    if not await cursor.fetchone():
+        raise HTTPException(status_code=404, detail="Employee not found")
+    try:
+        await db.execute(
+            "INSERT INTO time_off_requests (employee_id, date, reason) VALUES (?, ?, ?)",
+            (req.employee_id, req.date, req.reason),
+        )
+        await db.commit()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Time-off request already exists for this date")
+    return {"status": "created"}
+
+
+@router.put("/time-off/{request_id}")
+async def update_time_off_request(
+    request_id: int,
+    data: TimeOffUpdate,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Admin: Approve or deny a time-off request."""
+    if data.status not in ("approved", "denied", "pending"):
+        raise HTTPException(status_code=400, detail="Status must be approved, denied, or pending")
+    await db.execute(
+        "UPDATE time_off_requests SET status = ?, reviewed_by = ? WHERE id = ?",
+        (data.status, user.get("username", "admin"), request_id),
+    )
+    await db.commit()
+    return {"status": "updated"}
+
+
+@router.delete("/time-off/{request_id}")
+async def delete_time_off_request(
+    request_id: int,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Admin: Delete a time-off request."""
+    await db.execute("DELETE FROM time_off_requests WHERE id = ?", (request_id,))
+    await db.commit()
+    return {"status": "deleted"}
+
+
+# ---------- Schedule Notes ----------
+
+@router.get("/schedule-notes")
+async def list_schedule_notes(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Admin: List schedule notes for a date range."""
+    query = "SELECT id, date, note, created_by, created_at FROM schedule_notes WHERE 1=1"
+    params: list = []
+    if start_date:
+        query += " AND date >= ?"
+        params.append(start_date)
+    if end_date:
+        query += " AND date <= ?"
+        params.append(end_date)
+    query += " ORDER BY date"
+
+    cursor = await db.execute(query, params)
+    rows = await cursor.fetchall()
+    return [
+        {"id": r[0], "date": r[1], "note": r[2], "created_by": r[3], "created_at": r[4]}
+        for r in rows
+    ]
+
+
+@router.post("/schedule-notes")
+async def create_schedule_note(
+    data: ScheduleNoteCreate,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Admin: Add a note to a specific date."""
+    cursor = await db.execute(
+        "INSERT INTO schedule_notes (date, note, created_by) VALUES (?, ?, ?)",
+        (data.date, data.note, user.get("username", "admin")),
+    )
+    await db.commit()
+    return {"id": cursor.lastrowid, "status": "created"}
+
+
+@router.delete("/schedule-notes/{note_id}")
+async def delete_schedule_note(
+    note_id: int,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Admin: Delete a schedule note."""
+    await db.execute("DELETE FROM schedule_notes WHERE id = ?", (note_id,))
+    await db.commit()
+    return {"status": "deleted"}

@@ -83,8 +83,8 @@ export const createItem = (data: {
 export const getAgeRestrictionTypes = () =>
   api.get("/api/inventory/age-restriction-types");
 
-export const deleteItem = (sku: string) =>
-  api.delete(`/api/inventory/items/${sku}`);
+export const deleteItem = (sku: string, name?: string) =>
+  api.delete(`/api/inventory/items/${sku}`, { params: name ? { name } : undefined });
 
 export const bulkDeleteItems = (skus: string[]) =>
   api.post("/api/inventory/items/bulk-delete", { skus });
@@ -334,11 +334,126 @@ export const getMyEntries = (params?: { start_date?: string; end_date?: string }
 // Seed employees
 export const seedEmployees = () => api.post("/api/timeclock/seed-employees");
 
+// Schedules
+export const getSchedules = (params?: { employee_id?: number; start_date?: string; end_date?: string }) =>
+  api.get("/api/timeclock/schedules", { params });
+
+export const saveSchedule = (data: {
+  employee_id: number;
+  date: string;
+  start_time: string;
+  end_time: string;
+  location?: string;
+  notes?: string;
+}) => api.post("/api/timeclock/schedules", data);
+
+export const deleteScheduleByDate = (employeeId: number, date: string) =>
+  api.delete(`/api/timeclock/schedules/employee/${employeeId}/date/${date}`);
+
+export const getMySchedule = (params?: { start_date?: string; end_date?: string }) =>
+  api.get("/api/timeclock/my-schedule", { params });
+
+// Employee Self-Service: Time-Off & Notes
+export const getMyTimeOff = () => api.get("/api/timeclock/my-time-off");
+export const submitMyTimeOff = (data: { date: string; reason?: string }) =>
+  api.post("/api/timeclock/my-time-off", data);
+export const cancelMyTimeOff = (requestId: number) =>
+  api.delete(`/api/timeclock/my-time-off/${requestId}`);
+export const getMyScheduleNotes = (params?: { start_date?: string; end_date?: string }) =>
+  api.get("/api/timeclock/my-schedule-notes", { params });
+
+// Time-Off Requests
+export const getTimeOffRequests = (params?: { employee_id?: number; start_date?: string; end_date?: string; status?: string }) =>
+  api.get("/api/timeclock/time-off", { params });
+
+export const createTimeOffRequest = (data: { employee_id: number; date: string; reason?: string }) =>
+  api.post("/api/timeclock/time-off", data);
+
+export const updateTimeOffRequest = (requestId: number, status: string) =>
+  api.put(`/api/timeclock/time-off/${requestId}`, { status });
+
+export const deleteTimeOffRequest = (requestId: number) =>
+  api.delete(`/api/timeclock/time-off/${requestId}`);
+
+// Schedule Notes
+export const getScheduleNotes = (params?: { start_date?: string; end_date?: string }) =>
+  api.get("/api/timeclock/schedule-notes", { params });
+
+export const createScheduleNote = (data: { date: string; note: string }) =>
+  api.post("/api/timeclock/schedule-notes", data);
+
+export const deleteScheduleNote = (noteId: number) =>
+  api.delete(`/api/timeclock/schedule-notes/${noteId}`);
+
 // Online Orders (ecommerce)
 export const getOnlineOrders = (params?: { limit?: number; offset?: number; status?: string }) =>
   api.get("/api/ecommerce/orders", { params });
 
 export const updateOrderStatus = (orderId: number, status: string) =>
   api.patch(`/api/ecommerce/orders/${orderId}/status`, { status });
+
+export const updateOrderNotes = (orderId: number, staffNotes: string) =>
+  api.patch(`/api/ecommerce/orders/${orderId}/notes`, { staff_notes: staffNotes });
+
+// Shipping (Shippo)
+export const createShipment = (data: {
+  order_id: number;
+  parcel_length?: number;
+  parcel_width?: number;
+  parcel_height?: number;
+  parcel_weight?: number;
+  is_hazmat?: boolean;
+}) => api.post("/api/shipping/create-shipment", data);
+
+export const purchaseLabel = (data: {
+  rate_id: string;
+  order_id: number;
+  label_file_type?: string;
+}) => api.post("/api/shipping/purchase-label", data);
+
+export const getShippingLabel = (orderId: number) =>
+  api.get(`/api/shipping/label/${orderId}`);
+
+// Resend Confirmation
+export const resendOrderConfirmation = (orderId: number) =>
+  api.post(`/api/ecommerce/orders/${orderId}/resend-confirmation`);
+
+// Refunds
+export const refundOrder = (orderId: number, amount?: number) =>
+  api.post(`/api/ecommerce/orders/${orderId}/refund`, amount ? { amount } : {});
+
+// Promo / Discount Management
+export const getPromos = () => api.get("/api/ecommerce/promos");
+
+export const createPromo = (data: {
+  code: string;
+  discount_pct?: number;
+  discount_amount?: number;
+  single_use?: boolean;
+  max_uses?: number;
+  expires_at?: string | null;
+  starts_at?: string | null;
+  applies_to?: string;
+  product_ids?: string;
+  exclude_from_other_coupons?: boolean;
+  sync_to_clover?: boolean;
+}) => api.post("/api/ecommerce/promos", data);
+
+export const updatePromo = (promoId: number, data: {
+  discount_pct?: number;
+  discount_amount?: number;
+  single_use?: boolean;
+  is_active?: boolean;
+  max_uses?: number;
+  expires_at?: string | null;
+  starts_at?: string | null;
+  applies_to?: string;
+  product_ids?: string;
+  exclude_from_other_coupons?: boolean;
+  sync_to_clover?: boolean;
+}) => api.put(`/api/ecommerce/promos/${promoId}`, data);
+
+export const deletePromo = (promoId: number) =>
+  api.delete(`/api/ecommerce/promos/${promoId}`);
 
 export default api;

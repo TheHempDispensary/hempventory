@@ -16,6 +16,7 @@ from PIL import Image as PILImage
 from app.auth import get_current_user
 from app.database import get_db
 from app.clover_client import CloverClient
+from app.routers.ecommerce_router import invalidate_product_cache
 
 router = APIRouter(prefix="/api/inventory", tags=["inventory"])
 
@@ -153,7 +154,14 @@ async def _do_sync(db: aiosqlite.Connection) -> dict:
             clover_id = item.get("id", "")
             item_name = " ".join((item.get("name", "") or "").split())  # normalize whitespace
             display_sku = raw_sku or clover_id
-            merge_key = f"{display_sku}::{item_name}"
+            # When an item has no user-assigned SKU, merge by name so that
+            # the same product (e.g. item-group variants) created across
+            # multiple locations shows as ONE row with stock at each location
+            # instead of separate rows per location.
+            if raw_sku:
+                merge_key = f"{raw_sku}::{item_name}"
+            else:
+                merge_key = f"name::{item_name}"
 
             item_stock = item.get("itemStock", {})
             quantity = item_stock.get("quantity", 0) if item_stock else 0
@@ -1000,20 +1008,40 @@ async def update_item(
         for su in item.stock_updates:
             stock_map[su.location_id] = su.quantity
 
+    # Pre-fetch all location item lists so we can resolve cross-location matching.
+    # Items without user-assigned SKUs have different Clover IDs at each location,
+    # so we need to fall back to matching by normalized item name.
+    loc_items_cache: dict[int, list[dict]] = {}
+    item_name_fallback: str | None = None
+
     results = []
     for loc in locations:
         loc_id, loc_name, merchant_id, api_token = loc[0], loc[1], loc[2], loc[3]
         try:
             client = CloverClient(merchant_id, api_token)
-            # Find the item by SKU
             data = await client.get_items()
-            matching = [i for i in data.get("elements", []) if i.get("sku") == sku]
+            elements = data.get("elements", [])
+            loc_items_cache[loc_id] = elements
+
+            # Find the item by SKU
+            matching = [i for i in elements if i.get("sku") == sku]
             if not matching:
                 # Also try matching by Clover item ID
-                matching = [i for i in data.get("elements", []) if i.get("id") == sku]
+                matching = [i for i in elements if i.get("id") == sku]
+            if not matching and item_name_fallback:
+                # Fallback: match by normalized name (for items without user-assigned SKUs
+                # that have different Clover IDs at each location)
+                matching = [
+                    i for i in elements
+                    if " ".join((i.get("name", "") or "").split()) == item_name_fallback
+                ]
             if not matching:
                 results.append({"location": loc_name, "status": "not_found"})
                 continue
+
+            # Remember the item name for cross-location fallback matching
+            if not item_name_fallback and matching:
+                item_name_fallback = " ".join((matching[0].get("name", "") or "").split())
 
             # Build per-location update data (may need age restriction obj lookup)
             loc_update_data = dict(update_data)
@@ -1043,6 +1071,44 @@ async def update_item(
             results.append({"location": loc_name, "status": "error", "error": error_detail})
         except Exception as e:
             results.append({"location": loc_name, "status": "error", "error": str(e)})
+
+    # Retry any "not_found" locations now that we may have learned the item name
+    if item_name_fallback:
+        for idx, r in enumerate(results):
+            if r.get("status") != "not_found":
+                continue
+            loc_name = r["location"]
+            loc = next((l for l in locations if l[1] == loc_name), None)
+            if not loc:
+                continue
+            loc_id, _, merchant_id, api_token = loc[0], loc[1], loc[2], loc[3]
+            elements = loc_items_cache.get(loc_id, [])
+            matching = [
+                i for i in elements
+                if " ".join((i.get("name", "") or "").split()) == item_name_fallback
+            ]
+            if not matching:
+                continue
+            try:
+                client = CloverClient(merchant_id, api_token)
+                loc_update_data = dict(update_data)
+                if needs_age_obj:
+                    age_obj = await _get_age_restriction_obj(
+                        client, item.age_restriction_type,
+                        item.age_restriction_min_age or 21
+                    )
+                    if age_obj:
+                        loc_update_data["ageRestrictedObj"] = age_obj
+                    else:
+                        loc_update_data["isAgeRestricted"] = False
+                for match in matching:
+                    if has_field_updates:
+                        await client.update_item(match["id"], loc_update_data)
+                    if loc_id in stock_map:
+                        await client.update_item_stock(match["id"], stock_map[loc_id])
+                results[idx] = {"location": loc_name, "status": "updated", "count": len(matching)}
+            except Exception:
+                pass  # keep original not_found
 
     await _invalidate_cache()
     return {"results": results}
@@ -1090,6 +1156,8 @@ async def upload_image(
         for item in _inventory_cache.get("items", []):
             if item["sku"] == sku:
                 item["has_image"] = True
+    # Invalidate e-commerce product cache so website picks up new image URL
+    invalidate_product_cache()
     return {"status": "ok", "sku": sku}
 
 
@@ -1686,10 +1754,16 @@ async def bulk_assign_images(
     # Update cache in-place to reflect new images without full re-sync
     if assigned > 0:
         assigned_skus = set(matching_skus.keys())
+        # Clear processed image cache for all assigned SKUs so fresh images are served
+        for sku in assigned_skus:
+            for key in [k for k in _image_cache if k[0] == sku]:
+                del _image_cache[key]
         async with _cache_lock:
             for item in _inventory_cache.get("items", []):
                 if item["sku"] in assigned_skus:
                     item["has_image"] = True
+        # Invalidate e-commerce product cache so website picks up new image URLs
+        invalidate_product_cache()
 
     return {
         "status": "done",

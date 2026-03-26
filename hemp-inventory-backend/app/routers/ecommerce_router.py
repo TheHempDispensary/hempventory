@@ -9,10 +9,12 @@ import json
 import smtplib
 import asyncio
 import os
+from urllib.parse import quote as url_quote
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 from app.database import get_db
+from app.clover_client import CloverClient
 
 STORE_EMAIL = "Support@TheHempDispensary.com"
 
@@ -39,11 +41,11 @@ class OrderCustomer(BaseModel):
 
 
 class OrderShipping(BaseModel):
-    address: str
+    address: str = ""
     apartment: str = ""
-    city: str
-    state: str
-    zip: str
+    city: str = ""
+    state: str = ""
+    zip: str = ""
 
 
 class CreateOrderRequest(BaseModel):
@@ -51,21 +53,31 @@ class CreateOrderRequest(BaseModel):
     shipping_address: OrderShipping
     items: List[OrderItem]
     subtotal: int = 0
+    discount: int = 0
     shipping_cost: int = 0
     tax: int = 0
     total: int = 0
     notes: str = ""
     payment_token: str = ""
     loyalty_number: str = ""
+    promo_code: Optional[str] = None
+    shipping_service: str = ""
+    fulfillment_type: str = "shipping"  # "shipping", "pickup_west", "pickup_east"
 
 router = APIRouter(prefix="/api/ecommerce", tags=["ecommerce"])
 
 # HQ location Clover credentials (public endpoint - no auth required)
-HQ_MERCHANT_ID = "0AJ4FF0G1YFM1"
-HQ_API_TOKEN = "9a06267a-6998-3f5a-521c-ca235f704856"
-HQ_ECOMM_TOKEN = "81e997e6-89d0-0ff7-522d-d195e6cd9138"
+HQ_MERCHANT_ID = os.environ.get("CLOVER_HQ_MERCHANT_ID", "0AJ4FF0G1YFM1")
+HQ_API_TOKEN = os.environ.get("CLOVER_HQ_API_TOKEN", "9a06267a-6998-3f5a-521c-ca235f704856")
+HQ_ECOMM_TOKEN = os.environ.get("CLOVER_HQ_ECOMM_TOKEN", "81e997e6-89d0-0ff7-522d-d195e6cd9138")
 CLOVER_BASE_URL = "https://api.clover.com/v3"
 CLOVER_CHARGES_URL = "https://scl.clover.com/v1/charges"
+
+# Store location Clover credentials for pickup orders & stock lookup
+WEST_MERCHANT_ID = os.environ.get("CLOVER_WEST_MERCHANT_ID", "")
+WEST_API_TOKEN = os.environ.get("CLOVER_WEST_API_TOKEN", "")
+EAST_MERCHANT_ID = os.environ.get("CLOVER_EAST_MERCHANT_ID", "")
+EAST_API_TOKEN = os.environ.get("CLOVER_EAST_API_TOKEN", "")
 
 # ── In-memory product cache ──────────────────────────────────────────────────
 _product_cache: dict = {}  # {"products": [...], "total": int, "categories": [...]}
@@ -73,7 +85,25 @@ _product_cache_json: bytes = b""  # Pre-serialized JSON for the full /products r
 _cache_timestamp: float = 0.0
 _refresh_in_progress: bool = False
 CACHE_TTL = 600  # 10 minutes
+
+
 DISK_CACHE_PATH = os.environ.get("DB_PATH", "").replace("app.db", "product_cache.json") or "/tmp/product_cache.json"
+
+
+def invalidate_product_cache():
+    """Invalidate ALL product cache layers so the next request fetches fresh data.
+    Called from inventory_router when images are uploaded/changed."""
+    global _product_cache, _product_cache_json, _cache_timestamp
+    _cache_timestamp = 0  # Force refresh on next request
+    _product_cache_json = b""  # Clear pre-serialized JSON so fast path doesn't serve stale data
+    _product_cache = {}  # Clear cached dict so _get_cached_products does a full re-fetch
+    # Delete disk cache so it doesn't reload stale data
+    try:
+        if os.path.exists(DISK_CACHE_PATH):
+            os.remove(DISK_CACHE_PATH)
+            print("[cache] Disk cache deleted after image update")
+    except Exception as e:
+        print(f"[cache] Failed to delete disk cache: {e}")
 
 
 async def _load_disk_cache() -> bool:
@@ -111,6 +141,39 @@ def _save_disk_cache(result: dict) -> None:
 _fetch_event: Optional[asyncio.Event] = None  # Signals when an in-flight fetch completes
 
 
+async def _fetch_location_stock(client: httpx.AsyncClient, merchant_id: str, api_token: str, label: str) -> dict[str, int]:
+    """Fetch stock quantities from a Clover location. Returns {sku_or_name: quantity}."""
+    stock_map: dict[str, int] = {}
+    try:
+        base = f"{CLOVER_BASE_URL}/merchants/{merchant_id}"
+        headers = {"Authorization": f"Bearer {api_token}"}
+        offset = 0
+        while True:
+            resp = await client.get(
+                f"{base}/items",
+                headers=headers,
+                params={"expand": "itemStock", "limit": 1000, "offset": offset, "filter": "deleted=false"},
+            )
+            resp.raise_for_status()
+            elements = resp.json().get("elements", [])
+            for item in elements:
+                sku = item.get("sku", "") or ""
+                name = " ".join((item.get("name", "") or "").split())
+                key = sku if sku else name
+                if not key:
+                    continue
+                stock_info = item.get("itemStock", {})
+                qty = stock_info.get("quantity", 0) if stock_info else 0
+                stock_map[key] = stock_map.get(key, 0) + qty
+            if len(elements) < 1000:
+                break
+            offset += 1000
+        print(f"[cache] {label} stock: {len(stock_map)} items")
+    except Exception as e:
+        print(f"[cache] Failed to fetch {label} stock: {e}")
+    return stock_map
+
+
 async def _fetch_and_cache_products() -> dict:
     """Fetch all products from Clover API + image DB and cache in memory."""
     global _product_cache, _product_cache_json, _cache_timestamp, _refresh_in_progress, _fetch_event
@@ -127,31 +190,35 @@ async def _fetch_and_cache_products() -> dict:
         base = f"{CLOVER_BASE_URL}/merchants/{HQ_MERCHANT_ID}"
         headers = {"Authorization": f"Bearer {HQ_API_TOKEN}"}
 
-        # Sequential pagination — avoids Clover 429 rate limits
         async with httpx.AsyncClient(timeout=120.0) as client:
-            all_items: list = []
-            current_offset = 0
-            while True:
-                resp = await client.get(
-                    f"{base}/items",
-                    headers=headers,
-                    params={
-                        "expand": "categories,itemStock",
-                        "limit": 1000,
-                        "offset": current_offset,
-                        "filter": "deleted=false",
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                elements = data.get("elements", [])
-                all_items.extend(elements)
-                if len(elements) < 1000:
-                    break
-                current_offset += 1000
+            # Fetch HQ items + West/East stock in parallel
+            async def _fetch_hq() -> list:
+                all_items: list = []
+                current_offset = 0
+                while True:
+                    resp = await client.get(
+                        f"{base}/items",
+                        headers=headers,
+                        params={"expand": "categories,itemStock", "limit": 1000, "offset": current_offset, "filter": "deleted=false"},
+                    )
+                    resp.raise_for_status()
+                    elements = resp.json().get("elements", [])
+                    all_items.extend(elements)
+                    if len(elements) < 1000:
+                        break
+                    current_offset += 1000
+                return all_items
+
+            hq_task = asyncio.ensure_future(_fetch_hq())
+            west_task = asyncio.ensure_future(_fetch_location_stock(client, WEST_MERCHANT_ID, WEST_API_TOKEN, "West")) if WEST_MERCHANT_ID and WEST_API_TOKEN else None
+            east_task = asyncio.ensure_future(_fetch_location_stock(client, EAST_MERCHANT_ID, EAST_API_TOKEN, "East")) if EAST_MERCHANT_ID and EAST_API_TOKEN else None
+
+            all_items = await hq_task
+            west_stock = await west_task if west_task else {}
+            east_stock = await east_task if east_task else {}
 
         fetch_time = time.time() - start_time
-        print(f"[cache] Clover API fetched {len(all_items)} items in {fetch_time:.1f}s")
+        print(f"[cache] Clover API fetched {len(all_items)} HQ items in {fetch_time:.1f}s")
 
         # Get image map from our database
         from app.database import DB_PATH
@@ -162,11 +229,11 @@ async def _fetch_and_cache_products() -> dict:
             image_rows = await cursor.fetchall()
         finally:
             await db.close()
-        image_by_sku = {row[0]: f"{image_base_url}/{row[0]}?v=2&t={row[2] or ''}" for row in image_rows}
+        image_by_sku = {row[0]: f"{image_base_url}/{url_quote(row[0], safe='')}?v=2&t={str(row[2] or '').replace(' ', '_')}" for row in image_rows}
         image_by_name = {}
         for row in image_rows:
             if row[1]:
-                image_by_name[row[1].upper()] = f"{image_base_url}/{row[0]}?v=2&t={row[2] or ''}"
+                image_by_name[row[1].upper()] = f"{image_base_url}/{url_quote(row[0], safe='')}?v=2&t={str(row[2] or '').replace(' ', '_')}"
 
         products = []
         categories_set: set = set()
@@ -180,9 +247,20 @@ async def _fetch_and_cache_products() -> dict:
             price = item.get("price", 0)
             item_categories = [c.get("name", "") for c in item.get("categories", {}).get("elements", [])]
             stock_info = item.get("itemStock", {})
-            stock = stock_info.get("quantity", 0) if stock_info else 0
+            hq_stock = stock_info.get("quantity", 0) if stock_info else 0
             description = item.get("description", "")
             online_name = item.get("onlineName", "") or name
+
+            # Look up stock at West and East by SKU first, then by name
+            lookup_key = sku if sku else name
+            w_stock = west_stock.get(lookup_key, 0)
+            e_stock = east_stock.get(lookup_key, 0)
+            if w_stock == 0 and sku:
+                normalized_name = " ".join(name.split())
+                w_stock = west_stock.get(normalized_name, 0)
+            if e_stock == 0 and sku:
+                normalized_name = " ".join(name.split())
+                e_stock = east_stock.get(normalized_name, 0)
 
             for cat in item_categories:
                 categories_set.add(cat)
@@ -197,6 +275,21 @@ async def _fetch_and_cache_products() -> dict:
             # LeafLife products (SKU starts with LF-) are shipped from supplier, not available for pickup
             is_shipping_only = sku.startswith("LF-") if isinstance(sku, str) else False
 
+            # Enforce minimum price floors for LeafLife products by weight
+            if is_shipping_only:
+                sku_upper = sku.upper()
+                name_upper = name.upper()
+                if sku_upper.endswith("-28") or "28 GRAM" in name_upper:
+                    price = max(price, 10000)  # $100.00 minimum for 28g
+                elif sku_upper.endswith("-14") or "14 GRAM" in name_upper:
+                    price = max(price, 9500)   # $95.00 minimum for 14g
+                elif sku_upper.endswith("-7 G") or sku_upper.endswith("-7G") or "7 GRAM" in name_upper:
+                    price = max(price, 5500)   # $55.00 minimum for 7g
+                elif sku_upper.endswith("-3.5") or "3.5 GRAM" in name_upper:
+                    price = max(price, 2500)   # $25.00 minimum for 3.5g
+
+            total_stock = max(hq_stock, w_stock, e_stock)
+
             products.append({
                 "id": item.get("id", ""),
                 "name": name,
@@ -206,8 +299,11 @@ async def _fetch_and_cache_products() -> dict:
                 "price": price,
                 "description": description,
                 "categories": item_categories,
-                "stock": stock,
-                "available": item.get("available", True) and stock > 0,
+                "stock": total_stock,
+                "stock_hq": hq_stock,
+                "stock_west": w_stock,
+                "stock_east": e_stock,
+                "available": item.get("available", True) and total_stock > 0,
                 "image_url": image_url,
                 "is_age_restricted": item.get("isAgeRestricted", False),
                 "shipping_only": is_shipping_only,
@@ -329,6 +425,266 @@ async def refresh_products():
     return {"status": "refreshed", "total": result["total"], "categories": result["categories"]}
 
 
+class ValidatePromoRequest(BaseModel):
+    promo_code: str
+    email: str
+
+
+@router.post("/validate-promo")
+async def validate_promo(
+    body: ValidatePromoRequest,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Public endpoint: Validate a promo code and check if customer can use it."""
+    code = body.promo_code.strip().upper()
+    email = body.email.strip().lower()
+
+    cursor = await db.execute("SELECT * FROM promo_codes WHERE code = ? AND is_active = 1", (code,))
+    promo = await cursor.fetchone()
+    if not promo:
+        return {"valid": False, "reason": "Invalid promo code"}
+
+    # Check expiration
+    from datetime import datetime
+    if promo["expires_at"]:
+        try:
+            exp = datetime.fromisoformat(promo["expires_at"])
+            if datetime.utcnow() > exp:
+                return {"valid": False, "reason": "This promo code has expired"}
+        except Exception:
+            pass
+
+    # Check start date
+    starts_at = promo["starts_at"] if "starts_at" in promo.keys() else None
+    if starts_at:
+        try:
+            start = datetime.fromisoformat(starts_at)
+            if datetime.utcnow() < start:
+                return {"valid": False, "reason": "This promo code is not yet active"}
+        except Exception:
+            pass
+
+    # Check max uses
+    if promo["max_uses"] > 0 and promo["times_used"] >= promo["max_uses"]:
+        return {"valid": False, "reason": "This promo code has reached its usage limit"}
+
+    # Check single-use per customer
+    if promo["single_use"] and email:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM ecommerce_orders WHERE LOWER(customer_email) = ? AND promo_code = ? AND payment_status != 'cancelled'",
+            (email, code),
+        )
+        count = (await cursor.fetchone())[0]
+        if count > 0:
+            return {"valid": False, "reason": "This promo code has already been used with this email address"}
+
+    applies_to = promo["applies_to"] if "applies_to" in promo.keys() else "all"
+    product_ids = promo["product_ids"] if "product_ids" in promo.keys() else ""
+    exclude_coupons = bool(promo["exclude_from_other_coupons"]) if "exclude_from_other_coupons" in promo.keys() else False
+
+    return {
+        "valid": True,
+        "discount_pct": promo["discount_pct"],
+        "discount_amount": promo["discount_amount"],
+        "code": code,
+        "applies_to": applies_to,
+        "product_ids": product_ids,
+        "exclude_from_other_coupons": exclude_coupons,
+    }
+
+
+# ── Promo Code Management (Admin) ────────────────────────────────────────────
+
+@router.get("/promos")
+async def list_promos(db: aiosqlite.Connection = Depends(get_db)):
+    """Admin: List all promo codes."""
+    cursor = await db.execute("SELECT * FROM promo_codes ORDER BY created_at DESC")
+    rows = await cursor.fetchall()
+    # Count usage from orders for each promo
+    promos = []
+    for row in rows:
+        cursor2 = await db.execute(
+            "SELECT COUNT(*) FROM ecommerce_orders WHERE promo_code = ? AND payment_status != 'cancelled'",
+            (row["code"],),
+        )
+        order_count = (await cursor2.fetchone())[0]
+        promos.append({
+            "id": row["id"],
+            "code": row["code"],
+            "discount_pct": row["discount_pct"],
+            "discount_amount": row["discount_amount"],
+            "single_use": bool(row["single_use"]),
+            "is_active": bool(row["is_active"]),
+            "max_uses": row["max_uses"],
+            "times_used": order_count,
+            "expires_at": row["expires_at"],
+            "starts_at": row["starts_at"] if "starts_at" in row.keys() else None,
+            "applies_to": row["applies_to"] if "applies_to" in row.keys() else "all",
+            "product_ids": row["product_ids"] if "product_ids" in row.keys() else "",
+            "exclude_from_other_coupons": bool(row["exclude_from_other_coupons"]) if "exclude_from_other_coupons" in row.keys() else False,
+            "clover_discount_id": row["clover_discount_id"] if "clover_discount_id" in row.keys() else "",
+            "created_at": row["created_at"],
+        })
+    return promos
+
+
+class PromoCreateRequest(BaseModel):
+    code: str
+    discount_pct: float = 0
+    discount_amount: int = 0
+    single_use: bool = False
+    max_uses: int = 0
+    expires_at: Optional[str] = None
+    starts_at: Optional[str] = None
+    applies_to: str = "all"  # "all", "specific", or "individual"
+    product_ids: str = ""  # comma-separated Clover item IDs
+    exclude_from_other_coupons: bool = False
+    sync_to_clover: bool = False
+
+
+async def _get_hq_clover_client(db: aiosqlite.Connection) -> Optional[CloverClient]:
+    """Get CloverClient for HQ location."""
+    cursor = await db.execute("SELECT merchant_id, api_token FROM locations WHERE name LIKE '%HQ%' OR id = 1 LIMIT 1")
+    row = await cursor.fetchone()
+    if row and row["merchant_id"] and row["api_token"]:
+        return CloverClient(row["merchant_id"], row["api_token"])
+    return None
+
+
+@router.post("/promos")
+async def create_promo(body: PromoCreateRequest, db: aiosqlite.Connection = Depends(get_db)):
+    """Admin: Create a new promo code."""
+    code = body.code.strip().upper()
+    clover_discount_id = ""
+
+    # Sync to Clover POS if requested
+    if body.sync_to_clover:
+        try:
+            client = await _get_hq_clover_client(db)
+            if client:
+                pct = int(round(body.discount_pct * 100)) if body.discount_pct > 0 else 0
+                amt = body.discount_amount if body.discount_amount > 0 else 0
+                result = await client.create_discount(name=code, percentage=pct, amount=amt)
+                clover_discount_id = result.get("id", "")
+        except Exception as e:
+            print(f"[promo] Clover sync failed: {e}")
+
+    try:
+        await db.execute(
+            """INSERT INTO promo_codes (code, discount_pct, discount_amount, single_use, max_uses,
+               expires_at, starts_at, applies_to, product_ids, exclude_from_other_coupons, clover_discount_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (code, body.discount_pct, body.discount_amount, int(body.single_use), body.max_uses,
+             body.expires_at, body.starts_at, body.applies_to, body.product_ids,
+             int(body.exclude_from_other_coupons), clover_discount_id),
+        )
+        await db.commit()
+    except Exception:
+        raise HTTPException(status_code=400, detail=f"Promo code '{code}' already exists")
+    return {"status": "created", "code": code, "clover_discount_id": clover_discount_id}
+
+
+class PromoUpdateRequest(BaseModel):
+    discount_pct: Optional[float] = None
+    discount_amount: Optional[int] = None
+    single_use: Optional[bool] = None
+    is_active: Optional[bool] = None
+    max_uses: Optional[int] = None
+    expires_at: Optional[str] = None
+    starts_at: Optional[str] = None
+    applies_to: Optional[str] = None
+    product_ids: Optional[str] = None
+    exclude_from_other_coupons: Optional[bool] = None
+    sync_to_clover: bool = False
+
+
+@router.put("/promos/{promo_id}")
+async def update_promo(promo_id: int, body: PromoUpdateRequest, db: aiosqlite.Connection = Depends(get_db)):
+    """Admin: Update an existing promo code."""
+    updates = []
+    params = []
+    if body.discount_pct is not None:
+        updates.append("discount_pct = ?")
+        params.append(body.discount_pct)
+    if body.discount_amount is not None:
+        updates.append("discount_amount = ?")
+        params.append(body.discount_amount)
+    if body.single_use is not None:
+        updates.append("single_use = ?")
+        params.append(int(body.single_use))
+    if body.is_active is not None:
+        updates.append("is_active = ?")
+        params.append(int(body.is_active))
+    if body.max_uses is not None:
+        updates.append("max_uses = ?")
+        params.append(body.max_uses)
+    if body.expires_at is not None:
+        updates.append("expires_at = ?")
+        params.append(body.expires_at if body.expires_at else None)
+    if body.starts_at is not None:
+        updates.append("starts_at = ?")
+        params.append(body.starts_at if body.starts_at else None)
+    if body.applies_to is not None:
+        updates.append("applies_to = ?")
+        params.append(body.applies_to)
+    if body.product_ids is not None:
+        updates.append("product_ids = ?")
+        params.append(body.product_ids)
+    if body.exclude_from_other_coupons is not None:
+        updates.append("exclude_from_other_coupons = ?")
+        params.append(int(body.exclude_from_other_coupons))
+    if not updates:
+        return {"status": "no changes"}
+    params.append(promo_id)
+    await db.execute(f"UPDATE promo_codes SET {', '.join(updates)} WHERE id = ?", params)
+    await db.commit()
+
+    # Sync to Clover POS if requested
+    if body.sync_to_clover:
+        try:
+            cursor = await db.execute("SELECT * FROM promo_codes WHERE id = ?", (promo_id,))
+            promo = await cursor.fetchone()
+            if promo:
+                client = await _get_hq_clover_client(db)
+                if client:
+                    clover_id = promo["clover_discount_id"] if "clover_discount_id" in promo.keys() else ""
+                    pct_val = body.discount_pct if body.discount_pct is not None else promo["discount_pct"]
+                    amt_val = body.discount_amount if body.discount_amount is not None else promo["discount_amount"]
+                    pct = int(round(pct_val * 100)) if pct_val > 0 else 0
+                    amt = amt_val if amt_val > 0 else 0
+                    if clover_id:
+                        await client.update_discount(clover_id, name=promo["code"], percentage=pct, amount=amt)
+                    else:
+                        result = await client.create_discount(name=promo["code"], percentage=pct, amount=amt)
+                        new_id = result.get("id", "")
+                        if new_id:
+                            await db.execute("UPDATE promo_codes SET clover_discount_id = ? WHERE id = ?", (new_id, promo_id))
+                            await db.commit()
+        except Exception as e:
+            print(f"[promo] Clover sync failed: {e}")
+
+    return {"status": "updated"}
+
+
+@router.delete("/promos/{promo_id}")
+async def delete_promo(promo_id: int, db: aiosqlite.Connection = Depends(get_db)):
+    """Admin: Delete a promo code (also removes from Clover POS if synced)."""
+    cursor = await db.execute("SELECT * FROM promo_codes WHERE id = ?", (promo_id,))
+    promo = await cursor.fetchone()
+    if promo:
+        clover_id = promo["clover_discount_id"] if "clover_discount_id" in promo.keys() else ""
+        if clover_id:
+            try:
+                client = await _get_hq_clover_client(db)
+                if client:
+                    await client.delete_discount(clover_id)
+            except Exception as e:
+                print(f"[promo] Clover delete failed: {e}")
+    await db.execute("DELETE FROM promo_codes WHERE id = ?", (promo_id,))
+    await db.commit()
+    return {"status": "deleted"}
+
+
 @router.post("/orders")
 async def create_order(
     order: CreateOrderRequest,
@@ -365,14 +721,19 @@ async def create_order(
             "ecomind": "ecom",
         }
 
+        # Always use HQ for payment processing since the card token is generated with HQ's PAKMS key.
+        # Stock deduction to the correct location (West/East/HQ) is handled separately after order creation.
+        order_merchant_id = HQ_MERCHANT_ID
+        order_api_token = HQ_API_TOKEN
+
         async with httpx.AsyncClient(timeout=30.0) as client:
             # Create a Clover order with line items so the receipt shows actual products
             try:
                 clover_order_headers = {
-                    "Authorization": f"Bearer {HQ_API_TOKEN}",
+                    "Authorization": f"Bearer {order_api_token}",
                     "Content-Type": "application/json",
                 }
-                clover_order_url = f"{CLOVER_BASE_URL}/merchants/{HQ_MERCHANT_ID}/orders"
+                clover_order_url = f"{CLOVER_BASE_URL}/merchants/{order_merchant_id}/orders"
                 order_body = {
                     "state": "open",
                     "manualTransaction": False,
@@ -434,8 +795,8 @@ async def create_order(
         """INSERT INTO ecommerce_orders
            (order_number, customer_first_name, customer_last_name, customer_email, customer_phone,
             shipping_address, shipping_apartment, shipping_city, shipping_state, shipping_zip,
-            subtotal, shipping_cost, tax, total, notes, charge_id, payment_status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            subtotal, discount, promo_code, shipping_cost, tax, total, notes, charge_id, payment_status, fulfillment_type, shipping_service)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             order_number,
             order.customer.first_name,
@@ -448,12 +809,16 @@ async def create_order(
             order.shipping_address.state,
             order.shipping_address.zip,
             order.subtotal,
+            order.discount,
+            order.promo_code or "",
             order.shipping_cost,
             order.tax,
             order.total,
             order.notes,
             charge_id,
             payment_status,
+            order.fulfillment_type,
+            order.shipping_service,
         ),
     )
     order_id = cursor.lastrowid
@@ -475,6 +840,11 @@ async def create_order(
         _send_order_emails(smtp_settings, order, order_number, charge_id, payment_status)
     )
 
+    # Deduct stock from correct Clover location based on fulfillment type (non-blocking)
+    asyncio.create_task(
+        _deduct_stock_for_order(order.items, order.fulfillment_type)
+    )
+
     return {
         "success": True,
         "order_number": order_number,
@@ -488,6 +858,62 @@ async def create_order(
 def _format_price(cents: int) -> str:
     """Format cents as dollar string."""
     return f"${cents / 100:.2f}"
+
+
+async def _deduct_stock_for_order(items: List[OrderItem], fulfillment_type: str = "shipping") -> None:
+    """Deduct stock from the correct Clover location based on fulfillment type."""
+    try:
+        if fulfillment_type == "pickup_west" and WEST_MERCHANT_ID and WEST_API_TOKEN:
+            merchant_id = WEST_MERCHANT_ID
+            api_token = WEST_API_TOKEN
+        elif fulfillment_type == "pickup_east" and EAST_MERCHANT_ID and EAST_API_TOKEN:
+            merchant_id = EAST_MERCHANT_ID
+            api_token = EAST_API_TOKEN
+        else:
+            merchant_id = HQ_MERCHANT_ID
+            api_token = HQ_API_TOKEN
+        base = f"{CLOVER_BASE_URL}/merchants/{merchant_id}"
+        headers = {"Authorization": f"Bearer {api_token}"}
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for item in items:
+                clover_item_id = item.product_id
+                if not clover_item_id:
+                    print(f"[stock] Skipping stock deduction for '{item.name}' — no product_id")
+                    continue
+
+                try:
+                    # Get current stock
+                    resp = await client.get(
+                        f"{base}/item_stocks/{clover_item_id}",
+                        headers=headers,
+                    )
+                    if resp.status_code != 200:
+                        print(f"[stock] Could not get stock for {clover_item_id} ({item.name}): {resp.status_code}")
+                        continue
+
+                    stock_data = resp.json()
+                    current_stock = stock_data.get("quantity", 0)
+                    new_stock = max(0, current_stock - item.quantity)
+
+                    # Update stock
+                    update_resp = await client.post(
+                        f"{base}/item_stocks/{clover_item_id}",
+                        headers={**headers, "Content-Type": "application/json"},
+                        json={"quantity": new_stock},
+                    )
+                    if update_resp.status_code in (200, 201):
+                        print(f"[stock] Deducted {item.quantity} from '{item.name}' ({clover_item_id}): {current_stock} -> {new_stock}")
+                    else:
+                        print(f"[stock] Failed to update stock for {clover_item_id}: {update_resp.status_code} {update_resp.text[:200]}")
+                except Exception as e:
+                    print(f"[stock] Error deducting stock for '{item.name}': {e}")
+
+        # Invalidate product cache so website shows updated stock
+        invalidate_product_cache()
+        print(f"[stock] Stock deduction complete for {len(items)} item(s), cache invalidated")
+    except Exception as e:
+        print(f"[stock] Stock deduction task failed: {e}")
 
 
 async def _get_smtp_settings(db: aiosqlite.Connection) -> dict[str, str]:
@@ -567,10 +993,20 @@ async def _send_order_emails(
             </tr>
             """
 
-        shipping_line = f"{order.shipping_address.address}"
-        if order.shipping_address.apartment:
-            shipping_line += f", {order.shipping_address.apartment}"
-        shipping_line += f"<br>{order.shipping_address.city}, {order.shipping_address.state} {order.shipping_address.zip}"
+        is_pickup = order.fulfillment_type and order.fulfillment_type.startswith("pickup")
+        if is_pickup:
+            if order.fulfillment_type == "pickup_west":
+                shipping_label = "Pickup Location"
+                shipping_line = "The Hemp Dispensary — West<br>6175 Deltona Blvd, Suite 104<br>Spring Hill, FL 34606"
+            else:
+                shipping_label = "Pickup Location"
+                shipping_line = "The Hemp Dispensary — East<br>14312 Spring Hill Dr<br>Spring Hill, FL 34609"
+        else:
+            shipping_label = "Shipping To"
+            shipping_line = f"{order.shipping_address.address}"
+            if order.shipping_address.apartment:
+                shipping_line += f", {order.shipping_address.apartment}"
+            shipping_line += f"<br>{order.shipping_address.city}, {order.shipping_address.state} {order.shipping_address.zip}"
 
         # --- Store notification email ---
         store_html = f"""
@@ -600,7 +1036,7 @@ async def _send_order_emails(
                         <td style="padding: 10px 12px;">{order.customer.phone}</td>
                     </tr>
                     <tr style="background: #f3f4f6;">
-                        <td style="padding: 10px 12px; font-weight: bold;">Shipping To</td>
+                        <td style="padding: 10px 12px; font-weight: bold;">{shipping_label}</td>
                         <td style="padding: 10px 12px;">{shipping_line}</td>
                     </tr>
                     <tr>
@@ -629,6 +1065,7 @@ async def _send_order_emails(
                         <td style="padding: 8px 12px;">Subtotal</td>
                         <td style="padding: 8px 12px; text-align: right;">{_format_price(order.subtotal)}</td>
                     </tr>
+                    {f'<tr><td style="padding: 8px 12px; color: #059669;">Discount ({order.promo_code})</td><td style="padding: 8px 12px; text-align: right; color: #059669;">-{_format_price(order.discount)}</td></tr>' if order.discount else ''}
                     <tr>
                         <td style="padding: 8px 12px;">Shipping</td>
                         <td style="padding: 8px 12px; text-align: right;">{'Free' if order.shipping_cost == 0 else _format_price(order.shipping_cost)}</td>
@@ -652,17 +1089,24 @@ async def _send_order_emails(
         </html>
         """
 
-        # Send to store
+        # Send to store — route to location-specific email for pickup orders
+        if order.fulfillment_type == "pickup_west":
+            store_recipient = "west@thehempdispensary.com"
+        elif order.fulfillment_type == "pickup_east":
+            store_recipient = "east@thehempdispensary.com"
+        else:
+            store_recipient = STORE_EMAIL
+
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(
             None,
             _send_smtp_email,
             smtp_settings,
-            STORE_EMAIL,
+            store_recipient,
             f"New Order {order_number} — {_format_price(order.total)} from {order.customer.first_name} {order.customer.last_name}",
             store_html,
         )
-        print(f"Store notification sent to {STORE_EMAIL} for order {order_number}")
+        print(f"Store notification sent to {store_recipient} for order {order_number}")
 
         # --- Customer confirmation email ---
         customer_html = f"""
@@ -685,7 +1129,7 @@ async def _send_order_emails(
                         <td style="padding: 10px 12px; color: #059669; font-weight: bold;">Paid</td>
                     </tr>
                     <tr style="background: #f3f4f6;">
-                        <td style="padding: 10px 12px; font-weight: bold;">Shipping To</td>
+                        <td style="padding: 10px 12px; font-weight: bold;">{shipping_label}</td>
                         <td style="padding: 10px 12px;">{shipping_line}</td>
                     </tr>
                 </table>
@@ -710,6 +1154,7 @@ async def _send_order_emails(
                         <td style="padding: 8px 12px;">Subtotal</td>
                         <td style="padding: 8px 12px; text-align: right;">{_format_price(order.subtotal)}</td>
                     </tr>
+                    {f'<tr><td style="padding: 8px 12px; color: #059669;">Discount ({order.promo_code})</td><td style="padding: 8px 12px; text-align: right; color: #059669;">-{_format_price(order.discount)}</td></tr>' if order.discount else ''}
                     <tr>
                         <td style="padding: 8px 12px;">Shipping</td>
                         <td style="padding: 8px 12px; text-align: right;">{'Free' if order.shipping_cost == 0 else _format_price(order.shipping_cost)}</td>
@@ -788,7 +1233,7 @@ async def get_product_detail(product_id: str):
         row = await cursor.fetchone()
     finally:
         await db.close()
-    image_url = f"{image_base_url}/{row[0]}?v=2&t={row[1] or ''}" if row else None
+    image_url = f"{image_base_url}/{url_quote(row[0], safe='')}?v=2&t={str(row[1] or '').replace(' ', '_')}" if row else None
 
     is_shipping_only = sku.startswith("LF-") if isinstance(sku, str) else False
 
@@ -896,3 +1341,295 @@ async def update_order_status(
     )
     await db.commit()
     return {"success": True, "order_id": order_id, "status": new_status}
+
+
+@router.patch("/orders/{order_id}/notes")
+async def update_order_notes(
+    order_id: int,
+    request: Request,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Update an order's staff notes (requires admin auth)."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    import jwt
+    token = auth.split(" ", 1)[1]
+    jwt_secret = os.environ.get("JWT_SECRET", "hemp-inventory-secret-key")
+    try:
+        jwt.decode(token, jwt_secret, algorithms=["HS256"])
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    body = await request.json()
+    staff_notes = body.get("staff_notes", "")
+
+    await db.execute(
+        "UPDATE ecommerce_orders SET staff_notes = ? WHERE id = ?",
+        (staff_notes, order_id),
+    )
+    await db.commit()
+    return {"success": True, "order_id": order_id, "staff_notes": staff_notes}
+
+
+@router.post("/orders/{order_id}/resend-confirmation")
+async def resend_order_confirmation(
+    order_id: int,
+    request: Request,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Resend order confirmation email to customer (requires admin auth)."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    import jwt
+    token = auth.split(" ", 1)[1]
+    jwt_secret = os.environ.get("JWT_SECRET", "hemp-inventory-secret-key")
+    try:
+        jwt.decode(token, jwt_secret, algorithms=["HS256"])
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    # Get order details
+    cursor = await db.execute("SELECT * FROM ecommerce_orders WHERE id = ?", (order_id,))
+    columns = [desc[0] for desc in cursor.description]
+    row = await cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Order not found")
+    order = dict(zip(columns, row))
+
+    customer_email = order.get("customer_email", "")
+    if not customer_email:
+        raise HTTPException(status_code=400, detail="No customer email on this order")
+
+    # Get order items
+    item_cursor = await db.execute(
+        "SELECT product_name, price, quantity FROM ecommerce_order_items WHERE order_id = ?",
+        (order_id,),
+    )
+    item_cols = [desc[0] for desc in item_cursor.description]
+    item_rows = await item_cursor.fetchall()
+    items = [dict(zip(item_cols, r)) for r in item_rows]
+
+    # Build items HTML
+    items_html = ""
+    for item in items:
+        line_total = item["price"] * item["quantity"]
+        items_html += f"""
+        <tr>
+            <td style="padding: 10px 12px; border-bottom: 1px solid #e5e7eb;">{item["product_name"]}</td>
+            <td style="padding: 10px 12px; border-bottom: 1px solid #e5e7eb; text-align: center;">{item["quantity"]}</td>
+            <td style="padding: 10px 12px; border-bottom: 1px solid #e5e7eb; text-align: right;">{_format_price(item["price"])}</td>
+            <td style="padding: 10px 12px; border-bottom: 1px solid #e5e7eb; text-align: right;">{_format_price(line_total)}</td>
+        </tr>
+        """
+
+    shipping_line = order.get("shipping_address", "")
+    if order.get("shipping_apartment"):
+        shipping_line += f", {order['shipping_apartment']}"
+    shipping_line += f"<br>{order.get('shipping_city', '')}, {order.get('shipping_state', '')} {order.get('shipping_zip', '')}"
+
+    order_number = order.get("order_number", f"THD-{order_id}")
+    first_name = order.get("customer_first_name", "Customer")
+    subtotal = order.get("subtotal", 0)
+    discount = order.get("discount", 0)
+    promo_code = order.get("promo_code", "")
+    shipping_cost = order.get("shipping_cost", 0)
+    tax = order.get("tax", 0)
+    total = order.get("total", 0)
+
+    customer_html = f"""
+    <html>
+    <body style="font-family: 'Helvetica Neue', Arial, sans-serif; color: #1f2937; max-width: 600px; margin: 0 auto;">
+        <div style="background: #065f46; padding: 20px; text-align: center;">
+            <h1 style="color: white; margin: 0; font-size: 22px;">Order Confirmed!</h1>
+        </div>
+        <div style="padding: 24px; background: #f9fafb;">
+            <p style="font-size: 16px;">Hi {first_name},</p>
+            <p>Thank you for your order! Your payment has been processed successfully.</p>
+
+            <table style="width: 100%; margin: 16px 0; background: white; border-radius: 8px; overflow: hidden;">
+                <tr style="background: #f3f4f6;">
+                    <td style="padding: 10px 12px; font-weight: bold;">Order Number</td>
+                    <td style="padding: 10px 12px;">{order_number}</td>
+                </tr>
+                <tr>
+                    <td style="padding: 10px 12px; font-weight: bold;">Payment Status</td>
+                    <td style="padding: 10px 12px; color: #059669; font-weight: bold;">Paid</td>
+                </tr>
+                <tr style="background: #f3f4f6;">
+                    <td style="padding: 10px 12px; font-weight: bold;">Shipping To</td>
+                    <td style="padding: 10px 12px;">{shipping_line}</td>
+                </tr>
+            </table>
+
+            <h3>Your Items</h3>
+            <table style="width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden;">
+                <thead>
+                    <tr style="background: #065f46; color: white;">
+                        <th style="padding: 10px 12px; text-align: left;">Product</th>
+                        <th style="padding: 10px 12px; text-align: center;">Qty</th>
+                        <th style="padding: 10px 12px; text-align: right;">Price</th>
+                        <th style="padding: 10px 12px; text-align: right;">Total</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {items_html}
+                </tbody>
+            </table>
+
+            <table style="width: 100%; margin-top: 16px; background: white; border-radius: 8px; overflow: hidden;">
+                <tr>
+                    <td style="padding: 8px 12px;">Subtotal</td>
+                    <td style="padding: 8px 12px; text-align: right;">{_format_price(subtotal)}</td>
+                </tr>
+                {f'<tr><td style="padding: 8px 12px; color: #059669;">Discount ({promo_code})</td><td style="padding: 8px 12px; text-align: right; color: #059669;">-{_format_price(discount)}</td></tr>' if discount else ''}
+                <tr>
+                    <td style="padding: 8px 12px;">Shipping</td>
+                    <td style="padding: 8px 12px; text-align: right;">{'Free' if shipping_cost == 0 else _format_price(shipping_cost)}</td>
+                </tr>
+                <tr>
+                    <td style="padding: 8px 12px;">Tax</td>
+                    <td style="padding: 8px 12px; text-align: right;">{_format_price(tax)}</td>
+                </tr>
+                <tr style="font-weight: bold; font-size: 18px; background: #f3f4f6;">
+                    <td style="padding: 12px;">Total Charged</td>
+                    <td style="padding: 12px; text-align: right; color: #059669;">{_format_price(total)}</td>
+                </tr>
+            </table>
+
+            <p style="margin-top: 20px;">If you have any questions about your order, reply to this email or contact us at <a href="mailto:{STORE_EMAIL}">{STORE_EMAIL}</a>.</p>
+            <p>Thank you for choosing The Hemp Dispensary!</p>
+        </div>
+        <div style="padding: 16px; text-align: center; color: #9ca3af; font-size: 12px;">
+            The Hemp Dispensary — Premium Hemp Products<br>
+            Spring Hill, FL
+        </div>
+    </body>
+    </html>
+    """
+
+    smtp_settings = await _get_smtp_settings(db)
+    subject = f"Order Confirmed — {order_number} | The Hemp Dispensary"
+
+    try:
+        loop = asyncio.get_event_loop()
+        sent = await loop.run_in_executor(
+            None, _send_smtp_email, smtp_settings, customer_email, subject, customer_html
+        )
+        if not sent:
+            raise HTTPException(status_code=500, detail="Failed to send email — SMTP not configured or credentials invalid")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to send email: {str(e)}")
+
+    return {"success": True, "order_id": order_id, "email": customer_email}
+
+
+@router.post("/orders/{order_id}/refund")
+async def refund_order(
+    order_id: int,
+    request: Request,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Refund an order via Clover (requires admin auth)."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    import jwt
+    token = auth.split(" ", 1)[1]
+    jwt_secret = os.environ.get("JWT_SECRET", "hemp-inventory-secret-key")
+    try:
+        jwt.decode(token, jwt_secret, algorithms=["HS256"])
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    body = await request.json()
+    refund_amount = body.get("amount")  # Optional: partial refund in cents
+
+    # Get order details
+    async with db.execute(
+        "SELECT charge_id, total, payment_status FROM ecommerce_orders WHERE id = ?",
+        (order_id,),
+    ) as cursor:
+        row = await cursor.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    charge_id, order_total, payment_status = row
+
+    if payment_status == "refunded":
+        raise HTTPException(status_code=400, detail="Order has already been refunded")
+
+    if not charge_id:
+        raise HTTPException(status_code=400, detail="No charge ID found for this order — cannot refund")
+
+    amount = refund_amount if refund_amount else order_total
+
+    # Call Clover refund API
+    import httpx
+    refund_url = "https://scl.clover.com/v1/refunds"
+    refund_headers = {
+        "Authorization": f"Bearer {HQ_ECOMM_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    refund_data: dict = {"charge": charge_id, "reason": "requested_by_customer"}
+    if refund_amount:
+        refund_data["amount"] = refund_amount
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(refund_url, headers=refund_headers, json=refund_data)
+            print(f"[refund] Clover response status={resp.status_code} body={resp.text[:500]}")
+
+            try:
+                result = resp.json()
+            except Exception:
+                # Clover sometimes returns non-JSON responses
+                if resp.status_code in (200, 201):
+                    # Refund succeeded but response wasn't JSON
+                    new_status = "refunded"
+                    await db.execute(
+                        "UPDATE ecommerce_orders SET payment_status = ?, refund_amount = ? WHERE id = ?",
+                        (new_status, amount, order_id),
+                    )
+                    await db.commit()
+                    return {
+                        "success": True,
+                        "order_id": order_id,
+                        "refund_id": "",
+                        "refund_amount": amount,
+                        "status": new_status,
+                    }
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Refund failed: Clover returned status {resp.status_code} — {resp.text[:200]}"
+                )
+
+            if resp.status_code in (200, 201):
+                refund_id = result.get("id", "")
+                new_status = "refunded"
+                await db.execute(
+                    "UPDATE ecommerce_orders SET payment_status = ?, refund_id = ?, refund_amount = ? WHERE id = ?",
+                    (new_status, refund_id, amount, order_id),
+                )
+                await db.commit()
+                return {
+                    "success": True,
+                    "order_id": order_id,
+                    "refund_id": refund_id,
+                    "refund_amount": amount,
+                    "status": new_status,
+                }
+            else:
+                error_msg = result.get("message") or result.get("error", {}).get("message", "Refund failed")
+                raise HTTPException(status_code=400, detail=f"Refund failed: {error_msg}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Refund service error: {str(e)}")

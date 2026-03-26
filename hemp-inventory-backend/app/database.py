@@ -161,15 +161,27 @@ async def init_db():
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        # Migration: add charge_id and payment_status columns if missing
-        try:
-            await db.execute("ALTER TABLE ecommerce_orders ADD COLUMN charge_id TEXT")
-        except Exception:
-            pass
-        try:
-            await db.execute("ALTER TABLE ecommerce_orders ADD COLUMN payment_status TEXT DEFAULT 'pending'")
-        except Exception:
-            pass
+        # Migration: add columns if missing
+        for col, coldef in [
+            ("charge_id", "TEXT"),
+            ("payment_status", "TEXT DEFAULT 'pending'"),
+            ("tracking_number", "TEXT"),
+            ("tracking_url", "TEXT"),
+            ("label_url", "TEXT"),
+            ("shippo_transaction_id", "TEXT"),
+            ("staff_notes", "TEXT"),
+            ("refund_id", "TEXT"),
+            ("refund_amount", "INTEGER"),
+            ("tracking_status", "TEXT"),
+            ("discount", "INTEGER DEFAULT 0"),
+            ("promo_code", "TEXT"),
+            ("fulfillment_type", "TEXT DEFAULT 'shipping'"),
+            ("shipping_service", "TEXT"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE ecommerce_orders ADD COLUMN {col} {coldef}")
+            except Exception:
+                pass
         await db.execute("""
             CREATE TABLE IF NOT EXISTS ecommerce_order_items (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -278,6 +290,117 @@ async def init_db():
                 FOREIGN KEY (employee_id) REFERENCES employees(id)
             )
         """)
+
+        # Employee schedules table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS employee_schedules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                employee_id INTEGER NOT NULL,
+                day_of_week INTEGER NOT NULL,
+                start_time TEXT NOT NULL,
+                end_time TEXT NOT NULL,
+                location TEXT,
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (employee_id) REFERENCES employees(id),
+                UNIQUE(employee_id, day_of_week)
+            )
+        """)
+
+        # Date-specific employee schedules (replaces recurring day_of_week model)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS date_schedules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                employee_id INTEGER NOT NULL,
+                date TEXT NOT NULL,
+                start_time TEXT NOT NULL,
+                end_time TEXT NOT NULL,
+                location TEXT,
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (employee_id) REFERENCES employees(id),
+                UNIQUE(employee_id, date)
+            )
+        """)
+
+        # Time-off requests table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS time_off_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                employee_id INTEGER NOT NULL,
+                date TEXT NOT NULL,
+                reason TEXT,
+                status TEXT DEFAULT 'pending',
+                reviewed_by TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (employee_id) REFERENCES employees(id),
+                UNIQUE(employee_id, date)
+            )
+        """)
+
+        # Schedule notes table (date-specific notes visible to all)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS schedule_notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                note TEXT NOT NULL,
+                created_by TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Promo codes table for discount management
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS promo_codes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT NOT NULL UNIQUE,
+                discount_pct REAL NOT NULL DEFAULT 0,
+                discount_amount INTEGER DEFAULT 0,
+                single_use INTEGER DEFAULT 0,
+                is_active INTEGER DEFAULT 1,
+                max_uses INTEGER DEFAULT 0,
+                times_used INTEGER DEFAULT 0,
+                expires_at TEXT,
+                starts_at TEXT,
+                applies_to TEXT DEFAULT 'all',
+                product_ids TEXT DEFAULT '',
+                exclude_from_other_coupons INTEGER DEFAULT 0,
+                clover_discount_id TEXT DEFAULT '',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Migration: add new columns if they don't exist yet
+        try:
+            await db.execute("ALTER TABLE promo_codes ADD COLUMN starts_at TEXT")
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE promo_codes ADD COLUMN applies_to TEXT DEFAULT 'all'")
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE promo_codes ADD COLUMN product_ids TEXT DEFAULT ''")
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE promo_codes ADD COLUMN exclude_from_other_coupons INTEGER DEFAULT 0")
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE promo_codes ADD COLUMN clover_discount_id TEXT DEFAULT ''")
+        except Exception:
+            pass
+        # Seed FIRST15 if promo_codes table is empty
+        cursor = await db.execute("SELECT COUNT(*) FROM promo_codes")
+        count = (await cursor.fetchone())[0]
+        if count == 0:
+            await db.execute(
+                "INSERT INTO promo_codes (code, discount_pct, single_use, is_active) VALUES (?, ?, ?, ?)",
+                ("FIRST15", 0.15, 1, 1),
+            )
 
         # Seed default loyalty settings if empty
         cursor = await db.execute("SELECT COUNT(*) FROM loyalty_settings")

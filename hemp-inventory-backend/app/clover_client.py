@@ -383,3 +383,59 @@ class CloverClient:
             )
             resp.raise_for_status()
             return resp.json()
+
+    # === Discounts ===
+
+    async def get_discounts(self) -> dict:
+        """Get all discounts for this merchant."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await self._request_with_retry(
+                client, "get",
+                f"{self.base_url}/discounts",
+                headers=self._headers(),
+                params={"limit": 1000},
+            )
+            return resp.json()
+
+    async def create_discount(self, name: str, percentage: int = 0, amount: int = 0) -> dict:
+        """Create a discount on Clover POS. percentage is whole number (e.g. 15 for 15%), amount is in cents."""
+        body: dict = {"name": name}
+        if percentage > 0:
+            body["percentage"] = percentage
+        elif amount > 0:
+            body["amount"] = -abs(amount)  # Clover expects negative for discount amounts
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{self.base_url}/discounts",
+                headers=self._headers(),
+                json=body,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    async def update_discount(self, discount_id: str, name: str, percentage: int = 0, amount: int = 0) -> dict:
+        """Update an existing Clover discount."""
+        body: dict = {"name": name}
+        if percentage > 0:
+            body["percentage"] = percentage
+            body["amount"] = 0
+        elif amount > 0:
+            body["amount"] = -abs(amount)
+            body["percentage"] = 0
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{self.base_url}/discounts/{discount_id}",
+                headers=self._headers(),
+                json=body,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    async def delete_discount(self, discount_id: str) -> None:
+        """Delete a discount from Clover POS."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.delete(
+                f"{self.base_url}/discounts/{discount_id}",
+                headers=self._headers(),
+            )
+            resp.raise_for_status()
