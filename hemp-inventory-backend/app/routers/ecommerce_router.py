@@ -90,6 +90,24 @@ CACHE_TTL = 600  # 10 minutes
 DISK_CACHE_PATH = os.environ.get("DB_PATH", "").replace("app.db", "product_cache.json") or "/tmp/product_cache.json"
 
 
+def _enforce_leaflife_price_floor(sku: str, name: str, price: int) -> int:
+    """Enforce minimum price floors for LeafLife products by weight.
+    Returns the price (in cents) with floor applied if applicable."""
+    if not isinstance(sku, str) or not sku.startswith("LF-"):
+        return price
+    sku_upper = sku.upper()
+    name_upper = name.upper()
+    if sku_upper.endswith("-28") or "28 GRAM" in name_upper:
+        return max(price, 10000)  # $100.00 minimum for 28g
+    elif sku_upper.endswith("-14") or "14 GRAM" in name_upper:
+        return max(price, 9500)   # $95.00 minimum for 14g
+    elif sku_upper.endswith("-7 G") or sku_upper.endswith("-7G") or "7 GRAM" in name_upper:
+        return max(price, 5500)   # $55.00 minimum for 7g
+    elif sku_upper.endswith("-3.5") or "3.5 GRAM" in name_upper:
+        return max(price, 2500)   # $25.00 minimum for 3.5g
+    return price
+
+
 def invalidate_product_cache():
     """Invalidate ALL product cache layers so the next request fetches fresh data.
     Called from inventory_router when images are uploaded/changed."""
@@ -276,17 +294,7 @@ async def _fetch_and_cache_products() -> dict:
             is_shipping_only = sku.startswith("LF-") if isinstance(sku, str) else False
 
             # Enforce minimum price floors for LeafLife products by weight
-            if is_shipping_only:
-                sku_upper = sku.upper()
-                name_upper = name.upper()
-                if sku_upper.endswith("-28") or "28 GRAM" in name_upper:
-                    price = max(price, 10000)  # $100.00 minimum for 28g
-                elif sku_upper.endswith("-14") or "14 GRAM" in name_upper:
-                    price = max(price, 9500)   # $95.00 minimum for 14g
-                elif sku_upper.endswith("-7 G") or sku_upper.endswith("-7G") or "7 GRAM" in name_upper:
-                    price = max(price, 5500)   # $55.00 minimum for 7g
-                elif sku_upper.endswith("-3.5") or "3.5 GRAM" in name_upper:
-                    price = max(price, 2500)   # $25.00 minimum for 3.5g
+            price = _enforce_leaflife_price_floor(sku, name, price)
 
             total_stock = max(hq_stock, w_stock, e_stock)
 
@@ -703,6 +711,21 @@ async def create_order(
     """Public endpoint: Create an e-commerce order with Clover payment processing."""
     charge_id = ""
     payment_status = "pending"
+
+    # Server-side enforcement of LeafLife minimum price floors.
+    # Prevents stale cached prices on the frontend from undercharging.
+    corrected_subtotal = 0
+    for item in order.items:
+        enforced_price = _enforce_leaflife_price_floor(item.sku, item.name, item.price)
+        if enforced_price != item.price:
+            print(f"[order] Price floor corrected: {item.name} ({item.sku}) from ${item.price/100:.2f} to ${enforced_price/100:.2f}")
+            item.price = enforced_price
+        corrected_subtotal += enforced_price * item.quantity
+    if corrected_subtotal != order.subtotal:
+        diff = corrected_subtotal - order.subtotal
+        print(f"[order] Subtotal corrected from ${order.subtotal/100:.2f} to ${corrected_subtotal/100:.2f} (diff: ${diff/100:.2f})")
+        order.subtotal = corrected_subtotal
+        order.total = order.subtotal - order.discount + order.shipping_cost + order.tax
 
     # Process payment via Clover if a payment token is provided
     if order.payment_token:
