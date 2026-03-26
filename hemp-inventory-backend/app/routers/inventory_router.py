@@ -807,6 +807,8 @@ class BulkStockUpdateItem(BaseModel):
     sku: str
     location_id: int
     quantity: float
+    item_name: str | None = None
+    clover_item_id: str | None = None
 
 
 class BulkStockUpdateRequest(BaseModel):
@@ -851,7 +853,21 @@ async def bulk_stock_update(
                 continue
 
         clover_items = items_cache[upd.location_id]
-        matching = [i for i in clover_items if (i.get("sku") or i.get("id", "")) == upd.sku]
+        # Try matching by SKU first
+        matching = [i for i in clover_items if i.get("sku") and i.get("sku") == upd.sku]
+        # Then try matching by location-specific Clover item ID
+        if not matching and upd.clover_item_id:
+            matching = [i for i in clover_items if i.get("id") == upd.clover_item_id]
+        # Then try matching by Clover ID (sku field may be the clover_id from another location)
+        if not matching:
+            matching = [i for i in clover_items if i.get("id") == upd.sku]
+        # Fallback: match by normalized item name
+        if not matching and upd.item_name:
+            norm_name = " ".join(upd.item_name.split()).lower()
+            matching = [
+                i for i in clover_items
+                if " ".join((i.get("name", "") or "").split()).lower() == norm_name
+            ]
         if not matching:
             results.append({"sku": upd.sku, "location": loc_name, "status": "not_found"})
             continue

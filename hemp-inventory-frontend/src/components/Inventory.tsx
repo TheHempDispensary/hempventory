@@ -57,7 +57,7 @@ export default function Inventory() {
   const [editingPar, setEditingPar] = useState<{ sku: string; locName: string } | null>(null);
   const [parValue, setParValue] = useState("");
   // Batch stock editing: key = "sku::locName", value = string (edited value)
-  const [pendingStockChanges, setPendingStockChanges] = useState<Map<string, { sku: string; locationId: number; locName: string; value: string; originalValue: number }>>(new Map());
+  const [pendingStockChanges, setPendingStockChanges] = useState<Map<string, { sku: string; locationId: number; locName: string; value: string; originalValue: number; itemName: string; cloverItemId: string }>>(new Map());
   const [savingStock, setSavingStock] = useState(false);
   const [showAddItem, setShowAddItem] = useState(false);
   const [newItem, setNewItem] = useState<{
@@ -992,6 +992,8 @@ export default function Inventory() {
         sku: c.sku,
         location_id: c.locationId,
         quantity: parseFloat(c.value),
+        item_name: c.itemName,
+        clover_item_id: c.cloverItemId,
       }));
       const resp = await bulkStockUpdate(updates);
       const data = resp.data;
@@ -2686,6 +2688,8 @@ export default function Inventory() {
                                 locName: loc.name,
                                 value: locData.stock.toString(),
                                 originalValue: locData.stock,
+                                itemName: item.name,
+                                cloverItemId: locData.clover_item_id || "",
                               });
                               setPendingStockChanges(next);
                             }}

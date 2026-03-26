@@ -103,7 +103,7 @@ export const transferStock = (sku: string, fromLocationId: number, toLocationId:
 export const bulkAssignCategory = (skus: string[], categoryName: string) =>
   api.post("/api/inventory/bulk-assign-category", { skus, category_name: categoryName });
 
-export const bulkStockUpdate = (updates: { sku: string; location_id: number; quantity: number }[]) =>
+export const bulkStockUpdate = (updates: { sku: string; location_id: number; quantity: number; item_name?: string; clover_item_id?: string }[]) =>
   api.post("/api/inventory/items/bulk-stock-update", { updates });
 
 export const bulkAssignImages = (keyword: string, imageData: string, contentType: string = "image/png", skus?: string[]) =>

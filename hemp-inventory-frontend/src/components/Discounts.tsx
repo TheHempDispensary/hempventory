@@ -189,10 +189,8 @@ export default function Discounts() {
 
   const filteredProducts = products.filter((p) => p.name.toLowerCase().includes(productSearch.toLowerCase()));
 
-  const ProductSelector = ({ appliesTo, setAppliesTo, selectedIds, setSelectedIds, idSuffix }: {
-    appliesTo: "all" | "specific"; setAppliesTo: (v: "all" | "specific") => void;
-    selectedIds: string[]; setSelectedIds: (ids: string[]) => void; idSuffix: string;
-  }) => (
+  const renderProductSelector = (appliesTo: "all" | "specific", setAppliesTo: (v: "all" | "specific") => void,
+    selectedIds: string[], setSelectedIds: (ids: string[]) => void, idSuffix: string) => (
     <div className="space-y-3">
       <label className="text-sm font-medium text-gray-700 block">Applies To</label>
       <div className="flex gap-3">
@@ -322,8 +320,7 @@ export default function Discounts() {
             </div>
           </div>
           <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
-            <ProductSelector appliesTo={newAppliesTo} setAppliesTo={setNewAppliesTo}
-              selectedIds={newProductIds} setSelectedIds={setNewProductIds} idSuffix="new" />
+            {renderProductSelector(newAppliesTo, setNewAppliesTo, newProductIds, setNewProductIds, "new")}
             <div className="space-y-3">
               <label className="flex items-center gap-2 cursor-pointer pt-6">
                 <input type="checkbox" checked={newExcludeOtherCoupons} onChange={(e) => setNewExcludeOtherCoupons(e.target.checked)}
@@ -423,8 +420,7 @@ export default function Discounts() {
                     </div>
                   </div>
                   <div className="mt-3">
-                    <ProductSelector appliesTo={editAppliesTo} setAppliesTo={setEditAppliesTo}
-                      selectedIds={editProductIds} setSelectedIds={setEditProductIds} idSuffix={"edit-" + promo.id} />
+                    {renderProductSelector(editAppliesTo, setEditAppliesTo, editProductIds, setEditProductIds, "edit-" + promo.id)}
                   </div>
                 </div>
               ) : (
