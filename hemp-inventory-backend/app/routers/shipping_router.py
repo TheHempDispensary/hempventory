@@ -34,6 +34,25 @@ DEFAULT_FROM_ADDRESS = {
     "email": "support@thehempdispensary.com",
 }
 
+# LeafLife products ship from supplier in Madison, WI
+LEAFLIFE_FROM_ADDRESS = {
+    "name": "The Hemp Dispensary",
+    "company": "The Hemp Dispensary",
+    "street1": "2510 Pennsylvania Ave",
+    "street2": "",
+    "city": "Madison",
+    "state": "WI",
+    "zip": "53704",
+    "country": "US",
+    "phone": "352-340-2439",
+    "email": "support@thehempdispensary.com",
+}
+
+
+def _has_leaflife_products_skus(skus: list[str]) -> bool:
+    """Check if any SKUs indicate LeafLife products (SKU starts with LF-)."""
+    return any(s.upper().startswith("LF-") for s in skus if s)
+
 
 def _get_shippo_headers() -> dict:
     token = SHIPPO_API_TOKEN
@@ -93,6 +112,14 @@ async def create_shipment(
         raise HTTPException(status_code=404, detail="Order not found")
     order = dict(zip(columns, row))
 
+    # Check if this order contains LeafLife products (ship from WI supplier)
+    items_cursor = await db.execute(
+        "SELECT sku FROM ecommerce_order_items WHERE order_id = ?", (body.order_id,)
+    )
+    item_rows = await items_cursor.fetchall()
+    order_skus = [r[0] for r in item_rows if r[0]]
+    from_address = LEAFLIFE_FROM_ADDRESS if _has_leaflife_products_skus(order_skus) else DEFAULT_FROM_ADDRESS
+
     # Build the destination address
     to_address = {
         "name": f"{order['customer_first_name']} {order['customer_last_name']}",
@@ -117,7 +144,7 @@ async def create_shipment(
     }
 
     shipment_data = {
-        "address_from": DEFAULT_FROM_ADDRESS,
+        "address_from": from_address,
         "address_to": to_address,
         "parcels": [parcel],
         "async": False,
@@ -159,7 +186,7 @@ async def create_shipment(
     return {
         "shipment_id": shipment.get("object_id", ""),
         "rates": formatted_rates,
-        "address_from": DEFAULT_FROM_ADDRESS,
+        "address_from": from_address,
         "address_to": to_address,
     }
 
@@ -278,6 +305,7 @@ class PublicRatesRequest(BaseModel):
     state: str
     zip_code: str
     product_names: list[str] = []
+    product_skus: list[str] = []
 
 
 @router.post("/rates")
@@ -303,8 +331,11 @@ async def get_public_shipping_rates(body: PublicRatesRequest):
         "mass_unit": "lb",
     }
 
+    # Use LeafLife origin address if any products are LeafLife (SKU starts with LF-)
+    from_address = LEAFLIFE_FROM_ADDRESS if _has_leaflife_products_skus(body.product_skus) else DEFAULT_FROM_ADDRESS
+
     shipment_data = {
-        "address_from": DEFAULT_FROM_ADDRESS,
+        "address_from": from_address,
         "address_to": to_address,
         "parcels": [parcel],
         "async": False,
