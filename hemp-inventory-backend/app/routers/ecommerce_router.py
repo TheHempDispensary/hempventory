@@ -1121,24 +1121,26 @@ async def _send_order_emails(
         </html>
         """
 
-        # Send to store — route to location-specific email for pickup orders
+        # Send to store — route to location-specific email(s) for pickup orders
+        store_subject = f"New Order {order_number} — {_format_price(order.total)} from {order.customer.first_name} {order.customer.last_name}"
         if order.fulfillment_type == "pickup_west":
-            store_recipient = "west@thehempdispensary.com"
+            store_recipients = ["west@thehempdispensary.com", "THD1SHW@icloud.com"]
         elif order.fulfillment_type == "pickup_east":
-            store_recipient = "east@thehempdispensary.com"
+            store_recipients = ["east@thehempdispensary.com", "THD7SHE@icloud.com"]
         else:
-            store_recipient = STORE_EMAIL
+            store_recipients = [STORE_EMAIL]
 
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None,
-            _send_smtp_email,
-            smtp_settings,
-            store_recipient,
-            f"New Order {order_number} — {_format_price(order.total)} from {order.customer.first_name} {order.customer.last_name}",
-            store_html,
-        )
-        print(f"Store notification sent to {store_recipient} for order {order_number}")
+        for recipient in store_recipients:
+            await loop.run_in_executor(
+                None,
+                _send_smtp_email,
+                smtp_settings,
+                recipient,
+                store_subject,
+                store_html,
+            )
+            print(f"Store notification sent to {recipient} for order {order_number}")
 
         # --- Customer confirmation email ---
         customer_html = f"""
