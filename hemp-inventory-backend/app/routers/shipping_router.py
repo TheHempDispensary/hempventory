@@ -165,13 +165,20 @@ async def create_shipment(
 
         shipment = resp.json()
 
-    # Extract rates
+    # Extract USPS Ground and Priority rates only
+    ALLOWED_SERVICES = {"ground advantage", "priority"}
     rates = shipment.get("rates", [])
     formatted_rates = []
     for rate in rates:
+        provider = rate.get("provider", "")
+        if "USPS" not in provider.upper():
+            continue
+        service_name = rate.get("servicelevel", {}).get("name", "").lower()
+        if not any(allowed in service_name for allowed in ALLOWED_SERVICES):
+            continue
         formatted_rates.append({
             "id": rate["object_id"],
-            "provider": rate.get("provider", ""),
+            "provider": provider,
             "service_level": rate.get("servicelevel", {}).get("name", ""),
             "amount": rate.get("amount", "0"),
             "currency": rate.get("currency", "USD"),
@@ -355,12 +362,16 @@ async def get_public_shipping_rates(body: PublicRatesRequest):
         print(f"[shippo] Connection error: {e}")
         raise HTTPException(status_code=500, detail="Shipping service unavailable")
 
-    # Extract USPS rates only and add $2 markup
+    # Extract USPS Ground and Priority rates only, add $2 markup
+    ALLOWED_SERVICES = {"ground advantage", "priority"}
     rates = shipment.get("rates", [])
     formatted_rates = []
     for rate in rates:
         provider = rate.get("provider", "")
         if "USPS" not in provider.upper():
+            continue
+        service_name = rate.get("servicelevel", {}).get("name", "").lower()
+        if not any(allowed in service_name for allowed in ALLOWED_SERVICES):
             continue
         base_amount = float(rate.get("amount", "0"))
         markup_amount = base_amount + (SHIPPING_MARKUP_CENTS / 100)
