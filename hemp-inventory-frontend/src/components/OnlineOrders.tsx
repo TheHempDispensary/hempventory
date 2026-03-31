@@ -622,7 +622,7 @@ export default function OnlineOrders() {
                         ) : (
                           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
                             <Truck className="w-3 h-3" />
-                            Shipping
+                            {order.shipping_service || "Shipping"}
                           </span>
                         )}
                         {order.tracking_number && (
@@ -676,6 +676,11 @@ export default function OnlineOrders() {
                             <p className="text-sm text-gray-600">
                               {order.shipping_city}, {order.shipping_state} {order.shipping_zip}
                             </p>
+                            {order.shipping_service && (
+                              <p className="text-sm text-blue-700 font-medium mt-1 flex items-center gap-1">
+                                <Truck className="w-3.5 h-3.5" /> {order.shipping_service}
+                              </p>
+                            )}
                           </>
                         )}
                       </div>

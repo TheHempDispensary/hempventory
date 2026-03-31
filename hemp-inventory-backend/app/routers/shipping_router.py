@@ -150,10 +150,13 @@ async def create_shipment(
         "async": False,
     }
 
-    # If hazmat, add metadata for carrier compliance (ORM-D Consumer Commodity)
+    # If hazmat, declare dangerous goods per Shippo API so the label prints hazmat markings
     if body.is_hazmat:
-        shipment_data["extra"] = {"is_return": False}
-        parcel["metadata"] = "HAZMAT - ORM-D Consumer Commodity"
+        shipment_data["extra"] = {
+            "dangerous_goods": {
+                "contains": True,
+            },
+        }
 
     headers = _get_shippo_headers()
 
