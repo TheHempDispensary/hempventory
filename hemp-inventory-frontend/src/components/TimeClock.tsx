@@ -22,6 +22,7 @@ import {
   getScheduleNotes,
   createScheduleNote,
   deleteScheduleNote,
+  createManualEntry,
 } from "../lib/api";
 import {
   Clock,
@@ -140,6 +141,13 @@ export default function TimeClock() {
 
   // Sync
   const [syncing, setSyncing] = useState(false);
+
+  // Manual entry form
+  const [showManualEntry, setShowManualEntry] = useState(false);
+  const [manualEmpId, setManualEmpId] = useState(0);
+  const [manualClockIn, setManualClockIn] = useState("");
+  const [manualClockOut, setManualClockOut] = useState("");
+  const [savingManual, setSavingManual] = useState(false);
 
   // Schedule state
   const [schedules, setSchedules] = useState<ScheduleItem[]>([]);
@@ -474,8 +482,43 @@ export default function TimeClock() {
   const formatHours = (h: number | null) => {
     if (h === null || h === undefined) return "---";
     const hrs = Math.floor(h);
-    const mins = Math.round((h - hrs) * 60);
+    const mins = Math.floor((h - hrs) * 60);
     return `${hrs}h ${mins}m`;
+  };
+
+  const handleAddManualEntry = async () => {
+    if (!manualEmpId || !manualClockIn || !manualClockOut) {
+      showToast("error", "Please fill in all fields");
+      return;
+    }
+    setSavingManual(true);
+    try {
+      // Convert datetime-local (EST) to UTC ISO
+      const toUTC = (local: string) => {
+        const d = new Date(local + ":00");
+        const estStr = d.toLocaleString("en-US", { timeZone: "America/New_York" });
+        const estDate = new Date(estStr);
+        const diff = d.getTime() - estDate.getTime();
+        const utc = new Date(d.getTime() + diff);
+        return utc.toISOString();
+      };
+      const res = await createManualEntry({
+        employee_id: manualEmpId,
+        clock_in: toUTC(manualClockIn),
+        clock_out: toUTC(manualClockOut),
+      });
+      showToast("success", `Manual entry added for ${res.data.employee} (${formatHours(res.data.hours)})`);
+      setShowManualEntry(false);
+      setManualEmpId(0);
+      setManualClockIn("");
+      setManualClockOut("");
+      await loadEntries();
+    } catch (err) {
+      const axErr = err as { response?: { data?: { detail?: string } } };
+      showToast("error", axErr?.response?.data?.detail || "Failed to add manual entry");
+    } finally {
+      setSavingManual(false);
+    }
   };
 
   const activeSet = new Set(activeClocks.map((c) => c.employee_id));
@@ -489,8 +532,9 @@ export default function TimeClock() {
   const totalPages = Math.ceil(entries.length / perPage);
   const paginatedEntries = entries.slice((page - 1) * perPage, page * perPage);
 
-  // Summary for timesheet
-  const totalHours = entries.reduce((sum, e) => sum + (e.hours || 0), 0);
+  // Summary for timesheet — truncate to 2 decimal places (no rounding up)
+  const totalHoursRaw = entries.reduce((sum, e) => sum + (e.hours || 0), 0);
+  const totalHours = Math.floor(totalHoursRaw * 100) / 100;
   const employeeSummary: Record<string, number> = {};
   entries.forEach((e) => {
     employeeSummary[e.employee_name] = (employeeSummary[e.employee_name] || 0) + (e.hours || 0);
@@ -705,14 +749,74 @@ export default function TimeClock() {
                 <Download className="w-4 h-4" />
                 Export CSV
               </button>
+              <button
+                onClick={() => setShowManualEntry(!showManualEntry)}
+                className="px-4 py-1.5 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 transition-colors flex items-center gap-2"
+              >
+                <Plus className="w-4 h-4" />
+                Add Entry
+              </button>
             </div>
           </div>
+
+          {/* Manual Entry Form */}
+          {showManualEntry && (
+            <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+              <h4 className="text-sm font-semibold text-green-800 mb-3">Add Manual Time Entry</h4>
+              <div className="flex flex-wrap gap-3 items-end">
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Employee</label>
+                  <select
+                    value={manualEmpId}
+                    onChange={(e) => setManualEmpId(Number(e.target.value))}
+                    className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-green-500"
+                  >
+                    <option value={0}>Select Employee</option>
+                    {employees.filter(e => e.active).map((e) => (
+                      <option key={e.id} value={e.id}>{e.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Clock In</label>
+                  <input
+                    type="datetime-local"
+                    value={manualClockIn}
+                    onChange={(e) => setManualClockIn(e.target.value)}
+                    className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-green-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Clock Out</label>
+                  <input
+                    type="datetime-local"
+                    value={manualClockOut}
+                    onChange={(e) => setManualClockOut(e.target.value)}
+                    className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-green-500"
+                  />
+                </div>
+                <button
+                  onClick={handleAddManualEntry}
+                  disabled={savingManual}
+                  className="px-4 py-1.5 bg-green-700 text-white text-sm font-medium rounded-lg hover:bg-green-800 disabled:opacity-50 transition-colors"
+                >
+                  {savingManual ? "Saving..." : "Save Entry"}
+                </button>
+                <button
+                  onClick={() => setShowManualEntry(false)}
+                  className="px-4 py-1.5 bg-gray-200 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-300 transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Summary Cards */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
             <div className="bg-white border border-gray-200 rounded-lg p-4">
               <p className="text-xs text-gray-500 mb-1">Total Hours</p>
-              <p className="text-2xl font-bold text-gray-900">{totalHours.toFixed(1)}</p>
+              <p className="text-2xl font-bold text-gray-900">{formatHours(totalHours)}</p>
             </div>
             <div className="bg-white border border-gray-200 rounded-lg p-4">
               <p className="text-xs text-gray-500 mb-1">Entries</p>
@@ -725,7 +829,7 @@ export default function TimeClock() {
             <div className="bg-white border border-gray-200 rounded-lg p-4">
               <p className="text-xs text-gray-500 mb-1">Avg Hours/Entry</p>
               <p className="text-2xl font-bold text-gray-900">
-                {entries.length > 0 ? (totalHours / entries.length).toFixed(1) : "0"}
+                {entries.length > 0 ? formatHours(Math.floor((totalHours / entries.length) * 100) / 100) : "0"}
               </p>
             </div>
           </div>

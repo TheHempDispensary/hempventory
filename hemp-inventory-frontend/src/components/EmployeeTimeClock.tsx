@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { getMyClockStatus, myClockIn, myClockOut, getMyEntries, getMySchedule, getMyTimeOff, submitMyTimeOff, cancelMyTimeOff, getMyScheduleNotes } from "../lib/api";
+import { getMyClockStatus, myClockIn, myClockOut, getMyEntries, getMySchedule, getMyTimeOff, submitMyTimeOff, cancelMyTimeOff, getMyScheduleNotes, getMyProfile } from "../lib/api";
 import { ChevronLeft, ChevronRight, CalendarOff, MessageSquare, Plus, Trash2 } from "lucide-react";
 
 interface ClockStatus {
@@ -53,6 +53,7 @@ export default function EmployeeTimeClock() {
   const [schedule, setSchedule] = useState<ScheduleItem[]>([]);
   const [scheduleLoading, setScheduleLoading] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [employeeName, setEmployeeName] = useState("");
 
   // Monthly calendar state
   const [calMonth, setCalMonth] = useState(() => new Date().getMonth());
@@ -62,6 +63,15 @@ export default function EmployeeTimeClock() {
   const [showRequestModal, setShowRequestModal] = useState(false);
   const [requestDate, setRequestDate] = useState("");
   const [requestReason, setRequestReason] = useState("");
+
+  const fetchProfile = useCallback(async () => {
+    try {
+      const res = await getMyProfile();
+      setEmployeeName(res.data.name || "");
+    } catch {
+      // ignore
+    }
+  }, []);
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -102,9 +112,10 @@ export default function EmployeeTimeClock() {
   }, [calYear, calMonth]);
 
   useEffect(() => {
+    fetchProfile();
     fetchStatus();
     fetchEntries();
-  }, [fetchStatus, fetchEntries]);
+  }, [fetchProfile, fetchStatus, fetchEntries]);
 
   const fetchTimeOff = useCallback(async () => {
     try {
@@ -227,8 +238,9 @@ export default function EmployeeTimeClock() {
     }
   };
 
-  // Calculate total hours for visible entries
-  const totalHours = entries.reduce((sum, e) => sum + (e.hours || 0), 0);
+  // Calculate total hours for visible entries — truncate to 2 decimal places (no rounding up)
+  const totalHoursRaw = entries.reduce((sum, e) => sum + (e.hours || 0), 0);
+  const totalHours = Math.floor(totalHoursRaw * 100) / 100;
 
   // Calendar helpers
   const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
@@ -316,7 +328,7 @@ export default function EmployeeTimeClock() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
               </div>
-              <h2 className="text-xl font-bold text-gray-900 mb-2">You're On the Clock</h2>
+              <h2 className="text-xl font-bold text-gray-900 mb-2">{employeeName ? `${employeeName}, You're On the Clock` : "You're On the Clock"}</h2>
               <p className="text-gray-500 mb-1">Clocked in at {formatTime(status.clock_in!)}</p>
               <p className="text-3xl font-mono font-bold text-green-600 mb-6">
                 {formatElapsed(elapsedSeconds)}
@@ -336,8 +348,8 @@ export default function EmployeeTimeClock() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
               </div>
-              <h2 className="text-xl font-bold text-gray-900 mb-2">Not Clocked In</h2>
-              <p className="text-gray-500 mb-6">Tap the button below to start your shift</p>
+              <h2 className="text-xl font-bold text-gray-900 mb-2">{employeeName ? `Hi ${employeeName}` : "Not Clocked In"}</h2>
+              <p className="text-gray-500 mb-6">{employeeName ? "Tap the button below to start your shift" : "Tap the button below to start your shift"}</p>
               <button
                 onClick={handleClockIn}
                 disabled={actionLoading}

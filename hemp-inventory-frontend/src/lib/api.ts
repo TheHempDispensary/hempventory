@@ -304,6 +304,9 @@ export const updateTimeEntry = (id: number, data: { clock_in?: string; clock_out
 export const deleteTimeEntry = (id: number) =>
   api.delete(`/api/timeclock/entries/${id}`);
 
+export const createManualEntry = (data: { employee_id: number; clock_in: string; clock_out: string }) =>
+  api.post("/api/timeclock/entries", data);
+
 export const syncEmployeesFromClover = () =>
   api.post("/api/timeclock/sync-employees");
 

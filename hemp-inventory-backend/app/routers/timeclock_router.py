@@ -363,6 +363,46 @@ async def delete_entry(
     return {"status": "deleted"}
 
 
+# ---------- Manual Time Entry ----------
+
+class ManualEntryCreate(BaseModel):
+    employee_id: int
+    clock_in: str   # ISO datetime string
+    clock_out: str  # ISO datetime string
+
+@router.post("/entries")
+async def create_manual_entry(
+    data: ManualEntryCreate,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Create a manual time entry (e.g. for past days)."""
+    # Verify employee exists
+    cursor = await db.execute("SELECT id, name FROM employees WHERE id = ?", (data.employee_id,))
+    emp = await cursor.fetchone()
+    if not emp:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    # Calculate hours
+    t_in = datetime.fromisoformat(data.clock_in)
+    t_out = datetime.fromisoformat(data.clock_out)
+    if t_in.tzinfo is None:
+        t_in = t_in.replace(tzinfo=timezone.utc)
+    if t_out.tzinfo is None:
+        t_out = t_out.replace(tzinfo=timezone.utc)
+    if t_out <= t_in:
+        raise HTTPException(status_code=400, detail="Clock out must be after clock in")
+
+    hours = (t_out - t_in).total_seconds() / 3600
+
+    cursor = await db.execute(
+        "INSERT INTO time_entries (employee_id, clock_in, clock_out, hours) VALUES (?, ?, ?, ?)",
+        (data.employee_id, data.clock_in, data.clock_out, round(hours, 4)),
+    )
+    await db.commit()
+    return {"id": cursor.lastrowid, "employee": emp[1], "hours": round(hours, 4)}
+
+
 # ---------- CSV Export ----------
 
 @router.get("/export")
