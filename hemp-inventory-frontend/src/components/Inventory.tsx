@@ -667,9 +667,11 @@ export default function Inventory() {
       const errors = results.filter((r: { status: string }) => r.status === "error");
 
       if (errors.length > 0) {
+        const firstError = (errors[0] as { error?: string }).error || "";
+        const locationNames = errors.map((e: { location: string }) => e.location).join(", ");
         setSaveMessage({
           type: "error",
-          text: `Updated with errors at: ${errors.map((e: { location: string }) => e.location).join(", ")}`,
+          text: firstError ? `${firstError} (${locationNames})` : `Updated with errors at: ${locationNames}`,
         });
       } else {
         setSaveMessage({ type: "success", text: "Changes saved to Clover!" });
@@ -1918,8 +1920,12 @@ export default function Inventory() {
                       type="text"
                       value={editForm.name}
                       onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 outline-none"
+                      disabled={!!editItem?.item_group_name}
+                      className={`w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 outline-none ${editItem?.item_group_name ? "bg-gray-100 cursor-not-allowed" : ""}`}
                     />
+                    {editItem?.item_group_name && (
+                      <p className="text-xs text-amber-600 mt-1">Name is controlled by the variant group &quot;{editItem.item_group_name}&quot; in Clover and cannot be changed here.</p>
+                    )}
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <div>
