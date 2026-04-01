@@ -193,6 +193,7 @@ async def _do_sync(db: aiosqlite.Connection) -> dict:
                     "hidden": item.get("hidden", False),
                     "auto_manage": item.get("autoManage", False),
                     "default_tax_rates": item.get("defaultTaxRates", True),
+                    "item_group_name": (item.get("itemGroup") or {}).get("name", ""),
                 }
 
             inventory[merge_key]["locations"][loc_name] = {

@@ -33,6 +33,7 @@ interface InventoryItem {
   auto_manage?: boolean;
   default_tax_rates?: boolean;
   has_image?: boolean;
+  item_group_name?: string;
 }
 
 interface LocationInfo {
@@ -2343,11 +2344,31 @@ export default function Inventory() {
               {/* Variants Tab */}
               {editTab === "variants" && (
                 <>
-                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-4">
-                    <p className="text-xs text-blue-700">
-                      <strong>Add variants</strong> to this item (e.g. Size: Small, Medium, Large). This will create an item group in Clover with variant items. Run a sync after to see the new items.
-                    </p>
-                  </div>
+                  {editItem?.item_group_name ? (
+                    <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 mb-4">
+                      <div className="flex items-center gap-2 mb-2">
+                        <Layers className="w-4 h-4 text-emerald-600" />
+                        <span className="text-sm font-semibold text-emerald-800">Part of variant group: {editItem.item_group_name}</span>
+                      </div>
+                      <p className="text-xs text-emerald-700">
+                        This item is already a variant in the <strong>{editItem.item_group_name}</strong> item group. Other variants in this group:
+                      </p>
+                      <div className="mt-2 space-y-1">
+                        {items.filter(i => i.item_group_name === editItem.item_group_name && i.sku !== editItem.sku).map(sibling => (
+                          <div key={sibling.sku} className="text-xs text-emerald-700 bg-white rounded px-2 py-1 border border-emerald-100">
+                            {sibling.name} <span className="text-emerald-500">({sibling.sku})</span>
+                          </div>
+                        ))}
+                      </div>
+                      <p className="text-xs text-gray-500 mt-3">To add more variants, use the form below:</p>
+                    </div>
+                  ) : (
+                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-4">
+                      <p className="text-xs text-blue-700">
+                        <strong>Add variants</strong> to this item (e.g. Size: Small, Medium, Large). This will create an item group in Clover with variant items. Run a sync after to see the new items.
+                      </p>
+                    </div>
+                  )}
                   {editVariantAttrs.map((attr, ai) => (
                     <div key={ai} className="border border-gray-200 rounded-lg p-3 mb-3">
                       <div className="flex items-center gap-2 mb-2">
@@ -2756,9 +2777,16 @@ export default function Inventory() {
                           onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
                         />
                       )}
-                      <p className="text-sm font-medium text-green-700 hover:text-green-800 underline decoration-green-200 hover:decoration-green-400" title={item.name}>
-                        {item.name}
-                      </p>
+                      <div>
+                        <p className="text-sm font-medium text-green-700 hover:text-green-800 underline decoration-green-200 hover:decoration-green-400" title={item.name}>
+                          {item.name}
+                        </p>
+                        {item.item_group_name && (
+                          <span className="text-[10px] text-purple-600 bg-purple-50 border border-purple-200 rounded px-1 py-0.5 mt-0.5 inline-block">
+                            Variant: {item.item_group_name}
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </td>
                   <td className="px-4 py-3 text-xs text-gray-500 font-mono">
