@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo } from "react";
-import { syncInventory, getCachedInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, bulkAssignCategory, bulkAssignImages, syncRefunds, getAgeRestrictionTypes, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup, bulkStockUpdate, addVariantsToItem } from "../lib/api";
+import { syncInventory, getCachedInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, bulkAssignCategory, bulkAssignImages, syncRefunds, getAgeRestrictionTypes, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup, bulkStockUpdate, addVariantsToItem, getInventoryChanges } from "../lib/api";
 import { RefreshCw, Search, Plus, ChevronDown, ChevronUp, X, Save, Package, Trash2, CheckSquare, Square, Minus, Image, Download, Upload, Settings, ArrowRightLeft, Images, Layers, Tag, ChevronsLeft, ChevronsRight, ChevronLeft, ChevronRight } from "lucide-react";
 
 interface LocationStock {
@@ -165,6 +165,10 @@ export default function Inventory() {
   ]);
   const [addingVariants, setAddingVariants] = useState(false);
   const [keepOriginal, setKeepOriginal] = useState(false);
+
+  // Inventory change history state
+  const [changeHistory, setChangeHistory] = useState<Array<{ id: number; sku: string; product_name: string; location_name: string; old_stock: number; new_stock: number; change_amount: number; change_source: string; created_at: string }>>([]);
+  const [changeHistoryLoading, setChangeHistoryLoading] = useState(false);
 
   const handleAddItemWithVariants = async () => {
     setAddItemMessage(null);
@@ -1893,6 +1897,7 @@ export default function Inventory() {
                 { id: "stock", label: "Stock & PAR" },
                 { id: "cost", label: "Cost" },
                 { id: "tracking", label: "Item Tracking" },
+                { id: "history", label: "Change History" },
                 { id: "image", label: "Image" },
                 { id: "variants", label: "Add Variants" },
               ].map((tab) => (
@@ -2265,6 +2270,65 @@ export default function Inventory() {
                       <p className="text-xs text-gray-400">Automatically reduce stock when items are sold</p>
                     </div>
                   </label>
+                </>
+              )}
+
+              {/* Change History Tab */}
+              {editTab === "history" && (
+                <>
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="text-sm font-semibold text-gray-700">Stock Change History</h4>
+                    <button
+                      onClick={async () => {
+                        if (!editItem) return;
+                        setChangeHistoryLoading(true);
+                        try {
+                          const res = await getInventoryChanges({ sku: editItem.sku, limit: 50 });
+                          setChangeHistory(res.data.changes || []);
+                        } catch { setChangeHistory([]); }
+                        setChangeHistoryLoading(false);
+                      }}
+                      className="text-xs text-green-600 hover:text-green-700 font-medium"
+                    >
+                      {changeHistoryLoading ? "Loading..." : "Refresh"}
+                    </button>
+                  </div>
+                  {changeHistoryLoading ? (
+                    <div className="flex justify-center py-8"><RefreshCw className="w-5 h-5 text-gray-400 animate-spin" /></div>
+                  ) : changeHistory.length === 0 ? (
+                    <div className="text-center py-8">
+                      <Package className="w-10 h-10 text-gray-300 mx-auto mb-2" />
+                      <p className="text-sm text-gray-500 font-medium">No changes recorded yet</p>
+                      <p className="text-xs text-gray-400 mt-1">Stock changes will appear here after the next sync detects a difference.</p>
+                    </div>
+                  ) : (
+                    <div className="max-h-[350px] overflow-y-auto border border-gray-200 rounded-lg">
+                      <table className="w-full text-sm">
+                        <thead className="bg-gray-50 sticky top-0">
+                          <tr>
+                            <th className="text-left px-3 py-2 text-xs font-medium text-gray-500">Date</th>
+                            <th className="text-left px-3 py-2 text-xs font-medium text-gray-500">Location</th>
+                            <th className="text-right px-3 py-2 text-xs font-medium text-gray-500">Old</th>
+                            <th className="text-right px-3 py-2 text-xs font-medium text-gray-500">New</th>
+                            <th className="text-right px-3 py-2 text-xs font-medium text-gray-500">Change</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                          {changeHistory.map((ch) => (
+                            <tr key={ch.id} className="hover:bg-gray-50">
+                              <td className="px-3 py-2 text-xs text-gray-600 whitespace-nowrap">{new Date(ch.created_at + "Z").toLocaleString()}</td>
+                              <td className="px-3 py-2 text-xs text-gray-700">{ch.location_name}</td>
+                              <td className="px-3 py-2 text-xs text-gray-500 text-right">{ch.old_stock}</td>
+                              <td className="px-3 py-2 text-xs text-gray-700 text-right font-medium">{ch.new_stock}</td>
+                              <td className={`px-3 py-2 text-xs text-right font-semibold ${ch.change_amount > 0 ? "text-green-600" : ch.change_amount < 0 ? "text-red-600" : "text-gray-500"}`}>
+                                {ch.change_amount > 0 ? "+" : ""}{ch.change_amount}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
                 </>
               )}
 

@@ -137,13 +137,27 @@ async def _do_sync(db: aiosqlite.Connection) -> dict:
     inventory: dict[str, dict] = {}
     location_list = []
 
+    # Pre-fetch item groups from first location to build clover_item_id -> group name map
+    item_id_to_group_name: dict[str, str] = {}
+    for loc in locations:
+        try:
+            client = CloverClient(loc[2], loc[3])
+            groups_data = await client.get_item_groups()
+            for group in groups_data.get("elements", []):
+                group_name = group.get("name", "")
+                for gi in (group.get("items", {}) or {}).get("elements", []):
+                    item_id_to_group_name[gi.get("id", "")] = group_name
+        except Exception as e:
+            print(f"Error fetching item groups for {loc[1]}: {e}")
+        break  # Only need groups from one location (names are the same across locations)
+
     for loc in locations:
         loc_id, loc_name, merchant_id, api_token = loc[0], loc[1], loc[2], loc[3]
         location_list.append({"id": loc_id, "name": loc_name, "merchant_id": merchant_id})
 
         try:
             client = CloverClient(merchant_id, api_token)
-            data = await client.get_items(expand="itemStock,categories,ageRestricted,itemGroup")
+            data = await client.get_items(expand="itemStock,categories,ageRestricted")
             items = data.get("elements", [])
         except Exception as e:
             print(f"Error syncing {loc_name}: {e}")
@@ -193,7 +207,7 @@ async def _do_sync(db: aiosqlite.Connection) -> dict:
                     "hidden": item.get("hidden", False),
                     "auto_manage": item.get("autoManage", False),
                     "default_tax_rates": item.get("defaultTaxRates", True),
-                    "item_group_name": (item.get("itemGroup") or {}).get("name", ""),
+                    "item_group_name": item_id_to_group_name.get(clover_id, ""),
                 }
 
             inventory[merge_key]["locations"][loc_name] = {
@@ -221,6 +235,41 @@ async def _do_sync(db: aiosqlite.Connection) -> dict:
 
     items_list = sorted(inventory.values(), key=lambda x: x["name"])
     result = {"items": items_list, "locations": location_list}
+
+    # Track inventory changes: compare new data against previous cache
+    async with _cache_lock:
+        old_items = _inventory_cache.get("items", [])
+    if old_items:
+        old_lookup: dict[str, dict] = {}
+        for oi in old_items:
+            old_lookup[oi.get("id", "")] = oi
+        changes = []
+        for ni in items_list:
+            nid = ni.get("id", "")
+            oi = old_lookup.get(nid)
+            if not oi:
+                continue
+            for loc_name, loc_data in ni.get("locations", {}).items():
+                new_stock = loc_data.get("stock", 0)
+                old_stock = (oi.get("locations", {}).get(loc_name, {}) or {}).get("stock", 0)
+                if new_stock != old_stock:
+                    changes.append((
+                        ni.get("sku", ""),
+                        ni.get("name", ""),
+                        loc_name,
+                        old_stock,
+                        new_stock,
+                        new_stock - old_stock,
+                        "sync",
+                    ))
+        if changes:
+            await db.executemany(
+                """INSERT INTO inventory_changes
+                   (sku, product_name, location_name, old_stock, new_stock, change_amount, change_source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                changes,
+            )
+            await db.commit()
 
     # Update cache – but never overwrite a good cache with empty data
     # (protects against temporary Clover API failures wiping the cache)
@@ -2208,3 +2257,43 @@ async def get_attributes(
     except Exception as e:
         print(f"Error getting attributes: {e}")
         return {"attributes": []}
+
+
+@router.get("/changes")
+async def get_inventory_changes(
+    sku: str = "",
+    location: str = "",
+    limit: int = 50,
+    offset: int = 0,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Get inventory change history. Filter by SKU and/or location."""
+    query = "SELECT * FROM inventory_changes WHERE 1=1"
+    params: list = []
+    if sku:
+        query += " AND sku = ?"
+        params.append(sku)
+    if location:
+        query += " AND location_name = ?"
+        params.append(location)
+    query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+    cursor = await db.execute(query, params)
+    rows = await cursor.fetchall()
+    cols = [d[0] for d in cursor.description]
+    changes = [dict(zip(cols, row)) for row in rows]
+
+    # Also get total count
+    count_query = "SELECT COUNT(*) FROM inventory_changes WHERE 1=1"
+    count_params: list = []
+    if sku:
+        count_query += " AND sku = ?"
+        count_params.append(sku)
+    if location:
+        count_query += " AND location_name = ?"
+        count_params.append(location)
+    cursor2 = await db.execute(count_query, count_params)
+    total = (await cursor2.fetchone())[0]
+
+    return {"changes": changes, "total": total}

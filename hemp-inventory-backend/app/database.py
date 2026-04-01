@@ -362,6 +362,21 @@ async def init_db():
             except Exception:
                 pass
 
+        # Inventory change tracking table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS inventory_changes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sku TEXT NOT NULL,
+                product_name TEXT NOT NULL,
+                location_name TEXT NOT NULL,
+                old_stock REAL,
+                new_stock REAL,
+                change_amount REAL,
+                change_source TEXT DEFAULT 'sync',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Promo codes table for discount management
         await db.execute("""
             CREATE TABLE IF NOT EXISTS promo_codes (

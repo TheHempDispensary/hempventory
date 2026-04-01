@@ -422,6 +422,10 @@ export const updateOrderCustomer = (orderId: number, data: {
 export const getScheduleHours = (params?: { start_date?: string; end_date?: string }) =>
   api.get("/api/timeclock/schedule-hours", { params });
 
+// Inventory change history
+export const getInventoryChanges = (params?: { sku?: string; location?: string; limit?: number; offset?: number }) =>
+  api.get("/api/inventory/changes", { params });
+
 // Add variants to existing item
 export const addVariantsToItem = (data: {
   item_name: string;
