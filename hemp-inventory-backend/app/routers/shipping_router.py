@@ -168,8 +168,8 @@ async def create_shipment(
 
         shipment = resp.json()
 
-    # Extract USPS Ground and Priority rates only
-    ALLOWED_SERVICES = {"ground advantage", "priority"}
+    # Extract USPS Ground Advantage rates only (no Priority)
+    ALLOWED_SERVICES = {"ground advantage"}
     rates = shipment.get("rates", [])
     formatted_rates = []
     for rate in rates:
@@ -365,8 +365,8 @@ async def get_public_shipping_rates(body: PublicRatesRequest):
         print(f"[shippo] Connection error: {e}")
         raise HTTPException(status_code=500, detail="Shipping service unavailable")
 
-    # Extract USPS Ground and Priority rates only, add $2 markup
-    ALLOWED_SERVICES = {"ground advantage", "priority"}
+    # Extract USPS Ground Advantage rates only (no Priority), add $2 markup
+    ALLOWED_SERVICES = {"ground advantage"}
     rates = shipment.get("rates", [])
     formatted_rates = []
     for rate in rates:
