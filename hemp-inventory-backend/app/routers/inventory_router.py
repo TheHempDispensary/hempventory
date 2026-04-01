@@ -221,11 +221,15 @@ async def _do_sync(db: aiosqlite.Connection) -> dict:
     items_list = sorted(inventory.values(), key=lambda x: x["name"])
     result = {"items": items_list, "locations": location_list}
 
-    # Update cache
+    # Update cache – but never overwrite a good cache with empty data
+    # (protects against temporary Clover API failures wiping the cache)
     async with _cache_lock:
-        _inventory_cache["items"] = result["items"]
-        _inventory_cache["locations"] = result["locations"]
-        _inventory_cache["updated_at"] = time.time()
+        if items_list or not _inventory_cache["items"]:
+            _inventory_cache["items"] = result["items"]
+            _inventory_cache["locations"] = result["locations"]
+            _inventory_cache["updated_at"] = time.time()
+        else:
+            print("[sync] Skipping cache update: sync returned 0 items but cache has data")
 
     return result
 

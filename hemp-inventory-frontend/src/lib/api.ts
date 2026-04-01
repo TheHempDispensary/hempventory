@@ -18,8 +18,13 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
+      // Clear all token keys (generic + domain-specific) to prevent auth state mismatch
       localStorage.removeItem("token");
       localStorage.removeItem("userRole");
+      localStorage.removeItem("inventory_token");
+      localStorage.removeItem("inventory_userRole");
+      localStorage.removeItem("timeclock_token");
+      localStorage.removeItem("timeclock_userRole");
       window.location.href = "/";
     }
     return Promise.reject(error);

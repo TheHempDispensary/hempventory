@@ -95,6 +95,7 @@ export default function Inventory() {
   const [confirmDelete, setConfirmDelete] = useState<InventoryItem | null>(null);
   const [addItemMessage, setAddItemMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [toast, setToast] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // Multi-select state
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
@@ -232,12 +233,17 @@ export default function Inventory() {
   };
 
   const loadData = async (forceSync = false) => {
+    setLoadError(null);
     try {
       const res = forceSync ? await syncInventory() : await getCachedInventory();
-      setItems(res.data.items);
-      setLocations(res.data.locations);
+      setItems(res.data.items || []);
+      setLocations(res.data.locations || []);
     } catch (err) {
       console.error("Error loading inventory:", err);
+      // Only show error if we have no data yet (don't overwrite existing data on refresh failures)
+      if (items.length === 0) {
+        setLoadError("Failed to load inventory. Please try again.");
+      }
     } finally {
       setLoading(false);
     }
@@ -1034,6 +1040,21 @@ export default function Inventory() {
       <div className="flex items-center justify-center h-64">
         <RefreshCw className="w-8 h-8 text-green-600 animate-spin" />
         <span className="ml-3 text-gray-600">Loading inventory...</span>
+      </div>
+    );
+  }
+
+  if (loadError && items.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center h-64 gap-4">
+        <div className="text-red-500 text-lg font-medium">{loadError}</div>
+        <button
+          onClick={() => { setLoading(true); setLoadError(null); loadData(true); }}
+          className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
+        >
+          <RefreshCw className="w-4 h-4" />
+          Retry
+        </button>
       </div>
     );
   }
