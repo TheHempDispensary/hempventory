@@ -168,8 +168,9 @@ async def create_shipment(
 
         shipment = resp.json()
 
-    # Extract USPS Ground Advantage rates only (no Priority)
-    ALLOWED_SERVICES = {"ground advantage"}
+    # Extract USPS Ground Advantage and Priority rates (exclude Priority Express)
+    ALLOWED_SERVICES = {"ground advantage", "priority"}
+    BLOCKED_SERVICES = {"priority mail express"}
     rates = shipment.get("rates", [])
     formatted_rates = []
     for rate in rates:
@@ -177,6 +178,8 @@ async def create_shipment(
         if "USPS" not in provider.upper():
             continue
         service_name = rate.get("servicelevel", {}).get("name", "").lower()
+        if any(blocked in service_name for blocked in BLOCKED_SERVICES):
+            continue
         if not any(allowed in service_name for allowed in ALLOWED_SERVICES):
             continue
         formatted_rates.append({
@@ -365,8 +368,9 @@ async def get_public_shipping_rates(body: PublicRatesRequest):
         print(f"[shippo] Connection error: {e}")
         raise HTTPException(status_code=500, detail="Shipping service unavailable")
 
-    # Extract USPS Ground Advantage rates only (no Priority), add $2 markup
-    ALLOWED_SERVICES = {"ground advantage"}
+    # Extract USPS Ground Advantage and Priority rates (exclude Priority Express), add $2 markup
+    ALLOWED_SERVICES = {"ground advantage", "priority"}
+    BLOCKED_SERVICES = {"priority mail express"}
     rates = shipment.get("rates", [])
     formatted_rates = []
     for rate in rates:
@@ -374,6 +378,8 @@ async def get_public_shipping_rates(body: PublicRatesRequest):
         if "USPS" not in provider.upper():
             continue
         service_name = rate.get("servicelevel", {}).get("name", "").lower()
+        if any(blocked in service_name for blocked in BLOCKED_SERVICES):
+            continue
         if not any(allowed in service_name for allowed in ALLOWED_SERVICES):
             continue
         base_amount = float(rate.get("amount", "0"))
