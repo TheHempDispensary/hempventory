@@ -71,6 +71,8 @@ class TimeOffUpdate(BaseModel):
 class ScheduleNoteCreate(BaseModel):
     date: str  # "YYYY-MM-DD"
     note: str
+    note_type: Optional[str] = "shared"  # "shared" (visible to all), "admin_only", or "employee_private"
+    employee_id: Optional[int] = None  # Required for employee_private notes
 
 
 # ---------- Employee CRUD ----------
@@ -990,11 +992,15 @@ async def get_my_schedule_notes(
     user: dict = Depends(get_current_user),
     db: aiosqlite.Connection = Depends(get_db),
 ):
-    """Employee: Get schedule notes."""
+    """Employee: Get schedule notes (shared notes + notes private to this employee only)."""
     if user.get("role") != "employee":
         raise HTTPException(status_code=403, detail="Employee access only")
-    query = "SELECT id, date, note, created_by, created_at FROM schedule_notes WHERE 1=1"
-    params: list = []
+    emp_id = user.get("employee_id")
+    # Employees see: shared notes + their own private notes (NOT admin_only notes)
+    query = """SELECT id, date, note, created_by, created_at, note_type, employee_id
+               FROM schedule_notes
+               WHERE (note_type = 'shared' OR (note_type = 'employee_private' AND employee_id = ?))"""
+    params: list = [emp_id]
     if start_date:
         query += " AND date >= ?"
         params.append(start_date)
@@ -1005,7 +1011,7 @@ async def get_my_schedule_notes(
     cursor = await db.execute(query, params)
     rows = await cursor.fetchall()
     return [
-        {"id": r[0], "date": r[1], "note": r[2], "created_by": r[3], "created_at": r[4]}
+        {"id": r[0], "date": r[1], "note": r[2], "created_by": r[3], "created_at": r[4], "note_type": r[5] or "shared", "employee_id": r[6]}
         for r in rows
     ]
 
@@ -1120,8 +1126,8 @@ async def list_schedule_notes(
     user: dict = Depends(get_current_user),
     db: aiosqlite.Connection = Depends(get_db),
 ):
-    """Admin: List schedule notes for a date range."""
-    query = "SELECT id, date, note, created_by, created_at FROM schedule_notes WHERE 1=1"
+    """Admin: List all schedule notes for a date range (admin sees everything)."""
+    query = "SELECT id, date, note, created_by, created_at, note_type, employee_id FROM schedule_notes WHERE 1=1"
     params: list = []
     if start_date:
         query += " AND date >= ?"
@@ -1133,10 +1139,17 @@ async def list_schedule_notes(
 
     cursor = await db.execute(query, params)
     rows = await cursor.fetchall()
-    return [
-        {"id": r[0], "date": r[1], "note": r[2], "created_by": r[3], "created_at": r[4]}
-        for r in rows
-    ]
+
+    # For employee_private notes, look up employee name
+    notes = []
+    for r in rows:
+        note_data = {"id": r[0], "date": r[1], "note": r[2], "created_by": r[3], "created_at": r[4], "note_type": r[5] or "shared", "employee_id": r[6]}
+        if r[6]:
+            emp_cursor = await db.execute("SELECT name FROM employees WHERE id = ?", (r[6],))
+            emp_row = await emp_cursor.fetchone()
+            note_data["employee_name"] = emp_row[0] if emp_row else None
+        notes.append(note_data)
+    return notes
 
 
 @router.post("/schedule-notes")
@@ -1145,13 +1158,19 @@ async def create_schedule_note(
     user: dict = Depends(get_current_user),
     db: aiosqlite.Connection = Depends(get_db),
 ):
-    """Admin: Add a note to a specific date."""
+    """Admin: Add a note to a specific date. Types: shared, admin_only, employee_private."""
+    note_type = data.note_type or "shared"
+    if note_type not in ("shared", "admin_only", "employee_private"):
+        raise HTTPException(status_code=400, detail="Invalid note_type")
+    if note_type == "employee_private" and not data.employee_id:
+        raise HTTPException(status_code=400, detail="employee_id required for employee_private notes")
+
     cursor = await db.execute(
-        "INSERT INTO schedule_notes (date, note, created_by) VALUES (?, ?, ?)",
-        (data.date, data.note, user.get("username", "admin")),
+        "INSERT INTO schedule_notes (date, note, created_by, note_type, employee_id) VALUES (?, ?, ?, ?, ?)",
+        (data.date, data.note, user.get("username", "admin"), note_type, data.employee_id if note_type == "employee_private" else None),
     )
     await db.commit()
-    return {"id": cursor.lastrowid, "status": "created"}
+    return {"id": cursor.lastrowid, "status": "created", "note_type": note_type}
 
 
 @router.delete("/schedule-notes/{note_id}")
@@ -1164,3 +1183,46 @@ async def delete_schedule_note(
     await db.execute("DELETE FROM schedule_notes WHERE id = ?", (note_id,))
     await db.commit()
     return {"status": "deleted"}
+
+
+# ---------- Scheduled Hours Totals ----------
+
+@router.get("/schedule-hours")
+async def get_schedule_hours(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Admin: Get total scheduled hours per employee for a date range."""
+    query = """
+        SELECT s.employee_id, e.name,
+               SUM(
+                   (CAST(SUBSTR(s.end_time, 1, 2) AS REAL) + CAST(SUBSTR(s.end_time, 4, 2) AS REAL) / 60.0)
+                   - (CAST(SUBSTR(s.start_time, 1, 2) AS REAL) + CAST(SUBSTR(s.start_time, 4, 2) AS REAL) / 60.0)
+               ) as total_hours,
+               COUNT(*) as shift_count
+        FROM date_schedules s
+        JOIN employees e ON e.id = s.employee_id
+        WHERE 1=1
+    """
+    params: list = []
+    if start_date:
+        query += " AND s.date >= ?"
+        params.append(start_date)
+    if end_date:
+        query += " AND s.date <= ?"
+        params.append(end_date)
+    query += " GROUP BY s.employee_id ORDER BY e.name"
+
+    cursor = await db.execute(query, params)
+    rows = await cursor.fetchall()
+    return [
+        {
+            "employee_id": r[0],
+            "employee_name": r[1],
+            "total_hours": round(r[2], 2) if r[2] else 0,
+            "shift_count": r[3],
+        }
+        for r in rows
+    ]

@@ -387,7 +387,7 @@ export const deleteTimeOffRequest = (requestId: number) =>
 export const getScheduleNotes = (params?: { start_date?: string; end_date?: string }) =>
   api.get("/api/timeclock/schedule-notes", { params });
 
-export const createScheduleNote = (data: { date: string; note: string }) =>
+export const createScheduleNote = (data: { date: string; note: string; note_type?: string; employee_id?: number }) =>
   api.post("/api/timeclock/schedule-notes", data);
 
 export const deleteScheduleNote = (noteId: number) =>
@@ -402,6 +402,22 @@ export const updateOrderStatus = (orderId: number, status: string) =>
 
 export const updateOrderNotes = (orderId: number, staffNotes: string) =>
   api.patch(`/api/ecommerce/orders/${orderId}/notes`, { staff_notes: staffNotes });
+
+export const updateOrderCustomer = (orderId: number, data: {
+  customer_first_name?: string;
+  customer_last_name?: string;
+  customer_email?: string;
+  customer_phone?: string;
+  shipping_address?: string;
+  shipping_apartment?: string;
+  shipping_city?: string;
+  shipping_state?: string;
+  shipping_zip?: string;
+}) => api.patch(`/api/ecommerce/orders/${orderId}/customer`, data);
+
+// Schedule Hours
+export const getScheduleHours = (params?: { start_date?: string; end_date?: string }) =>
+  api.get("/api/timeclock/schedule-hours", { params });
 
 // Shipping (Shippo)
 export const createShipment = (data: {

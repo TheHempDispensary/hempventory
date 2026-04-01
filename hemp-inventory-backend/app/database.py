@@ -347,9 +347,20 @@ async def init_db():
                 date TEXT NOT NULL,
                 note TEXT NOT NULL,
                 created_by TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                note_type TEXT DEFAULT 'shared',
+                employee_id INTEGER
             )
         """)
+        # Migration: add note_type and employee_id columns if missing
+        for col, coldef in [
+            ("note_type", "TEXT DEFAULT 'shared'"),
+            ("employee_id", "INTEGER"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE schedule_notes ADD COLUMN {col} {coldef}")
+            except Exception:
+                pass
 
         # Promo codes table for discount management
         await db.execute("""

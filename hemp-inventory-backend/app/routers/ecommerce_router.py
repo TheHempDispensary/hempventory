@@ -1407,6 +1407,74 @@ async def update_order_notes(
     return {"success": True, "order_id": order_id, "staff_notes": staff_notes}
 
 
+@router.patch("/orders/{order_id}/customer")
+async def update_order_customer(
+    order_id: int,
+    request: Request,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Update an order's customer details (requires admin auth)."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    import jwt
+    token = auth.split(" ", 1)[1]
+    jwt_secret = os.environ.get("JWT_SECRET", "hemp-inventory-secret-key")
+    try:
+        jwt.decode(token, jwt_secret, algorithms=["HS256"])
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    body = await request.json()
+
+    # Build dynamic update query from allowed fields
+    allowed_fields = [
+        "customer_first_name", "customer_last_name", "customer_email",
+        "customer_phone", "shipping_address", "shipping_apartment",
+        "shipping_city", "shipping_state", "shipping_zip",
+    ]
+    updates = []
+    params = []
+    for field in allowed_fields:
+        if field in body:
+            updates.append(f"{field} = ?")
+            params.append(body[field])
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="No valid fields to update")
+
+    params.append(order_id)
+    query = f"UPDATE ecommerce_orders SET {', '.join(updates)}, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+    await db.execute(query, params)
+    await db.commit()
+
+    # Return the updated order fields
+    cursor = await db.execute(
+        """SELECT customer_first_name, customer_last_name, customer_email, customer_phone,
+                  shipping_address, shipping_apartment, shipping_city, shipping_state, shipping_zip
+           FROM ecommerce_orders WHERE id = ?""",
+        (order_id,),
+    )
+    row = await cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    return {
+        "success": True,
+        "order_id": order_id,
+        "customer_first_name": row[0],
+        "customer_last_name": row[1],
+        "customer_email": row[2],
+        "customer_phone": row[3],
+        "shipping_address": row[4],
+        "shipping_apartment": row[5],
+        "shipping_city": row[6],
+        "shipping_state": row[7],
+        "shipping_zip": row[8],
+    }
+
+
 @router.post("/orders/{order_id}/resend-confirmation")
 async def resend_order_confirmation(
     order_id: int,

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { getOnlineOrders, updateOrderStatus, updateOrderNotes, createShipment, purchaseLabel, getShippingLabel, refundOrder, resendOrderConfirmation } from "../lib/api";
-import { MessageSquare, Save } from "lucide-react";
+import { getOnlineOrders, updateOrderStatus, updateOrderNotes, updateOrderCustomer, createShipment, purchaseLabel, getShippingLabel, refundOrder, resendOrderConfirmation } from "../lib/api";
+import { MessageSquare, Save, Edit2, X } from "lucide-react";
 import { RefreshCw, Search, Package, ChevronDown, ChevronUp, Truck, CheckCircle, XCircle, Clock, ShoppingCart, Printer, Tag, ExternalLink, Loader2, RotateCcw, AlertTriangle, DollarSign, Mail, MapPin } from "lucide-react";
 
 interface OrderItem {
@@ -265,6 +265,21 @@ export default function OnlineOrders() {
   const [refundError, setRefundError] = useState("");
   const [refundSuccess, setRefundSuccess] = useState("");
 
+  // Edit customer details state
+  const [editingCustomer, setEditingCustomer] = useState<number | null>(null);
+  const [savingCustomer, setSavingCustomer] = useState(false);
+  const [editCustomer, setEditCustomer] = useState({
+    customer_first_name: "",
+    customer_last_name: "",
+    customer_email: "",
+    customer_phone: "",
+    shipping_address: "",
+    shipping_apartment: "",
+    shipping_city: "",
+    shipping_state: "",
+    shipping_zip: "",
+  });
+
   const loadOrders = async () => {
     setLoading(true);
     try {
@@ -424,6 +439,36 @@ export default function OnlineOrders() {
         setResendingOrderId(null);
         setResendError("");
       }, 5000);
+    }
+  };
+
+  const handleStartEditCustomer = (order: Order) => {
+    setEditingCustomer(order.id);
+    setEditCustomer({
+      customer_first_name: order.customer_first_name || "",
+      customer_last_name: order.customer_last_name || "",
+      customer_email: order.customer_email || "",
+      customer_phone: order.customer_phone || "",
+      shipping_address: order.shipping_address || "",
+      shipping_apartment: order.shipping_apartment || "",
+      shipping_city: order.shipping_city || "",
+      shipping_state: order.shipping_state || "",
+      shipping_zip: order.shipping_zip || "",
+    });
+  };
+
+  const handleSaveCustomer = async (orderId: number) => {
+    setSavingCustomer(true);
+    try {
+      const res = await updateOrderCustomer(orderId, editCustomer);
+      setOrders((prev) =>
+        prev.map((o) => (o.id === orderId ? { ...o, ...res.data } : o))
+      );
+      setEditingCustomer(null);
+    } catch (err) {
+      console.error("Error saving customer details:", err);
+    } finally {
+      setSavingCustomer(false);
     }
   };
 
@@ -653,10 +698,45 @@ export default function OnlineOrders() {
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                       {/* Customer Info */}
                       <div>
-                        <h4 className="text-xs font-semibold text-gray-500 uppercase mb-2">Customer</h4>
-                        <p className="text-sm font-medium text-gray-900">{order.customer_first_name} {order.customer_last_name}</p>
-                        <p className="text-sm text-gray-600">{order.customer_email}</p>
-                        <p className="text-sm text-gray-600">{order.customer_phone}</p>
+                        <div className="flex items-center justify-between mb-2">
+                          <h4 className="text-xs font-semibold text-gray-500 uppercase">Customer</h4>
+                          {editingCustomer !== order.id && (
+                            <button onClick={() => handleStartEditCustomer(order)} className="text-xs text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1">
+                              <Edit2 className="w-3 h-3" /> Edit
+                            </button>
+                          )}
+                        </div>
+                        {editingCustomer === order.id ? (
+                          <div className="space-y-2">
+                            <div className="grid grid-cols-2 gap-2">
+                              <input type="text" value={editCustomer.customer_first_name} onChange={(e) => setEditCustomer({ ...editCustomer, customer_first_name: e.target.value })} placeholder="First Name" className="px-2 py-1 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500" />
+                              <input type="text" value={editCustomer.customer_last_name} onChange={(e) => setEditCustomer({ ...editCustomer, customer_last_name: e.target.value })} placeholder="Last Name" className="px-2 py-1 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500" />
+                            </div>
+                            <input type="email" value={editCustomer.customer_email} onChange={(e) => setEditCustomer({ ...editCustomer, customer_email: e.target.value })} placeholder="Email" className="w-full px-2 py-1 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500" />
+                            <input type="tel" value={editCustomer.customer_phone} onChange={(e) => setEditCustomer({ ...editCustomer, customer_phone: e.target.value })} placeholder="Phone" className="w-full px-2 py-1 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500" />
+                            <input type="text" value={editCustomer.shipping_address} onChange={(e) => setEditCustomer({ ...editCustomer, shipping_address: e.target.value })} placeholder="Street Address" className="w-full px-2 py-1 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500" />
+                            <input type="text" value={editCustomer.shipping_apartment} onChange={(e) => setEditCustomer({ ...editCustomer, shipping_apartment: e.target.value })} placeholder="Apt / Suite" className="w-full px-2 py-1 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500" />
+                            <div className="grid grid-cols-3 gap-2">
+                              <input type="text" value={editCustomer.shipping_city} onChange={(e) => setEditCustomer({ ...editCustomer, shipping_city: e.target.value })} placeholder="City" className="px-2 py-1 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500" />
+                              <input type="text" value={editCustomer.shipping_state} onChange={(e) => setEditCustomer({ ...editCustomer, shipping_state: e.target.value })} placeholder="State" className="px-2 py-1 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500" maxLength={2} />
+                              <input type="text" value={editCustomer.shipping_zip} onChange={(e) => setEditCustomer({ ...editCustomer, shipping_zip: e.target.value })} placeholder="ZIP" className="px-2 py-1 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500" />
+                            </div>
+                            <div className="flex gap-2 pt-1">
+                              <button onClick={() => handleSaveCustomer(order.id)} disabled={savingCustomer} className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors text-sm font-medium">
+                                <Save className="w-3.5 h-3.5" />{savingCustomer ? "Saving..." : "Save"}
+                              </button>
+                              <button onClick={() => setEditingCustomer(null)} className="px-3 py-1.5 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm font-medium flex items-center gap-1">
+                                <X className="w-3.5 h-3.5" />Cancel
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <>
+                            <p className="text-sm font-medium text-gray-900">{order.customer_first_name} {order.customer_last_name}</p>
+                            <p className="text-sm text-gray-600">{order.customer_email}</p>
+                            <p className="text-sm text-gray-600">{order.customer_phone}</p>
+                          </>
+                        )}
                       </div>
 
                       {/* Shipping / Pickup */}

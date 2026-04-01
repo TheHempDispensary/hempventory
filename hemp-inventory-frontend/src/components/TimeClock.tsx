@@ -23,6 +23,7 @@ import {
   createScheduleNote,
   deleteScheduleNote,
   createManualEntry,
+  getScheduleHours,
 } from "../lib/api";
 import {
   Clock,
@@ -103,6 +104,16 @@ interface ScheduleNote {
   note: string;
   created_by: string | null;
   created_at: string;
+  note_type?: string;
+  employee_id?: number | null;
+  employee_name?: string;
+}
+
+interface ScheduleHours {
+  employee_id: number;
+  employee_name: string;
+  total_hours: number;
+  shift_count: number;
 }
 
 export default function TimeClock() {
@@ -166,7 +177,10 @@ export default function TimeClock() {
   const [timeOffEmpId, setTimeOffEmpId] = useState(0);
   const [timeOffReason, setTimeOffReason] = useState("");
   const [noteText, setNoteText] = useState("");
+  const [noteType, setNoteType] = useState<"shared" | "admin_only" | "employee_private">("shared");
+  const [noteEmpId, setNoteEmpId] = useState(0);
   const [scheduleSubTab, setScheduleSubTab] = useState<"calendar" | "requests">("calendar");
+  const [scheduleHours, setScheduleHours] = useState<ScheduleHours[]>([]);
 
   // Toast
   const [toast, setToast] = useState<{ type: "success" | "error"; text: string } | null>(null);
@@ -406,13 +420,24 @@ export default function TimeClock() {
     }
   }, [getVisibleDateRange]);
 
+  const loadHours = useCallback(async () => {
+    try {
+      const range = getVisibleDateRange();
+      const res = await getScheduleHours({ start_date: range.start_date, end_date: range.end_date });
+      setScheduleHours(res.data);
+    } catch (err) {
+      console.error("Error loading schedule hours:", err);
+    }
+  }, [getVisibleDateRange]);
+
   useEffect(() => {
     if (tab === "schedule") {
       loadSchedules();
       loadTimeOff();
       loadNotes();
+      loadHours();
     }
-  }, [tab, loadSchedules, loadTimeOff, loadNotes]);
+  }, [tab, loadSchedules, loadTimeOff, loadNotes, loadHours]);
 
   const handleSaveSchedule = async (empId: number, date: string, start: string, end: string, location: string) => {
     setSavingSchedule(true);
@@ -1235,11 +1260,22 @@ export default function TimeClock() {
 
         const handleAddNote = async () => {
           if (!selectedDate || !noteText.trim()) return;
+          if (noteType === "employee_private" && !noteEmpId) {
+            showToast("error", "Please select an employee for private notes");
+            return;
+          }
           try {
-            await createScheduleNote({ date: selectedDate, note: noteText.trim() });
+            await createScheduleNote({
+              date: selectedDate,
+              note: noteText.trim(),
+              note_type: noteType,
+              employee_id: noteType === "employee_private" ? noteEmpId : undefined,
+            });
             showToast("success", "Note added");
             setShowNoteModal(false);
             setNoteText("");
+            setNoteType("shared");
+            setNoteEmpId(0);
             setSelectedDate("");
             await loadNotes();
           } catch { showToast("error", "Failed to add note"); }
@@ -1318,6 +1354,26 @@ export default function TimeClock() {
               </div>
 
               {/* Month calendars */}
+              {/* Employee Hours Summary */}
+              {scheduleHours.length > 0 && (
+                <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+                  <div className="p-3 border-b border-gray-200 bg-emerald-50">
+                    <h3 className="font-semibold text-emerald-800 text-sm flex items-center gap-2"><Clock className="w-4 h-4" />Scheduled Hours Summary</h3>
+                  </div>
+                  <div className="p-3">
+                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
+                      {scheduleHours.map(h => (
+                        <div key={h.employee_id} className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-center">
+                          <div className="text-sm font-medium text-gray-900">{h.employee_name}</div>
+                          <div className="text-2xl font-bold text-emerald-700 mt-1">{h.total_hours}h</div>
+                          <div className="text-xs text-gray-500 mt-0.5">{h.shift_count} shift{h.shift_count !== 1 ? "s" : ""}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {renderMonths.map(({ month: mo, year: yr, days }) => {
                 return (
                   <div key={`${yr}-${mo}`} className="bg-white border border-gray-200 rounded-lg overflow-hidden">
@@ -1428,15 +1484,44 @@ export default function TimeClock() {
                               const dayNotes = notesMap[dateStr];
                               return (
                                 <td key={i} className="px-1 py-1 text-center border-r border-b border-gray-200 text-xs text-blue-700">
-                                  {dayNotes ? dayNotes.map(n => (
-                                    <div key={n.id} className="flex items-center gap-0.5 justify-center" title={n.note}>
-                                      <span className="truncate max-w-14">{n.note}</span>
-                                      <button onClick={() => handleRemoveNote(n.id)} className="text-red-400 hover:text-red-600 flex-shrink-0"><X className="w-2.5 h-2.5" /></button>
-                                    </div>
-                                  )) : (
+                                  {dayNotes ? dayNotes.map(n => {
+                                    const typeColor = n.note_type === "admin_only" ? "text-purple-700 bg-purple-50" : n.note_type === "employee_private" ? "text-orange-700 bg-orange-50" : "text-blue-700";
+                                    const typeLabel = n.note_type === "admin_only" ? "Admin" : n.note_type === "employee_private" ? (n.employee_name || "Emp") : "";
+                                    return (
+                                      <div key={n.id} className={`flex items-center gap-0.5 justify-center ${typeColor}`} title={`${typeLabel ? `[${typeLabel}] ` : ""}${n.note}`}>
+                                        {typeLabel && <span className="text-[9px] font-bold">{typeLabel[0]}</span>}
+                                        <span className="truncate max-w-14">{n.note}</span>
+                                        <button onClick={() => handleRemoveNote(n.id)} className="text-red-400 hover:text-red-600 flex-shrink-0"><X className="w-2.5 h-2.5" /></button>
+                                      </div>
+                                    );
+                                  }) : (
                                     <button onClick={() => { setSelectedDate(dateStr); setShowNoteModal(true); }}
                                       className="text-gray-300 hover:text-blue-500 transition-colors"><Plus className="w-3 h-3 mx-auto" /></button>
                                   )}
+                                </td>
+                              );
+                            })}
+                          </tr>
+                          {/* Hours totals row */}
+                          <tr className="bg-emerald-50/50">
+                            <td className="px-2 py-1.5 text-xs font-medium text-emerald-700 border-r border-b border-gray-200 sticky left-0 bg-emerald-50 z-10">
+                              <Clock className="w-3 h-3 inline mr-1" />Total Hrs
+                            </td>
+                            {days.map((d, i) => {
+                              const dateStr = d.toISOString().split("T")[0];
+                              // Sum hours for all employees on this date
+                              let dayTotal = 0;
+                              activeEmps.forEach(emp => {
+                                const sched = scheduleMap[`${emp.id}-${dateStr}`];
+                                if (sched) {
+                                  const [sh, sm] = sched.start_time.split(":").map(Number);
+                                  const [eh, em] = sched.end_time.split(":").map(Number);
+                                  dayTotal += (eh + em / 60) - (sh + sm / 60);
+                                }
+                              });
+                              return (
+                                <td key={i} className="px-1 py-1 text-center border-r border-b border-gray-200 text-xs font-medium text-emerald-700">
+                                  {dayTotal > 0 ? dayTotal.toFixed(1) : ""}
                                 </td>
                               );
                             })}
@@ -1449,7 +1534,9 @@ export default function TimeClock() {
                       <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-green-100 border border-green-300" /> Today</span>
                       <span className="flex items-center gap-1"><span className="inline-block px-1 rounded text-xs font-bold bg-red-100 text-red-700">OFF</span> Approved Time Off</span>
                       <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-400" /> Pending Request</span>
-                      <span className="flex items-center gap-1"><MessageSquare className="w-3 h-3 text-blue-500" /> Has Notes</span>
+                      <span className="flex items-center gap-1"><MessageSquare className="w-3 h-3 text-blue-500" /> Shared Note</span>
+                      <span className="flex items-center gap-1"><span className="text-[9px] font-bold text-purple-700 bg-purple-50 px-1 rounded">A</span> Admin Only</span>
+                      <span className="flex items-center gap-1"><span className="text-[9px] font-bold text-orange-700 bg-orange-50 px-1 rounded">E</span> Employee Private</span>
                     </div>
                   </div>
                 );
@@ -1563,14 +1650,44 @@ export default function TimeClock() {
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500" />
                   </div>
                   <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Note Type</label>
+                    <div className="flex gap-2">
+                      <button onClick={() => { setNoteType("shared"); setNoteEmpId(0); }}
+                        className={`flex-1 px-3 py-2 rounded-lg text-xs font-medium border transition-colors ${noteType === "shared" ? "bg-blue-100 border-blue-400 text-blue-700" : "bg-white border-gray-300 text-gray-600 hover:bg-gray-50"}`}>
+                        Shared (All)
+                      </button>
+                      <button onClick={() => { setNoteType("admin_only"); setNoteEmpId(0); }}
+                        className={`flex-1 px-3 py-2 rounded-lg text-xs font-medium border transition-colors ${noteType === "admin_only" ? "bg-purple-100 border-purple-400 text-purple-700" : "bg-white border-gray-300 text-gray-600 hover:bg-gray-50"}`}>
+                        Admin Only
+                      </button>
+                      <button onClick={() => setNoteType("employee_private")}
+                        className={`flex-1 px-3 py-2 rounded-lg text-xs font-medium border transition-colors ${noteType === "employee_private" ? "bg-orange-100 border-orange-400 text-orange-700" : "bg-white border-gray-300 text-gray-600 hover:bg-gray-50"}`}>
+                        Private (Emp)
+                      </button>
+                    </div>
+                    <p className="text-[10px] text-gray-400 mt-1">
+                      {noteType === "shared" ? "Visible to everyone." : noteType === "admin_only" ? "Only visible to admin, hidden from employees." : "Only visible to the selected employee."}
+                    </p>
+                  </div>
+                  {noteType === "employee_private" && (
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Employee</label>
+                      <select value={noteEmpId} onChange={e => setNoteEmpId(Number(e.target.value))}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500">
+                        <option value={0}>Select employee...</option>
+                        {activeEmps.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
+                      </select>
+                    </div>
+                  )}
+                  <div>
                     <label className="block text-xs font-medium text-gray-600 mb-1">Note</label>
                     <textarea value={noteText} onChange={e => setNoteText(e.target.value)} placeholder="Staff meeting, holiday, special event..."
                       rows={3} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 resize-y" />
                   </div>
                   <div className="flex gap-2 pt-2">
-                    <button onClick={handleAddNote} disabled={!selectedDate || !noteText.trim()}
+                    <button onClick={handleAddNote} disabled={!selectedDate || !noteText.trim() || (noteType === "employee_private" && !noteEmpId)}
                       className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 font-medium text-sm">Add Note</button>
-                    <button onClick={() => setShowNoteModal(false)} className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 font-medium text-sm">Cancel</button>
+                    <button onClick={() => { setShowNoteModal(false); setNoteType("shared"); setNoteEmpId(0); }} className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 font-medium text-sm">Cancel</button>
                   </div>
                 </div>
               </div>
