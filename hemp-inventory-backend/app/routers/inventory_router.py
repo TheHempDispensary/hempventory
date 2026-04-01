@@ -2028,6 +2028,152 @@ async def create_item_group(
     return {"results": results}
 
 
+class AddVariantsToItem(BaseModel):
+    item_name: str  # Name of the existing item
+    item_sku: Optional[str] = None  # SKU of the existing item (for lookup)
+    price: int  # Price in cents for the new variant items
+    sku_prefix: Optional[str] = None
+    variants: list[VariantOption]  # Attributes with their options
+    keep_original: Optional[bool] = False  # Keep the original non-variant item
+
+
+@router.post("/add-variants")
+async def add_variants_to_existing_item(
+    req: AddVariantsToItem,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Add variants to an existing item by creating an item group and variant items.
+
+    Flow:
+    1. Find the existing item by name/SKU at each location
+    2. Create an item group with the item's name
+    3. Create attributes and options
+    4. Generate variant combinations (cartesian product)
+    5. Create new variant items linked to the group
+    6. Associate options with each variant item
+    7. Optionally delete the original item (if keep_original is False)
+    """
+    locations = await _get_locations(db)
+    if not locations:
+        raise HTTPException(status_code=400, detail="No locations configured")
+
+    if not req.variants or not any(v.attribute_name.strip() and any(o.strip() for o in v.option_names) for v in req.variants):
+        raise HTTPException(status_code=400, detail="At least one attribute with options is required")
+
+    results = []
+
+    for loc in locations:
+        loc_id, loc_name, merchant_id, api_token = loc[0], loc[1], loc[2], loc[3]
+        try:
+            client = CloverClient(merchant_id, api_token)
+
+            # Find the existing item
+            existing_item_id = None
+            category_ids = []
+            items_data = await client.get_items()
+            for item in items_data.get("elements", []):
+                if req.item_sku and item.get("sku") == req.item_sku:
+                    existing_item_id = item.get("id")
+                    # Get categories from existing item
+                    cats = item.get("categories", {}).get("elements", [])
+                    category_ids = [c.get("id") for c in cats if c.get("id")]
+                    break
+                if item.get("name") == req.item_name:
+                    existing_item_id = item.get("id")
+                    cats = item.get("categories", {}).get("elements", [])
+                    category_ids = [c.get("id") for c in cats if c.get("id")]
+                    break
+
+            # Step 1: Create the item group
+            group = await client.create_item_group(req.item_name)
+            group_id = group["id"]
+
+            # Step 2 & 3: Create attributes and their options
+            attribute_options: list[list[dict]] = []
+            for variant in req.variants:
+                if not variant.attribute_name.strip():
+                    continue
+                valid_options = [o.strip() for o in variant.option_names if o.strip()]
+                if not valid_options:
+                    continue
+                attr = await client.create_attribute(variant.attribute_name.strip(), group_id)
+                attr_id = attr["id"]
+
+                options_for_attr: list[dict] = []
+                for opt_name in valid_options:
+                    opt = await client.create_option(attr_id, opt_name)
+                    options_for_attr.append({"id": opt["id"], "name": opt_name, "attr_name": variant.attribute_name})
+                attribute_options.append(options_for_attr)
+
+            if not attribute_options:
+                results.append({"location": loc_name, "status": "error", "error": "No valid attributes/options provided"})
+                continue
+
+            # Step 4: Generate cartesian product of all options
+            option_combos = list(itertools.product(*attribute_options))
+
+            # Step 5 & 6: Create items for each combination
+            created_items = []
+            for combo in option_combos:
+                item_data: dict = {
+                    "name": req.item_name,
+                    "price": req.price,
+                    "itemGroup": {"id": group_id},
+                }
+                if req.sku_prefix:
+                    option_suffix = "-".join(o["name"][:3].upper() for o in combo)
+                    item_data["sku"] = f"{req.sku_prefix}-{option_suffix}"
+
+                created_item = await client.create_item(item_data)
+                item_id = created_item.get("id", "")
+
+                for opt in combo:
+                    await client.associate_option_with_item(opt["id"], item_id)
+
+                # Assign same categories as original item
+                for cat_id in category_ids:
+                    try:
+                        await client.assign_category(item_id, cat_id)
+                    except Exception:
+                        pass
+
+                combo_desc = " / ".join(o["name"] for o in combo)
+                created_items.append({
+                    "item_id": item_id,
+                    "variant": combo_desc,
+                    "name": created_item.get("name", ""),
+                })
+
+            # Delete original non-variant item if requested
+            if not req.keep_original and existing_item_id:
+                try:
+                    await client.delete_item(existing_item_id)
+                except Exception as del_err:
+                    print(f"Warning: Could not delete original item at {loc_name}: {del_err}")
+
+            results.append({
+                "location": loc_name,
+                "status": "created",
+                "group_id": group_id,
+                "items_created": len(created_items),
+                "items": created_items,
+                "original_deleted": not req.keep_original and existing_item_id is not None,
+            })
+
+        except Exception as e:
+            error_detail = str(e)
+            try:
+                if hasattr(e, "response"):
+                    error_body = e.response.json()
+                    error_detail = error_body.get("message", str(e))
+            except Exception:
+                pass
+            results.append({"location": loc_name, "status": "error", "error": error_detail})
+
+    return {"results": results}
+
+
 @router.get("/attributes")
 async def get_attributes(
     user: dict = Depends(get_current_user),

@@ -390,6 +390,9 @@ export const getScheduleNotes = (params?: { start_date?: string; end_date?: stri
 export const createScheduleNote = (data: { date: string; note: string; note_type?: string; employee_id?: number }) =>
   api.post("/api/timeclock/schedule-notes", data);
 
+export const updateScheduleNote = (noteId: number, data: { note?: string; note_type?: string; employee_id?: number }) =>
+  api.put(`/api/timeclock/schedule-notes/${noteId}`, data);
+
 export const deleteScheduleNote = (noteId: number) =>
   api.delete(`/api/timeclock/schedule-notes/${noteId}`);
 
@@ -418,6 +421,16 @@ export const updateOrderCustomer = (orderId: number, data: {
 // Schedule Hours
 export const getScheduleHours = (params?: { start_date?: string; end_date?: string }) =>
   api.get("/api/timeclock/schedule-hours", { params });
+
+// Add variants to existing item
+export const addVariantsToItem = (data: {
+  item_name: string;
+  item_sku?: string;
+  price: number;
+  sku_prefix?: string;
+  variants: { attribute_name: string; option_names: string[] }[];
+  keep_original?: boolean;
+}) => api.post("/api/inventory/add-variants", data);
 
 // Shipping (Shippo)
 export const createShipment = (data: {

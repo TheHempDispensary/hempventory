@@ -21,6 +21,7 @@ import {
   deleteTimeOffRequest,
   getScheduleNotes,
   createScheduleNote,
+  updateScheduleNote,
   deleteScheduleNote,
   createManualEntry,
   getScheduleHours,
@@ -180,7 +181,11 @@ export default function TimeClock() {
   const [noteType, setNoteType] = useState<"shared" | "admin_only" | "employee_private">("shared");
   const [noteEmpId, setNoteEmpId] = useState(0);
   const [scheduleSubTab, setScheduleSubTab] = useState<"calendar" | "requests">("calendar");
-  const [scheduleHours, setScheduleHours] = useState<ScheduleHours[]>([]);
+  const [hoursView, setHoursView] = useState<"week" | "month">("week");
+  const [weeklyHours, setWeeklyHours] = useState<ScheduleHours[]>([]);
+  const [monthlyHours, setMonthlyHours] = useState<ScheduleHours[]>([]);
+  const [editingNoteId, setEditingNoteId] = useState<number | null>(null);
+  const [editNoteText, setEditNoteText] = useState("");
 
   // Toast
   const [toast, setToast] = useState<{ type: "success" | "error"; text: string } | null>(null);
@@ -422,9 +427,22 @@ export default function TimeClock() {
 
   const loadHours = useCallback(async () => {
     try {
+      // Load monthly hours (full visible range)
       const range = getVisibleDateRange();
-      const res = await getScheduleHours({ start_date: range.start_date, end_date: range.end_date });
-      setScheduleHours(res.data);
+      const monthRes = await getScheduleHours({ start_date: range.start_date, end_date: range.end_date });
+      setMonthlyHours(monthRes.data);
+
+      // Load weekly hours (current week: Sunday to Saturday)
+      const now = new Date();
+      const weekStart = new Date(now);
+      weekStart.setDate(now.getDate() - now.getDay());
+      const weekEnd = new Date(weekStart);
+      weekEnd.setDate(weekStart.getDate() + 6);
+      const weekRes = await getScheduleHours({
+        start_date: weekStart.toISOString().split("T")[0],
+        end_date: weekEnd.toISOString().split("T")[0],
+      });
+      setWeeklyHours(weekRes.data);
     } catch (err) {
       console.error("Error loading schedule hours:", err);
     }
@@ -1289,6 +1307,17 @@ export default function TimeClock() {
           } catch { showToast("error", "Failed to delete note"); }
         };
 
+        const handleEditNote = async (id: number) => {
+          if (!editNoteText.trim()) return;
+          try {
+            await updateScheduleNote(id, { note: editNoteText.trim() });
+            showToast("success", "Note updated");
+            setEditingNoteId(null);
+            setEditNoteText("");
+            await loadNotes();
+          } catch { showToast("error", "Failed to update note"); }
+        };
+
         const prevMonth = () => {
           if (calMonth === 0) { setCalMonth(11); setCalYear(calYear - 1); }
           else setCalMonth(calMonth - 1);
@@ -1355,14 +1384,24 @@ export default function TimeClock() {
 
               {/* Month calendars */}
               {/* Employee Hours Summary */}
-              {scheduleHours.length > 0 && (
+              {(weeklyHours.length > 0 || monthlyHours.length > 0) && (
                 <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
-                  <div className="p-3 border-b border-gray-200 bg-emerald-50">
+                  <div className="p-3 border-b border-gray-200 bg-emerald-50 flex items-center justify-between">
                     <h3 className="font-semibold text-emerald-800 text-sm flex items-center gap-2"><Clock className="w-4 h-4" />Scheduled Hours Summary</h3>
+                    <div className="flex items-center gap-1 bg-emerald-100 rounded-lg p-0.5">
+                      <button onClick={() => setHoursView("week")}
+                        className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${hoursView === "week" ? "bg-white text-emerald-800 shadow-sm" : "text-emerald-600 hover:text-emerald-800"}`}>
+                        This Week
+                      </button>
+                      <button onClick={() => setHoursView("month")}
+                        className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${hoursView === "month" ? "bg-white text-emerald-800 shadow-sm" : "text-emerald-600 hover:text-emerald-800"}`}>
+                        This Month
+                      </button>
+                    </div>
                   </div>
                   <div className="p-3">
                     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
-                      {scheduleHours.map(h => (
+                      {(hoursView === "week" ? weeklyHours : monthlyHours).map(h => (
                         <div key={h.employee_id} className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-center">
                           <div className="text-sm font-medium text-gray-900">{h.employee_name}</div>
                           <div className="text-2xl font-bold text-emerald-700 mt-1">{h.total_hours}h</div>
@@ -1487,10 +1526,21 @@ export default function TimeClock() {
                                   {dayNotes ? dayNotes.map(n => {
                                     const typeColor = n.note_type === "admin_only" ? "text-purple-700 bg-purple-50" : n.note_type === "employee_private" ? "text-orange-700 bg-orange-50" : "text-blue-700";
                                     const typeLabel = n.note_type === "admin_only" ? "Admin" : n.note_type === "employee_private" ? (n.employee_name || "Emp") : "";
+                                    if (editingNoteId === n.id) {
+                                      return (
+                                        <div key={n.id} className="flex items-center gap-0.5">
+                                          <input type="text" value={editNoteText} onChange={e => setEditNoteText(e.target.value)}
+                                            className="w-20 px-1 py-0.5 border border-blue-300 rounded text-xs" autoFocus
+                                            onKeyDown={e => { if (e.key === "Enter") handleEditNote(n.id); if (e.key === "Escape") { setEditingNoteId(null); setEditNoteText(""); } }} />
+                                          <button onClick={() => handleEditNote(n.id)} className="text-green-600 hover:text-green-800 flex-shrink-0"><Check className="w-2.5 h-2.5" /></button>
+                                          <button onClick={() => { setEditingNoteId(null); setEditNoteText(""); }} className="text-gray-400 hover:text-gray-600 flex-shrink-0"><X className="w-2.5 h-2.5" /></button>
+                                        </div>
+                                      );
+                                    }
                                     return (
                                       <div key={n.id} className={`flex items-center gap-0.5 justify-center ${typeColor}`} title={`${typeLabel ? `[${typeLabel}] ` : ""}${n.note}`}>
                                         {typeLabel && <span className="text-[9px] font-bold">{typeLabel[0]}</span>}
-                                        <span className="truncate max-w-14">{n.note}</span>
+                                        <span className="truncate max-w-14 cursor-pointer hover:underline" onClick={() => { setEditingNoteId(n.id); setEditNoteText(n.note); }}>{n.note}</span>
                                         <button onClick={() => handleRemoveNote(n.id)} className="text-red-400 hover:text-red-600 flex-shrink-0"><X className="w-2.5 h-2.5" /></button>
                                       </div>
                                     );
@@ -1516,7 +1566,9 @@ export default function TimeClock() {
                                 if (sched) {
                                   const [sh, sm] = sched.start_time.split(":").map(Number);
                                   const [eh, em] = sched.end_time.split(":").map(Number);
-                                  dayTotal += (eh + em / 60) - (sh + sm / 60);
+                                  let hrs = (eh + em / 60) - (sh + sm / 60);
+                                  if (hrs < 0) hrs += 24; // handle overnight shifts
+                                  dayTotal += hrs;
                                 }
                               });
                               return (

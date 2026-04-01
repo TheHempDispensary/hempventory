@@ -1173,6 +1173,47 @@ async def create_schedule_note(
     return {"id": cursor.lastrowid, "status": "created", "note_type": note_type}
 
 
+class ScheduleNoteUpdate(BaseModel):
+    note: Optional[str] = None
+    note_type: Optional[str] = None
+    employee_id: Optional[int] = None
+
+
+@router.put("/schedule-notes/{note_id}")
+async def update_schedule_note(
+    note_id: int,
+    data: ScheduleNoteUpdate,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Admin: Update a schedule note."""
+    fields = []
+    params: list = []
+    if data.note is not None:
+        fields.append("note = ?")
+        params.append(data.note)
+    if data.note_type is not None:
+        if data.note_type not in ("shared", "admin_only", "employee_private"):
+            raise HTTPException(status_code=400, detail="Invalid note_type")
+        fields.append("note_type = ?")
+        params.append(data.note_type)
+        if data.note_type == "employee_private" and data.employee_id:
+            fields.append("employee_id = ?")
+            params.append(data.employee_id)
+        elif data.note_type != "employee_private":
+            fields.append("employee_id = NULL")
+    if data.employee_id is not None and data.note_type == "employee_private":
+        if "employee_id = ?" not in fields:
+            fields.append("employee_id = ?")
+            params.append(data.employee_id)
+    if not fields:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    params.append(note_id)
+    await db.execute(f"UPDATE schedule_notes SET {', '.join(fields)} WHERE id = ?", params)
+    await db.commit()
+    return {"status": "updated"}
+
+
 @router.delete("/schedule-notes/{note_id}")
 async def delete_schedule_note(
     note_id: int,
@@ -1198,8 +1239,15 @@ async def get_schedule_hours(
     query = """
         SELECT s.employee_id, e.name,
                SUM(
-                   (CAST(SUBSTR(s.end_time, 1, 2) AS REAL) + CAST(SUBSTR(s.end_time, 4, 2) AS REAL) / 60.0)
-                   - (CAST(SUBSTR(s.start_time, 1, 2) AS REAL) + CAST(SUBSTR(s.start_time, 4, 2) AS REAL) / 60.0)
+                   CASE
+                     WHEN (CAST(SUBSTR(s.end_time, 1, 2) AS REAL) + CAST(SUBSTR(s.end_time, 4, 2) AS REAL) / 60.0)
+                          < (CAST(SUBSTR(s.start_time, 1, 2) AS REAL) + CAST(SUBSTR(s.start_time, 4, 2) AS REAL) / 60.0)
+                     THEN (CAST(SUBSTR(s.end_time, 1, 2) AS REAL) + CAST(SUBSTR(s.end_time, 4, 2) AS REAL) / 60.0)
+                          + 24.0
+                          - (CAST(SUBSTR(s.start_time, 1, 2) AS REAL) + CAST(SUBSTR(s.start_time, 4, 2) AS REAL) / 60.0)
+                     ELSE (CAST(SUBSTR(s.end_time, 1, 2) AS REAL) + CAST(SUBSTR(s.end_time, 4, 2) AS REAL) / 60.0)
+                          - (CAST(SUBSTR(s.start_time, 1, 2) AS REAL) + CAST(SUBSTR(s.start_time, 4, 2) AS REAL) / 60.0)
+                   END
                ) as total_hours,
                COUNT(*) as shift_count
         FROM date_schedules s

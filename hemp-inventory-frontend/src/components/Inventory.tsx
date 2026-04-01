@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo } from "react";
-import { syncInventory, getCachedInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, bulkAssignCategory, bulkAssignImages, syncRefunds, getAgeRestrictionTypes, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup, bulkStockUpdate } from "../lib/api";
+import { syncInventory, getCachedInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, bulkAssignCategory, bulkAssignImages, syncRefunds, getAgeRestrictionTypes, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup, bulkStockUpdate, addVariantsToItem } from "../lib/api";
 import { RefreshCw, Search, Plus, ChevronDown, ChevronUp, X, Save, Package, Trash2, CheckSquare, Square, Minus, Image, Download, Upload, Settings, ArrowRightLeft, Images, Layers, Tag, ChevronsLeft, ChevronsRight, ChevronLeft, ChevronRight } from "lucide-react";
 
 interface LocationStock {
@@ -157,6 +157,13 @@ export default function Inventory() {
   const [variantAttributes, setVariantAttributes] = useState<{ attribute_name: string; option_names: string[] }[]>([
     { attribute_name: "", option_names: [""] }
   ]);
+
+  // Add-variants-to-existing-item state
+  const [editVariantAttrs, setEditVariantAttrs] = useState<{ attribute_name: string; option_names: string[] }[]>([
+    { attribute_name: "", option_names: [""] }
+  ]);
+  const [addingVariants, setAddingVariants] = useState(false);
+  const [keepOriginal, setKeepOriginal] = useState(false);
 
   const handleAddItemWithVariants = async () => {
     setAddItemMessage(null);
@@ -548,7 +555,40 @@ export default function Inventory() {
     setSaveMessage(null);
     setEditImageFile(null);
     setEditImagePreview(item.has_image ? getImageUrl(item.sku, imageCacheBust) : null);
+    setEditVariantAttrs([{ attribute_name: "", option_names: [""] }]);
+    setKeepOriginal(false);
     setEditItem(item);
+  };
+
+  const handleAddVariantsToExisting = async () => {
+    if (!editItem) return;
+    const validAttrs = editVariantAttrs.filter(a => a.attribute_name.trim() && a.option_names.some(o => o.trim()));
+    if (validAttrs.length === 0) {
+      setSaveMessage({ type: "error", text: "At least one attribute with options is required." });
+      return;
+    }
+    setAddingVariants(true);
+    setSaveMessage(null);
+    try {
+      await addVariantsToItem({
+        item_name: editItem.name,
+        item_sku: editItem.sku,
+        price: editItem.price,
+        variants: validAttrs.map(a => ({
+          attribute_name: a.attribute_name.trim(),
+          option_names: a.option_names.filter(o => o.trim()).map(o => o.trim()),
+        })),
+        keep_original: keepOriginal,
+      });
+      setSaveMessage({ type: "success", text: "Variants created! Run a sync to see new items." });
+      setEditVariantAttrs([{ attribute_name: "", option_names: [""] }]);
+    } catch (err) {
+      const axiosError = err as { response?: { data?: { detail?: string } } };
+      const detail = axiosError?.response?.data?.detail || "Failed to add variants";
+      setSaveMessage({ type: "error", text: detail });
+    } finally {
+      setAddingVariants(false);
+    }
   };
 
   const handleSaveEdit = async () => {
@@ -1851,6 +1891,7 @@ export default function Inventory() {
                 { id: "cost", label: "Cost" },
                 { id: "tracking", label: "Item Tracking" },
                 { id: "image", label: "Image" },
+                { id: "variants", label: "Add Variants" },
               ].map((tab) => (
                 <button
                   key={tab.id}
@@ -2296,6 +2337,87 @@ export default function Inventory() {
                       <strong>For e-commerce:</strong> Images are stored in our app for your online store. They won&apos;t appear in Clover POS.
                     </p>
                   </div>
+                </>
+              )}
+
+              {/* Variants Tab */}
+              {editTab === "variants" && (
+                <>
+                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-4">
+                    <p className="text-xs text-blue-700">
+                      <strong>Add variants</strong> to this item (e.g. Size: Small, Medium, Large). This will create an item group in Clover with variant items. Run a sync after to see the new items.
+                    </p>
+                  </div>
+                  {editVariantAttrs.map((attr, ai) => (
+                    <div key={ai} className="border border-gray-200 rounded-lg p-3 mb-3">
+                      <div className="flex items-center gap-2 mb-2">
+                        <input
+                          type="text"
+                          placeholder="Attribute (e.g. Size, Color)"
+                          value={attr.attribute_name}
+                          onChange={e => {
+                            const updated = [...editVariantAttrs];
+                            updated[ai] = { ...updated[ai], attribute_name: e.target.value };
+                            setEditVariantAttrs(updated);
+                          }}
+                          className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 outline-none"
+                        />
+                        {editVariantAttrs.length > 1 && (
+                          <button onClick={() => setEditVariantAttrs(editVariantAttrs.filter((_, i) => i !== ai))}
+                            className="text-red-400 hover:text-red-600"><X className="w-4 h-4" /></button>
+                        )}
+                      </div>
+                      <div className="space-y-1.5 ml-4">
+                        {attr.option_names.map((opt, oi) => (
+                          <div key={oi} className="flex items-center gap-2">
+                            <input
+                              type="text"
+                              placeholder={`Option ${oi + 1} (e.g. Small)`}
+                              value={opt}
+                              onChange={e => {
+                                const updated = [...editVariantAttrs];
+                                const opts = [...updated[ai].option_names];
+                                opts[oi] = e.target.value;
+                                updated[ai] = { ...updated[ai], option_names: opts };
+                                setEditVariantAttrs(updated);
+                              }}
+                              className="flex-1 px-2 py-1.5 border border-gray-200 rounded text-sm focus:ring-1 focus:ring-green-400 outline-none"
+                            />
+                            {attr.option_names.length > 1 && (
+                              <button onClick={() => {
+                                const updated = [...editVariantAttrs];
+                                updated[ai] = { ...updated[ai], option_names: attr.option_names.filter((_, i) => i !== oi) };
+                                setEditVariantAttrs(updated);
+                              }} className="text-red-300 hover:text-red-500"><Minus className="w-3 h-3" /></button>
+                            )}
+                          </div>
+                        ))}
+                        <button onClick={() => {
+                          const updated = [...editVariantAttrs];
+                          updated[ai] = { ...updated[ai], option_names: [...attr.option_names, ""] };
+                          setEditVariantAttrs(updated);
+                        }} className="text-xs text-green-600 hover:text-green-700 font-medium flex items-center gap-1 mt-1">
+                          <Plus className="w-3 h-3" /> Add option
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                  <button onClick={() => setEditVariantAttrs([...editVariantAttrs, { attribute_name: "", option_names: [""] }])}
+                    className="text-sm text-green-600 hover:text-green-700 font-medium flex items-center gap-1 mb-3">
+                    <Plus className="w-4 h-4" /> Add attribute
+                  </button>
+                  <label className="flex items-center gap-2 text-sm text-gray-600 mb-3">
+                    <input type="checkbox" checked={keepOriginal} onChange={e => setKeepOriginal(e.target.checked)}
+                      className="w-4 h-4 text-green-600 rounded focus:ring-green-500" />
+                    Keep original item (don&apos;t delete it after creating variants)
+                  </label>
+                  <button
+                    onClick={handleAddVariantsToExisting}
+                    disabled={addingVariants}
+                    className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-green-600 text-white rounded-lg text-sm hover:bg-green-700 disabled:opacity-50 font-medium"
+                  >
+                    {addingVariants ? <><RefreshCw className="w-4 h-4 animate-spin" /> Creating Variants...</> : <><Layers className="w-4 h-4" /> Create Variants</>}
+                  </button>
                 </>
               )}
             </div>
