@@ -1088,8 +1088,12 @@ async def update_item(
                 error_detail = error_body.get("message", str(e))
             except Exception:
                 pass
+            import logging
+            logging.error(f"Clover update error at {loc_name}: {error_detail} | data sent: {loc_update_data}")
             results.append({"location": loc_name, "status": "error", "error": error_detail})
         except Exception as e:
+            import logging
+            logging.error(f"Update error at {loc_name}: {str(e)}")
             results.append({"location": loc_name, "status": "error", "error": str(e)})
 
     # Retry any "not_found" locations now that we may have learned the item name
