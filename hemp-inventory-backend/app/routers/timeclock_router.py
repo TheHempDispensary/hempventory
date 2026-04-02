@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 import aiosqlite
 import io
 import csv
@@ -59,6 +59,26 @@ class ScheduleEntry(BaseModel):
     end_time: str      # "17:00"
     location: Optional[str] = None
     notes: Optional[str] = None
+
+class BulkScheduleEntry(BaseModel):
+    employee_id: int
+    dates: List[str]   # ["YYYY-MM-DD", ...]
+    start_time: str    # "09:00"
+    end_time: str      # "17:00"
+    location: Optional[str] = None
+    notes: Optional[str] = None
+
+class ShiftPickupRequest(BaseModel):
+    schedule_id: int   # The shift to pick up
+    message: Optional[str] = None
+
+class ShiftTradeRequest(BaseModel):
+    requester_schedule_id: int  # The requester's shift to give away
+    target_schedule_id: int     # The shift they want in return
+    message: Optional[str] = None
+
+class ShiftRequestUpdate(BaseModel):
+    status: str  # "approved" or "denied"
 
 class TimeOffRequest(BaseModel):
     employee_id: int
@@ -847,6 +867,39 @@ async def save_schedule(
     return {"status": "saved"}
 
 
+@router.post("/schedules/bulk")
+async def save_bulk_schedule(
+    entry: BulkScheduleEntry,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Admin: Create schedule entries for multiple dates at once."""
+    # Verify employee exists
+    cursor = await db.execute("SELECT id FROM employees WHERE id = ?", (entry.employee_id,))
+    if not await cursor.fetchone():
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    if not entry.dates:
+        raise HTTPException(status_code=400, detail="No dates provided")
+
+    saved_count = 0
+    for date in entry.dates:
+        await db.execute(
+            """INSERT INTO date_schedules (employee_id, date, start_time, end_time, location, notes, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(employee_id, date) DO UPDATE SET
+                 start_time = excluded.start_time,
+                 end_time = excluded.end_time,
+                 location = excluded.location,
+                 notes = excluded.notes,
+                 updated_at = CURRENT_TIMESTAMP""",
+            (entry.employee_id, date, entry.start_time, entry.end_time, entry.location, entry.notes),
+        )
+        saved_count += 1
+    await db.commit()
+    return {"status": "saved", "count": saved_count}
+
+
 @router.delete("/schedules/{schedule_id}")
 async def delete_schedule(
     schedule_id: int,
@@ -1274,3 +1327,225 @@ async def get_schedule_hours(
         }
         for r in rows
     ]
+
+
+# ---------- Shift Pickup & Trade Requests ----------
+
+@router.get("/shift-requests")
+async def list_shift_requests(
+    status: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Admin or Employee: List shift requests (pickup and trade)."""
+    query = """
+        SELECT sr.id, sr.request_type, sr.requester_id, e1.name as requester_name,
+               sr.schedule_id, sr.target_schedule_id,
+               sr.message, sr.status, sr.reviewed_by, sr.created_at,
+               s1.date as shift_date, s1.start_time as shift_start, s1.end_time as shift_end,
+               s1.location as shift_location, s1.employee_id as shift_employee_id,
+               e_shift.name as shift_employee_name,
+               s2.date as target_date, s2.start_time as target_start, s2.end_time as target_end,
+               s2.location as target_location, s2.employee_id as target_employee_id,
+               e_target.name as target_employee_name
+        FROM shift_requests sr
+        JOIN employees e1 ON e1.id = sr.requester_id
+        LEFT JOIN date_schedules s1 ON s1.id = sr.schedule_id
+        LEFT JOIN employees e_shift ON e_shift.id = s1.employee_id
+        LEFT JOIN date_schedules s2 ON s2.id = sr.target_schedule_id
+        LEFT JOIN employees e_target ON e_target.id = s2.employee_id
+        WHERE 1=1
+    """
+    params: list = []
+
+    # Employees only see their own requests
+    if user.get("role") == "employee":
+        query += " AND sr.requester_id = ?"
+        params.append(user.get("employee_id"))
+
+    if status:
+        query += " AND sr.status = ?"
+        params.append(status)
+
+    query += " ORDER BY sr.created_at DESC"
+    cursor = await db.execute(query, params)
+    rows = await cursor.fetchall()
+    cols = [d[0] for d in cursor.description]
+    return [dict(zip(cols, row)) for row in rows]
+
+
+@router.post("/shift-requests/pickup")
+async def create_pickup_request(
+    req: ShiftPickupRequest,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Employee: Request to pick up a shift."""
+    if user.get("role") != "employee":
+        raise HTTPException(status_code=403, detail="Employee access only")
+
+    emp_id = user.get("employee_id")
+
+    # Verify the shift exists
+    cursor = await db.execute(
+        "SELECT id, employee_id, date FROM date_schedules WHERE id = ?",
+        (req.schedule_id,),
+    )
+    shift = await cursor.fetchone()
+    if not shift:
+        raise HTTPException(status_code=404, detail="Shift not found")
+
+    # Can't pick up your own shift
+    if shift[1] == emp_id:
+        raise HTTPException(status_code=400, detail="Cannot pick up your own shift")
+
+    # Check for duplicate pending request
+    cursor = await db.execute(
+        """SELECT id FROM shift_requests
+           WHERE requester_id = ? AND schedule_id = ? AND request_type = 'pickup' AND status = 'pending'""",
+        (emp_id, req.schedule_id),
+    )
+    if await cursor.fetchone():
+        raise HTTPException(status_code=400, detail="You already have a pending pickup request for this shift")
+
+    await db.execute(
+        """INSERT INTO shift_requests (request_type, requester_id, schedule_id, message, status)
+           VALUES ('pickup', ?, ?, ?, 'pending')""",
+        (emp_id, req.schedule_id, req.message),
+    )
+    await db.commit()
+    return {"status": "created"}
+
+
+@router.post("/shift-requests/trade")
+async def create_trade_request(
+    req: ShiftTradeRequest,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Employee: Request to trade shifts with another employee."""
+    if user.get("role") != "employee":
+        raise HTTPException(status_code=403, detail="Employee access only")
+
+    emp_id = user.get("employee_id")
+
+    # Verify requester's shift exists and belongs to them
+    cursor = await db.execute(
+        "SELECT id, employee_id FROM date_schedules WHERE id = ?",
+        (req.requester_schedule_id,),
+    )
+    my_shift = await cursor.fetchone()
+    if not my_shift:
+        raise HTTPException(status_code=404, detail="Your shift not found")
+    if my_shift[1] != emp_id:
+        raise HTTPException(status_code=400, detail="That is not your shift")
+
+    # Verify target shift exists and belongs to someone else
+    cursor = await db.execute(
+        "SELECT id, employee_id FROM date_schedules WHERE id = ?",
+        (req.target_schedule_id,),
+    )
+    target_shift = await cursor.fetchone()
+    if not target_shift:
+        raise HTTPException(status_code=404, detail="Target shift not found")
+    if target_shift[1] == emp_id:
+        raise HTTPException(status_code=400, detail="Cannot trade with yourself")
+
+    # Check for duplicate pending request
+    cursor = await db.execute(
+        """SELECT id FROM shift_requests
+           WHERE requester_id = ? AND schedule_id = ? AND target_schedule_id = ?
+             AND request_type = 'trade' AND status = 'pending'""",
+        (emp_id, req.requester_schedule_id, req.target_schedule_id),
+    )
+    if await cursor.fetchone():
+        raise HTTPException(status_code=400, detail="You already have a pending trade request for these shifts")
+
+    await db.execute(
+        """INSERT INTO shift_requests (request_type, requester_id, schedule_id, target_schedule_id, message, status)
+           VALUES ('trade', ?, ?, ?, ?, 'pending')""",
+        (emp_id, req.requester_schedule_id, req.target_schedule_id, req.message),
+    )
+    await db.commit()
+    return {"status": "created"}
+
+
+@router.put("/shift-requests/{request_id}")
+async def update_shift_request(
+    request_id: int,
+    update: ShiftRequestUpdate,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Admin: Approve or deny a shift request. On approval, execute the shift change."""
+    if update.status not in ("approved", "denied"):
+        raise HTTPException(status_code=400, detail="Status must be 'approved' or 'denied'")
+
+    # Get the request
+    cursor = await db.execute(
+        "SELECT id, request_type, requester_id, schedule_id, target_schedule_id, status FROM shift_requests WHERE id = ?",
+        (request_id,),
+    )
+    req = await cursor.fetchone()
+    if not req:
+        raise HTTPException(status_code=404, detail="Shift request not found")
+    if req[5] != "pending":
+        raise HTTPException(status_code=400, detail="Request is no longer pending")
+
+    username = user.get("username", "admin")
+
+    if update.status == "approved":
+        req_type = req[1]
+        requester_id = req[2]
+        schedule_id = req[3]
+        target_schedule_id = req[4]
+
+        if req_type == "pickup":
+            # Reassign the shift to the requester
+            await db.execute(
+                "UPDATE date_schedules SET employee_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (requester_id, schedule_id),
+            )
+        elif req_type == "trade":
+            # Swap employee_ids on both shifts
+            cursor1 = await db.execute("SELECT employee_id FROM date_schedules WHERE id = ?", (schedule_id,))
+            shift1 = await cursor1.fetchone()
+            cursor2 = await db.execute("SELECT employee_id FROM date_schedules WHERE id = ?", (target_schedule_id,))
+            shift2 = await cursor2.fetchone()
+            if shift1 and shift2:
+                await db.execute(
+                    "UPDATE date_schedules SET employee_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (shift2[0], schedule_id),
+                )
+                await db.execute(
+                    "UPDATE date_schedules SET employee_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (shift1[0], target_schedule_id),
+                )
+
+    await db.execute(
+        "UPDATE shift_requests SET status = ?, reviewed_by = ? WHERE id = ?",
+        (update.status, username, request_id),
+    )
+    await db.commit()
+    return {"status": update.status}
+
+
+@router.delete("/shift-requests/{request_id}")
+async def delete_shift_request(
+    request_id: int,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Admin or requesting employee: Cancel/delete a shift request."""
+    if user.get("role") == "employee":
+        emp_id = user.get("employee_id")
+        cursor = await db.execute(
+            "SELECT id FROM shift_requests WHERE id = ? AND requester_id = ? AND status = 'pending'",
+            (request_id, emp_id),
+        )
+        if not await cursor.fetchone():
+            raise HTTPException(status_code=403, detail="Cannot delete this request")
+
+    await db.execute("DELETE FROM shift_requests WHERE id = ?", (request_id,))
+    await db.commit()
+    return {"status": "deleted"}

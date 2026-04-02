@@ -422,6 +422,32 @@ export const updateOrderCustomer = (orderId: number, data: {
 export const getScheduleHours = (params?: { start_date?: string; end_date?: string }) =>
   api.get("/api/timeclock/schedule-hours", { params });
 
+// Bulk Schedule (multi-day)
+export const saveBulkSchedule = (data: {
+  employee_id: number;
+  dates: string[];
+  start_time: string;
+  end_time: string;
+  location?: string;
+  notes?: string;
+}) => api.post("/api/timeclock/schedules/bulk", data);
+
+// Shift Requests (pickup & trade)
+export const getShiftRequests = (params?: { status?: string }) =>
+  api.get("/api/timeclock/shift-requests", { params });
+
+export const createShiftPickupRequest = (data: { schedule_id: number; message?: string }) =>
+  api.post("/api/timeclock/shift-requests/pickup", data);
+
+export const createShiftTradeRequest = (data: { requester_schedule_id: number; target_schedule_id: number; message?: string }) =>
+  api.post("/api/timeclock/shift-requests/trade", data);
+
+export const updateShiftRequest = (requestId: number, status: string) =>
+  api.put(`/api/timeclock/shift-requests/${requestId}`, { status });
+
+export const deleteShiftRequest = (requestId: number) =>
+  api.delete(`/api/timeclock/shift-requests/${requestId}`);
+
 // Inventory change history
 export const getInventoryChanges = (params?: { sku?: string; location?: string; limit?: number; offset?: number }) =>
   api.get("/api/inventory/changes", { params });

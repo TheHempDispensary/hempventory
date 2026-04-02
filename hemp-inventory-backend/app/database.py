@@ -377,6 +377,21 @@ async def init_db():
             )
         """)
 
+        # Shift pickup & trade requests table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS shift_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                request_type TEXT NOT NULL,
+                requester_id INTEGER NOT NULL REFERENCES employees(id),
+                schedule_id INTEGER REFERENCES date_schedules(id),
+                target_schedule_id INTEGER REFERENCES date_schedules(id),
+                message TEXT,
+                status TEXT DEFAULT 'pending',
+                reviewed_by TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Promo codes table for discount management
         await db.execute("""
             CREATE TABLE IF NOT EXISTS promo_codes (
