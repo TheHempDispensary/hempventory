@@ -488,6 +488,15 @@ export default function TimeClock() {
     }
   }, [getVisibleDateRange]);
 
+  const loadShiftRequests = useCallback(async () => {
+    try {
+      const res = await getShiftRequests();
+      setShiftRequests(res.data);
+    } catch (err) {
+      console.error("Error loading shift requests:", err);
+    }
+  }, []);
+
   useEffect(() => {
     if (tab === "schedule") {
       loadSchedules();
@@ -559,15 +568,6 @@ export default function TimeClock() {
   const toggleBulkDate = (dateStr: string) => {
     setBulkDates(prev => prev.includes(dateStr) ? prev.filter(d => d !== dateStr) : [...prev, dateStr].sort());
   };
-
-  const loadShiftRequests = useCallback(async () => {
-    try {
-      const res = await getShiftRequests();
-      setShiftRequests(res.data);
-    } catch (err) {
-      console.error("Error loading shift requests:", err);
-    }
-  }, []);
 
   const handleApproveShiftRequest = async (id: number) => {
     try {

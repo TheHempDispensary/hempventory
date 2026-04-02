@@ -179,6 +179,29 @@ export default function EmployeeTimeClock() {
     }
   }, [calYear, calMonth]);
 
+  const fetchMyShiftRequests = useCallback(async () => {
+    try {
+      const res = await getShiftRequests();
+      setMyShiftRequests(res.data);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const fetchAllSchedules = useCallback(async () => {
+    try {
+      const start = new Date(calYear, calMonth, 1);
+      const end = new Date(calYear, calMonth + 1, 0);
+      const res = await getSchedules({
+        start_date: start.toISOString().split("T")[0],
+        end_date: end.toISOString().split("T")[0],
+      });
+      setAllSchedules(res.data);
+    } catch {
+      // ignore
+    }
+  }, [calYear, calMonth]);
+
   useEffect(() => {
     if (tab === "schedule") {
       fetchSchedule();
@@ -278,29 +301,6 @@ export default function EmployeeTimeClock() {
       setError("Failed to cancel request");
     }
   };
-
-  const fetchMyShiftRequests = useCallback(async () => {
-    try {
-      const res = await getShiftRequests();
-      setMyShiftRequests(res.data);
-    } catch {
-      // ignore
-    }
-  }, []);
-
-  const fetchAllSchedules = useCallback(async () => {
-    try {
-      const start = new Date(calYear, calMonth, 1);
-      const end = new Date(calYear, calMonth + 1, 0);
-      const res = await getSchedules({
-        start_date: start.toISOString().split("T")[0],
-        end_date: end.toISOString().split("T")[0],
-      });
-      setAllSchedules(res.data);
-    } catch {
-      // ignore
-    }
-  }, [calYear, calMonth]);
 
   const handlePickupRequest = async () => {
     if (!pickupScheduleId) return;
