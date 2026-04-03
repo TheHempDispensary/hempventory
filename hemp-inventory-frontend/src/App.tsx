@@ -14,6 +14,7 @@ import TimeClock from "./components/TimeClock";
 import SalesReport from "./components/SalesReport";
 import OnlineOrders from "./components/OnlineOrders";
 import Discounts from "./components/Discounts";
+import ProductScraper from "./components/ProductScraper";
 
 // Detect which domain we're on to separate login state
 function getAppMode(): "timeclock" | "inventory" {
@@ -179,6 +180,8 @@ function App() {
         return <OnlineOrders />;
       case "discounts":
         return <Discounts />;
+      case "scraper":
+        return <ProductScraper />;
       default:
         return <Inventory />;
     }

@@ -524,4 +524,10 @@ export const updatePromo = (promoId: number, data: {
 export const deletePromo = (promoId: number) =>
   api.delete(`/api/ecommerce/promos/${promoId}`);
 
+// Product Scraper
+export const scrapeProduct = (data: { manufacturer: string; model_number: string }) =>
+  api.post("/api/scraper/scrape", data);
+
+export const getManufacturers = () => api.get("/api/scraper/manufacturers");
+
 export default api;

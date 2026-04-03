@@ -18,6 +18,8 @@ python-jose = {extras = ["cryptography"], version = "^3.5.0"}
 apscheduler = "^3.11.2"
 aiosmtplib = "^5.1.0"
 pillow = "^12.1.1"
+beautifulsoup4 = "^4.14.3"
+lxml = "^6.0.2"
 
 
 [build-system]
