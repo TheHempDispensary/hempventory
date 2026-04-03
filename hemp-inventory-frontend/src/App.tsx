@@ -181,7 +181,7 @@ function App() {
       case "discounts":
         return <Discounts />;
       case "scraper":
-        return <ProductScraper />;
+        return <ProductScraper onNavigate={setCurrentPage} />;
       default:
         return <Inventory />;
     }
