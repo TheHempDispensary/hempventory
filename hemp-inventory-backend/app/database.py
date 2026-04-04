@@ -438,14 +438,18 @@ async def init_db():
             await db.execute("ALTER TABLE promo_codes ADD COLUMN is_direct_discount INTEGER DEFAULT 0")
         except Exception:
             pass
-        # Seed FIRST15 if promo_codes table is empty
+        # Seed FIRST10 if promo_codes table is empty
         cursor = await db.execute("SELECT COUNT(*) FROM promo_codes")
         count = (await cursor.fetchone())[0]
         if count == 0:
             await db.execute(
                 "INSERT INTO promo_codes (code, discount_pct, single_use, is_active) VALUES (?, ?, ?, ?)",
-                ("FIRST15", 0.15, 1, 1),
+                ("FIRST10", 0.10, 1, 1),
             )
+        # Migrate FIRST15 -> FIRST10 for existing databases
+        await db.execute(
+            "UPDATE promo_codes SET code = 'FIRST10', discount_pct = 0.10 WHERE code = 'FIRST15'"
+        )
 
         # Seed default loyalty settings if empty
         cursor = await db.execute("SELECT COUNT(*) FROM loyalty_settings")
