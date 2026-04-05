@@ -1184,8 +1184,81 @@ async def update_item(
             except Exception:
                 pass  # keep original not_found
 
+    # Also persist description to local SQLite DB (Clover silently ignores it)
+    if item.description is not None:
+        product_name = item.name  # may be None if only description changed
+        await db.execute(
+            """INSERT INTO product_descriptions (sku, product_name, description, updated_at)
+               VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(sku) DO UPDATE SET
+                   description = excluded.description,
+                   product_name = COALESCE(excluded.product_name, product_descriptions.product_name),
+                   updated_at = CURRENT_TIMESTAMP""",
+            (sku, product_name, item.description),
+        )
+        await db.commit()
+
     await _invalidate_cache()
     return {"results": results}
+
+
+class BulkDescriptionItem(BaseModel):
+    sku: str
+    description: str
+    product_name: Optional[str] = None
+
+
+class BulkDescriptionRequest(BaseModel):
+    items: list[BulkDescriptionItem]
+
+
+@router.post("/bulk-descriptions")
+async def bulk_update_descriptions(
+    req: BulkDescriptionRequest,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Store descriptions in local DB (Clover API does not persist descriptions)."""
+    updated = 0
+    errors = 0
+
+    for item in req.items:
+        try:
+            await db.execute(
+                """INSERT INTO product_descriptions (sku, product_name, description, updated_at)
+                   VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                   ON CONFLICT(sku) DO UPDATE SET
+                       description = excluded.description,
+                       product_name = COALESCE(excluded.product_name, product_descriptions.product_name),
+                       updated_at = CURRENT_TIMESTAMP""",
+                (item.sku, item.product_name, item.description),
+            )
+            updated += 1
+        except Exception as e:
+            errors += 1
+
+    await db.commit()
+    await _invalidate_cache()
+    return {
+        "summary": {"updated": updated, "errors": errors, "total": len(req.items)},
+    }
+
+
+@router.get("/descriptions")
+async def get_descriptions(
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """List all stored product descriptions."""
+    cursor = await db.execute("SELECT sku, product_name, description, updated_at FROM product_descriptions")
+    rows = await cursor.fetchall()
+    return {
+        "total": len(rows),
+        "descriptions": [
+            {"sku": r[0], "product_name": r[1], "description": r[2], "updated_at": r[3]}
+            for r in rows
+        ],
+    }
 
 
 class ImageUpload(BaseModel):
