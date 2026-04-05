@@ -75,6 +75,15 @@ function getStatusInfo(status: string) {
   return STATUS_OPTIONS.find((s) => s.value === status) || STATUS_OPTIONS[5];
 }
 
+const HAZMAT_KEYWORDS = ["vape", "cartridge", "cart ", "disposable", "battery", "510 ", "pod"];
+
+function orderContainsHazmat(items: OrderItem[]): boolean {
+  return items.some((item) => {
+    const name = item.product_name.toLowerCase();
+    return HAZMAT_KEYWORDS.some((kw) => name.includes(kw));
+  });
+}
+
 function printMultipleOrders(orders: Order[]) {
   if (orders.length === 0) return;
   const printWindow = window.open("", "_blank", "width=800,height=600");
@@ -936,6 +945,7 @@ export default function OnlineOrders() {
                                 setShippingOrderId(order.id);
                                 setRates([]);
                                 setShippingError("");
+                                setIsHazmat(orderContainsHazmat(order.items));
                               }
                             }}
                             className="flex items-center gap-2 px-4 py-2 bg-green-100 text-green-700 rounded-lg hover:bg-green-200 transition-colors text-sm font-medium"
@@ -1085,7 +1095,9 @@ export default function OnlineOrders() {
                             <label className="flex items-center gap-2 cursor-pointer px-3 py-1.5">
                               <input type="checkbox" checked={isHazmat} onChange={(e) => setIsHazmat(e.target.checked)}
                                 className="w-4 h-4 rounded border-gray-300 text-orange-600 focus:ring-orange-500" />
-                              <span className="text-sm text-gray-700 whitespace-nowrap">Hazmat</span>
+                              <span className={`text-sm whitespace-nowrap ${isHazmat ? "text-orange-700 font-semibold" : "text-gray-700"}`}>
+                                {isHazmat ? "⚠ Hazmat" : "Hazmat"}
+                              </span>
                             </label>
                           </div>
                         </div>
