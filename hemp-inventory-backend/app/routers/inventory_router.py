@@ -1110,6 +1110,20 @@ async def update_item(
             except Exception:
                 pass  # keep original not_found
 
+    # Also persist description to local SQLite DB (Clover silently ignores it)
+    if item.description is not None:
+        product_name = item.name  # may be None if only description changed
+        await db.execute(
+            """INSERT INTO product_descriptions (sku, product_name, description, updated_at)
+               VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(sku) DO UPDATE SET
+                   description = excluded.description,
+                   product_name = COALESCE(excluded.product_name, product_descriptions.product_name),
+                   updated_at = CURRENT_TIMESTAMP""",
+            (sku, product_name, item.description),
+        )
+        await db.commit()
+
     await _invalidate_cache()
     return {"results": results}
 
