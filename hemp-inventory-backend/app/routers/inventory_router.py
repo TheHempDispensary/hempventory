@@ -1114,6 +1114,71 @@ async def update_item(
     return {"results": results}
 
 
+class BulkDescriptionItem(BaseModel):
+    sku: str
+    description: str
+
+
+class BulkDescriptionRequest(BaseModel):
+    items: list[BulkDescriptionItem]
+
+
+@router.post("/bulk-descriptions")
+async def bulk_update_descriptions(
+    req: BulkDescriptionRequest,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Update descriptions for multiple items at once via Clover API.
+
+    Only updates the HQ location since descriptions are shared across locations.
+    """
+    locations = await _get_locations(db)
+    if not locations:
+        raise HTTPException(status_code=400, detail="No locations configured")
+
+    # Use first location (HQ) for description updates
+    loc_id, loc_name, merchant_id, api_token = locations[0][0], locations[0][1], locations[0][2], locations[0][3]
+    client = CloverClient(merchant_id, api_token)
+
+    # Fetch all items once to build SKU -> Clover ID map
+    data = await client.get_items()
+    elements = data.get("elements", [])
+    sku_to_clover_id: dict[str, str] = {}
+    for el in elements:
+        el_sku = el.get("sku", "")
+        el_id = el.get("id", "")
+        if el_sku:
+            sku_to_clover_id[el_sku] = el_id
+        if el_id:
+            sku_to_clover_id[el_id] = el_id  # Also map by Clover ID
+
+    results = []
+    updated = 0
+    not_found = 0
+    errors = 0
+
+    for item in req.items:
+        clover_id = sku_to_clover_id.get(item.sku)
+        if not clover_id:
+            results.append({"sku": item.sku, "status": "not_found"})
+            not_found += 1
+            continue
+        try:
+            await client.update_item(clover_id, {"description": item.description})
+            results.append({"sku": item.sku, "status": "updated"})
+            updated += 1
+        except Exception as e:
+            results.append({"sku": item.sku, "status": "error", "error": str(e)})
+            errors += 1
+
+    await _invalidate_cache()
+    return {
+        "summary": {"updated": updated, "not_found": not_found, "errors": errors, "total": len(req.items)},
+        "results": results,
+    }
+
+
 class ImageUpload(BaseModel):
     image_data: str  # base64 encoded image data
     content_type: str = "image/png"
