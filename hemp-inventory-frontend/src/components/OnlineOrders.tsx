@@ -680,6 +680,7 @@ export default function OnlineOrders() {
                       <p className="text-sm text-gray-500 truncate">
                         {order.customer_first_name} {order.customer_last_name} &middot; {order.customer_email}
                       </p>
+                      <p className="text-xs text-gray-400 mt-0.5">{formatDate(order.created_at)}</p>
                     </div>
                   </div>
                   <div className="flex items-center gap-4 flex-shrink-0">
