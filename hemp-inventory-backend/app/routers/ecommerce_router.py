@@ -235,6 +235,15 @@ async def _fetch_and_cache_products() -> dict:
             if row[1]:
                 image_by_name[row[1].upper()] = f"{image_base_url}/{url_quote(row[0], safe='')}?v=2&t={str(row[2] or '').replace(' ', '_')}"
 
+        # Load product descriptions from local DB (Clover API doesn't persist descriptions)
+        desc_db = await aiosqlite.connect(DB_PATH)
+        try:
+            desc_cursor = await desc_db.execute("SELECT sku, description FROM product_descriptions")
+            desc_rows = await desc_cursor.fetchall()
+        finally:
+            await desc_db.close()
+        desc_by_sku: dict[str, str] = {row[0]: row[1] for row in desc_rows}
+
         products = []
         categories_set: set = set()
 
@@ -248,7 +257,7 @@ async def _fetch_and_cache_products() -> dict:
             item_categories = [c.get("name", "") for c in item.get("categories", {}).get("elements", [])]
             stock_info = item.get("itemStock", {})
             hq_stock = stock_info.get("quantity", 0) if stock_info else 0
-            description = item.get("description", "")
+            description = desc_by_sku.get(sku, "") or item.get("description", "")
             online_name = item.get("onlineName", "") or name
 
             # Look up stock at West and East by SKU first, then by name

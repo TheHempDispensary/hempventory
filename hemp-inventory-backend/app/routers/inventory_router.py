@@ -1117,6 +1117,7 @@ async def update_item(
 class BulkDescriptionItem(BaseModel):
     sku: str
     description: str
+    product_name: Optional[str] = None
 
 
 class BulkDescriptionRequest(BaseModel):
@@ -1129,53 +1130,46 @@ async def bulk_update_descriptions(
     user: dict = Depends(get_current_user),
     db: aiosqlite.Connection = Depends(get_db),
 ):
-    """Update descriptions for multiple items at once via Clover API.
-
-    Only updates the HQ location since descriptions are shared across locations.
-    """
-    locations = await _get_locations(db)
-    if not locations:
-        raise HTTPException(status_code=400, detail="No locations configured")
-
-    # Use first location (HQ) for description updates
-    loc_id, loc_name, merchant_id, api_token = locations[0][0], locations[0][1], locations[0][2], locations[0][3]
-    client = CloverClient(merchant_id, api_token)
-
-    # Fetch all items once to build SKU -> Clover ID map
-    data = await client.get_items()
-    elements = data.get("elements", [])
-    sku_to_clover_id: dict[str, str] = {}
-    for el in elements:
-        el_sku = el.get("sku", "")
-        el_id = el.get("id", "")
-        if el_sku:
-            sku_to_clover_id[el_sku] = el_id
-        if el_id:
-            sku_to_clover_id[el_id] = el_id  # Also map by Clover ID
-
-    results = []
+    """Store descriptions in local DB (Clover API does not persist descriptions)."""
     updated = 0
-    not_found = 0
     errors = 0
 
     for item in req.items:
-        clover_id = sku_to_clover_id.get(item.sku)
-        if not clover_id:
-            results.append({"sku": item.sku, "status": "not_found"})
-            not_found += 1
-            continue
         try:
-            await client.update_item(clover_id, {"description": item.description})
-            results.append({"sku": item.sku, "status": "updated"})
+            await db.execute(
+                """INSERT INTO product_descriptions (sku, product_name, description, updated_at)
+                   VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                   ON CONFLICT(sku) DO UPDATE SET
+                       description = excluded.description,
+                       product_name = COALESCE(excluded.product_name, product_descriptions.product_name),
+                       updated_at = CURRENT_TIMESTAMP""",
+                (item.sku, item.product_name, item.description),
+            )
             updated += 1
         except Exception as e:
-            results.append({"sku": item.sku, "status": "error", "error": str(e)})
             errors += 1
 
+    await db.commit()
     await _invalidate_cache()
     return {
-        "summary": {"updated": updated, "not_found": not_found, "errors": errors, "total": len(req.items)},
-        "results": results,
+        "summary": {"updated": updated, "errors": errors, "total": len(req.items)},
+    }
+
+
+@router.get("/descriptions")
+async def get_descriptions(
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """List all stored product descriptions."""
+    cursor = await db.execute("SELECT sku, product_name, description, updated_at FROM product_descriptions")
+    rows = await cursor.fetchall()
+    return {
+        "total": len(rows),
+        "descriptions": [
+            {"sku": r[0], "product_name": r[1], "description": r[2], "updated_at": r[3]}
+            for r in rows
+        ],
     }
 
 

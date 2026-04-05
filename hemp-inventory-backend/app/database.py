@@ -393,6 +393,17 @@ async def init_db():
             await db.execute("ALTER TABLE promo_codes ADD COLUMN clover_discount_id TEXT DEFAULT ''")
         except Exception:
             pass
+        # Product descriptions table (stored locally since Clover API doesn't persist descriptions)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS product_descriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sku TEXT NOT NULL UNIQUE,
+                product_name TEXT,
+                description TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Seed FIRST15 if promo_codes table is empty
         cursor = await db.execute("SELECT COUNT(*) FROM promo_codes")
         count = (await cursor.fetchone())[0]
