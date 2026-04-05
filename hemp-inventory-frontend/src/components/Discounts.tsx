@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { Percent, Plus, Trash2, Edit3, ToggleLeft, ToggleRight, RefreshCw, AlertTriangle, Save, X, Calendar, ShoppingBag, Ban, Cloud } from "lucide-react";
+import { Percent, Plus, Trash2, Edit3, ToggleLeft, ToggleRight, RefreshCw, AlertTriangle, Save, X, Calendar, ShoppingBag, Ban, Cloud, Tag } from "lucide-react";
 import { getPromos, createPromo, updatePromo, deletePromo } from "../lib/api";
 import api from "../lib/api";
 
@@ -18,6 +18,7 @@ interface PromoCode {
   product_ids: string;
   exclude_from_other_coupons: boolean;
   clover_discount_id: string;
+  is_direct_discount: boolean;
   created_at: string;
 }
 
@@ -39,6 +40,7 @@ export default function Discounts() {
   const [productSearch, setProductSearch] = useState("");
 
   // Create form
+  const [newIsDirectDiscount, setNewIsDirectDiscount] = useState(false);
   const [newCode, setNewCode] = useState("");
   const [newDiscountType, setNewDiscountType] = useState<"percent" | "amount">("percent");
   const [newDiscountValue, setNewDiscountValue] = useState("");
@@ -78,7 +80,9 @@ export default function Discounts() {
   const loadProducts = useCallback(async () => {
     try {
       const res = await api.get("/api/ecommerce/products");
-      const items = (res.data || []).map((p: { id: string; name: string }) => ({ id: p.id, name: p.name }));
+      const data = res.data;
+      const itemList = data.products || data || [];
+      const items = (itemList as { id: string; name: string }[]).map((p) => ({ id: p.id, name: p.name }));
       setProducts(items);
     } catch {
       // non-critical
@@ -88,20 +92,21 @@ export default function Discounts() {
   useEffect(() => { loadPromos(); loadProducts(); }, [loadProducts]);
 
   const resetCreateForm = () => {
-    setNewCode(""); setNewDiscountValue(""); setNewSingleUse(false); setNewMaxUses("");
+    setNewIsDirectDiscount(false); setNewCode(""); setNewDiscountValue(""); setNewSingleUse(false); setNewMaxUses("");
     setNewExpiresAt(""); setNewStartsAt(""); setNewAppliesTo("all"); setNewProductIds([]);
     setNewExcludeOtherCoupons(false); setNewSyncToClover(false);
   };
 
   const handleCreate = async () => {
-    if (!newCode.trim()) { setError("Promo code is required"); return; }
+    if (!newIsDirectDiscount && !newCode.trim()) { setError("Promo code is required"); return; }
     const val = parseFloat(newDiscountValue) || 0;
     if (val <= 0) { setError("Discount value must be greater than 0"); return; }
     if (newAppliesTo === "specific" && newProductIds.length === 0) { setError("Please select at least one product"); return; }
     setError("");
     try {
       await createPromo({
-        code: newCode.trim().toUpperCase(),
+        code: newIsDirectDiscount ? "" : newCode.trim().toUpperCase(),
+        is_direct_discount: newIsDirectDiscount,
         discount_pct: newDiscountType === "percent" ? val / 100 : 0,
         discount_amount: newDiscountType === "amount" ? Math.round(val * 100) : 0,
         single_use: newSingleUse,
@@ -113,11 +118,12 @@ export default function Discounts() {
         exclude_from_other_coupons: newExcludeOtherCoupons,
         sync_to_clover: newSyncToClover,
       });
-      setSuccess("Promo code \"" + newCode.trim().toUpperCase() + "\" created!" + (newSyncToClover ? " Synced to Clover POS." : ""));
+      const label = newIsDirectDiscount ? "Direct discount" : "Promo code \"" + newCode.trim().toUpperCase() + "\"";
+      setSuccess(label + " created!" + (newSyncToClover ? " Synced to Clover POS." : ""));
       setShowCreate(false); resetCreateForm();
       setTimeout(() => setSuccess(""), 3000);
       loadPromos();
-    } catch { setError("Failed to create promo code. It may already exist."); }
+    } catch { setError("Failed to create. Code may already exist."); }
   };
 
   const startEdit = (promo: PromoCode) => {
@@ -151,19 +157,19 @@ export default function Discounts() {
         exclude_from_other_coupons: editExcludeOtherCoupons,
         sync_to_clover: editSyncToClover,
       });
-      setEditingId(null); setSuccess("Promo code updated!");
+      setEditingId(null); setSuccess("Discount updated!");
       setTimeout(() => setSuccess(""), 3000); loadPromos();
-    } catch { setError("Failed to update promo code"); }
+    } catch { setError("Failed to update discount"); }
   };
 
   const handleToggleActive = async (promo: PromoCode) => {
     try { await updatePromo(promo.id, { is_active: !promo.is_active }); loadPromos(); }
-    catch { setError("Failed to update promo code"); }
+    catch { setError("Failed to update discount"); }
   };
 
   const handleDelete = async (promoId: number) => {
-    try { await deletePromo(promoId); setDeleteConfirmId(null); setSuccess("Promo code deleted"); setTimeout(() => setSuccess(""), 3000); loadPromos(); }
-    catch { setError("Failed to delete promo code"); }
+    try { await deletePromo(promoId); setDeleteConfirmId(null); setSuccess("Discount deleted"); setTimeout(() => setSuccess(""), 3000); loadPromos(); }
+    catch { setError("Failed to delete discount"); }
   };
 
   const toggleProductId = (id: string, selected: string[], setSelected: (ids: string[]) => void) => {
@@ -183,10 +189,8 @@ export default function Discounts() {
 
   const filteredProducts = products.filter((p) => p.name.toLowerCase().includes(productSearch.toLowerCase()));
 
-  const ProductSelector = ({ appliesTo, setAppliesTo, selectedIds, setSelectedIds, idSuffix }: {
-    appliesTo: "all" | "specific"; setAppliesTo: (v: "all" | "specific") => void;
-    selectedIds: string[]; setSelectedIds: (ids: string[]) => void; idSuffix: string;
-  }) => (
+  const renderProductSelector = (appliesTo: "all" | "specific", setAppliesTo: (v: "all" | "specific") => void,
+    selectedIds: string[], setSelectedIds: (ids: string[]) => void, idSuffix: string) => (
     <div className="space-y-3">
       <label className="text-sm font-medium text-gray-700 block">Applies To</label>
       <div className="flex gap-3">
@@ -227,14 +231,14 @@ export default function Discounts() {
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
-            <Percent className="w-7 h-7 text-green-600" /> Discount Codes
+            <Percent className="w-7 h-7 text-green-600" /> Discounts
           </h2>
-          <p className="text-sm text-gray-500 mt-1">{promos.length} promo code{promos.length !== 1 ? "s" : ""}</p>
+          <p className="text-sm text-gray-500 mt-1">{promos.length} discount{promos.length !== 1 ? "s" : ""}</p>
         </div>
         <div className="flex items-center gap-2">
           <button onClick={() => { setShowCreate(true); setError(""); }}
             className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm font-medium">
-            <Plus className="w-4 h-4" /> New Promo Code
+            <Plus className="w-4 h-4" /> New Discount
           </button>
           <button onClick={loadPromos} disabled={loading}
             className="flex items-center gap-2 px-3 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm">
@@ -253,13 +257,26 @@ export default function Discounts() {
 
       {showCreate && (
         <div className="bg-white rounded-lg border border-gray-200 p-6">
-          <h3 className="text-lg font-semibold text-gray-900 mb-4">Create New Promo Code</h3>
+          <h3 className="text-lg font-semibold text-gray-900 mb-4">Create New Discount</h3>
+          <div className="mb-4 flex gap-3">
+            <button onClick={() => setNewIsDirectDiscount(false)}
+              className={"px-4 py-2 rounded-lg text-sm font-medium border transition-colors " + (!newIsDirectDiscount ? "bg-green-600 text-white border-green-600" : "bg-white text-gray-700 border-gray-300 hover:bg-gray-50")}>
+              <Tag className="w-4 h-4 inline mr-1" /> Promo Code
+            </button>
+            <button onClick={() => setNewIsDirectDiscount(true)}
+              className={"px-4 py-2 rounded-lg text-sm font-medium border transition-colors " + (newIsDirectDiscount ? "bg-green-600 text-white border-green-600" : "bg-white text-gray-700 border-gray-300 hover:bg-gray-50")}>
+              <ShoppingBag className="w-4 h-4 inline mr-1" /> Direct Discount
+            </button>
+          </div>
+          {newIsDirectDiscount && (
+            <p className="text-xs text-gray-500 mb-4 -mt-2">Direct discounts are applied automatically to selected products. No promo code needed.</p>
+          )}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
+            {!newIsDirectDiscount && (<div>
               <label className="text-sm font-medium text-gray-700 block mb-1">Promo Code</label>
               <input type="text" value={newCode} onChange={(e) => setNewCode(e.target.value.toUpperCase())}
                 placeholder="e.g. SUMMER20" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500" />
-            </div>
+            </div>)}
             <div>
               <label className="text-sm font-medium text-gray-700 block mb-1">Discount Type</label>
               <div className="flex gap-2">
@@ -273,6 +290,7 @@ export default function Discounts() {
                   className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500" />
               </div>
             </div>
+            {!newIsDirectDiscount && (<>
             <div>
               <label className="text-sm font-medium text-gray-700 block mb-1">Max Uses (0 = unlimited)</label>
               <input type="number" value={newMaxUses} onChange={(e) => setNewMaxUses(e.target.value)} placeholder="0"
@@ -285,6 +303,7 @@ export default function Discounts() {
                 <span className="text-sm text-gray-700">Single use per customer</span>
               </label>
             </div>
+            </>)}
             <div>
               <label className="text-sm font-medium text-gray-700 flex items-center gap-1 mb-1">
                 <Calendar className="w-3.5 h-3.5" /> Start Date (optional)
@@ -301,8 +320,7 @@ export default function Discounts() {
             </div>
           </div>
           <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
-            <ProductSelector appliesTo={newAppliesTo} setAppliesTo={setNewAppliesTo}
-              selectedIds={newProductIds} setSelectedIds={setNewProductIds} idSuffix="new" />
+            {renderProductSelector(newAppliesTo, setNewAppliesTo, newProductIds, setNewProductIds, "new")}
             <div className="space-y-3">
               <label className="flex items-center gap-2 cursor-pointer pt-6">
                 <input type="checkbox" checked={newExcludeOtherCoupons} onChange={(e) => setNewExcludeOtherCoupons(e.target.checked)}
@@ -321,7 +339,7 @@ export default function Discounts() {
           <div className="mt-4 flex gap-2">
             <button onClick={handleCreate}
               className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm font-medium">
-              <Plus className="w-4 h-4" /> Create Promo Code
+              <Plus className="w-4 h-4" /> {newIsDirectDiscount ? "Create Direct Discount" : "Create Promo Code"}
             </button>
             <button onClick={() => { setShowCreate(false); resetCreateForm(); }}
               className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm font-medium">Cancel</button>
@@ -330,11 +348,11 @@ export default function Discounts() {
       )}
 
       {loading ? (
-        <div className="text-center py-12 text-gray-500">Loading promo codes...</div>
+        <div className="text-center py-12 text-gray-500">Loading discounts...</div>
       ) : promos.length === 0 ? (
         <div className="text-center py-12 bg-white rounded-lg border border-gray-200">
           <Percent className="w-12 h-12 text-gray-300 mx-auto mb-3" />
-          <p className="text-gray-500">No promo codes yet</p>
+          <p className="text-gray-500">No discounts yet</p>
           <p className="text-sm text-gray-400 mt-1">Create one to get started</p>
         </div>
       ) : (
@@ -344,7 +362,9 @@ export default function Discounts() {
               {editingId === promo.id ? (
                 <div className="p-5">
                   <div className="flex items-center justify-between mb-4">
-                    <span className="font-mono font-bold text-green-700 bg-green-50 px-3 py-1 rounded text-sm">{promo.code}</span>
+                    <span className={"font-mono font-bold px-3 py-1 rounded text-sm " + (promo.is_direct_discount ? "text-purple-700 bg-purple-50" : "text-green-700 bg-green-50")}>
+                      {promo.is_direct_discount ? "DIRECT DISCOUNT" : promo.code}
+                    </span>
                     <div className="flex items-center gap-1">
                       <button onClick={() => handleUpdate(promo.id)} className="flex items-center gap-1 px-3 py-1.5 bg-green-600 text-white rounded-lg text-sm hover:bg-green-700">
                         <Save className="w-3.5 h-3.5" /> Save
@@ -400,15 +420,20 @@ export default function Discounts() {
                     </div>
                   </div>
                   <div className="mt-3">
-                    <ProductSelector appliesTo={editAppliesTo} setAppliesTo={setEditAppliesTo}
-                      selectedIds={editProductIds} setSelectedIds={setEditProductIds} idSuffix={"edit-" + promo.id} />
+                    {renderProductSelector(editAppliesTo, setEditAppliesTo, editProductIds, setEditProductIds, "edit-" + promo.id)}
                   </div>
                 </div>
               ) : (
                 <div className="p-4">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3 flex-wrap">
-                      <span className="font-mono font-bold text-green-700 bg-green-50 px-3 py-1 rounded text-sm">{promo.code}</span>
+                      {promo.is_direct_discount ? (
+                        <span className="font-bold text-purple-700 bg-purple-50 px-3 py-1 rounded text-sm flex items-center gap-1">
+                          <ShoppingBag className="w-3.5 h-3.5" /> Direct Discount
+                        </span>
+                      ) : (
+                        <span className="font-mono font-bold text-green-700 bg-green-50 px-3 py-1 rounded text-sm">{promo.code}</span>
+                      )}
                       <span className="text-sm font-medium text-gray-900">{formatDiscount(promo)}</span>
                       <button onClick={() => handleToggleActive(promo)} className="inline-flex items-center gap-1"
                         title={promo.is_active ? "Click to disable" : "Click to enable"}>
@@ -436,8 +461,8 @@ export default function Discounts() {
                     </div>
                   </div>
                   <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-2 text-xs text-gray-500">
-                    <span>Uses: {promo.times_used}{promo.max_uses > 0 ? " / " + promo.max_uses : ""}</span>
-                    {promo.single_use && <span className="text-orange-600">Single use per email</span>}
+                    {!promo.is_direct_discount && <span>Uses: {promo.times_used}{promo.max_uses > 0 ? " / " + promo.max_uses : ""}</span>}
+                    {promo.single_use && !promo.is_direct_discount && <span className="text-orange-600">Single use per email</span>}
                     {promo.starts_at && <span><Calendar className="w-3 h-3 inline" /> Starts: {formatDate(promo.starts_at)}</span>}
                     {promo.expires_at && <span><Calendar className="w-3 h-3 inline" /> Expires: {formatDate(promo.expires_at)}</span>}
                     {promo.applies_to === "specific" && (

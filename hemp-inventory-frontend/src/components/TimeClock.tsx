@@ -8,6 +8,7 @@ import {
   clockOut,
   getActiveClocks,
   getTimeEntries,
+  updateTimeEntry,
   deleteTimeEntry,
   getTimeclockExportUrl,
   syncEmployeesFromClover,
@@ -20,7 +21,10 @@ import {
   deleteTimeOffRequest,
   getScheduleNotes,
   createScheduleNote,
+  updateScheduleNote,
   deleteScheduleNote,
+  createManualEntry,
+  getScheduleHours,
 } from "../lib/api";
 import {
   Clock,
@@ -51,6 +55,7 @@ interface Employee {
   pin: string | null;
   active: boolean;
   created_at: string;
+  pay_rate: number | null;
 }
 
 interface ActiveClock {
@@ -100,6 +105,16 @@ interface ScheduleNote {
   note: string;
   created_by: string | null;
   created_at: string;
+  note_type?: string;
+  employee_id?: number | null;
+  employee_name?: string;
+}
+
+interface ScheduleHours {
+  employee_id: number;
+  employee_name: string;
+  total_hours: number;
+  shift_count: number;
 }
 
 export default function TimeClock() {
@@ -115,6 +130,7 @@ export default function TimeClock() {
   const [newEmpPin, setNewEmpPin] = useState("");
   const [editingEmp, setEditingEmp] = useState<number | null>(null);
   const [editEmpName, setEditEmpName] = useState("");
+  const [editEmpPayRate, setEditEmpPayRate] = useState("");
 
   // Timesheet filters
   const [startDate, setStartDate] = useState(() => {
@@ -130,8 +146,20 @@ export default function TimeClock() {
   const [page, setPage] = useState(1);
   const perPage = 25;
 
+  // Timesheet edit
+  const [editingEntry, setEditingEntry] = useState<number | null>(null);
+  const [editClockIn, setEditClockIn] = useState("");
+  const [editClockOut, setEditClockOut] = useState("");
+
   // Sync
   const [syncing, setSyncing] = useState(false);
+
+  // Manual entry form
+  const [showManualEntry, setShowManualEntry] = useState(false);
+  const [manualEmpId, setManualEmpId] = useState(0);
+  const [manualClockIn, setManualClockIn] = useState("");
+  const [manualClockOut, setManualClockOut] = useState("");
+  const [savingManual, setSavingManual] = useState(false);
 
   // Schedule state
   const [schedules, setSchedules] = useState<ScheduleItem[]>([]);
@@ -150,7 +178,14 @@ export default function TimeClock() {
   const [timeOffEmpId, setTimeOffEmpId] = useState(0);
   const [timeOffReason, setTimeOffReason] = useState("");
   const [noteText, setNoteText] = useState("");
+  const [noteType, setNoteType] = useState<"shared" | "admin_only" | "employee_private">("shared");
+  const [noteEmpId, setNoteEmpId] = useState(0);
   const [scheduleSubTab, setScheduleSubTab] = useState<"calendar" | "requests">("calendar");
+  const [hoursView, setHoursView] = useState<"week" | "month">("week");
+  const [weeklyHours, setWeeklyHours] = useState<ScheduleHours[]>([]);
+  const [monthlyHours, setMonthlyHours] = useState<ScheduleHours[]>([]);
+  const [editingNoteId, setEditingNoteId] = useState<number | null>(null);
+  const [editNoteText, setEditNoteText] = useState("");
 
   // Toast
   const [toast, setToast] = useState<{ type: "success" | "error"; text: string } | null>(null);
@@ -245,7 +280,9 @@ export default function TimeClock() {
   const handleSaveEditEmp = async (id: number) => {
     if (!editEmpName.trim()) return;
     try {
-      await updateEmployee(id, { name: editEmpName.trim() });
+      const data: { name: string; pay_rate?: number } = { name: editEmpName.trim() };
+      if (editEmpPayRate !== "") data.pay_rate = parseFloat(editEmpPayRate);
+      await updateEmployee(id, data);
       setEditingEmp(null);
       showToast("success", "Employee updated");
       await loadEmployees();
@@ -305,6 +342,49 @@ export default function TimeClock() {
     }
   };
 
+  const handleStartEditEntry = (entry: TimeEntry) => {
+    setEditingEntry(entry.id);
+    // Convert ISO to datetime-local format in EST
+    const toLocal = (iso: string) => {
+      const d = new Date(iso);
+      const est = new Date(d.toLocaleString("en-US", { timeZone: "America/New_York" }));
+      const y = est.getFullYear();
+      const mo = String(est.getMonth() + 1).padStart(2, "0");
+      const da = String(est.getDate()).padStart(2, "0");
+      const h = String(est.getHours()).padStart(2, "0");
+      const mi = String(est.getMinutes()).padStart(2, "0");
+      return `${y}-${mo}-${da}T${h}:${mi}`;
+    };
+    setEditClockIn(toLocal(entry.clock_in));
+    setEditClockOut(entry.clock_out ? toLocal(entry.clock_out) : "");
+  };
+
+  const handleSaveEditEntry = async (entryId: number) => {
+    try {
+      // Convert datetime-local (EST) back to UTC ISO
+      const toUTC = (local: string) => {
+        // Parse as EST then convert to UTC
+        const d = new Date(local + ":00");
+        // Create date in EST by interpreting the input as EST
+        const estStr = d.toLocaleString("en-US", { timeZone: "America/New_York" });
+        const estDate = new Date(estStr);
+        const diff = d.getTime() - estDate.getTime();
+        const utc = new Date(d.getTime() + diff);
+        return utc.toISOString();
+      };
+      const data: { clock_in?: string; clock_out?: string } = {};
+      if (editClockIn) data.clock_in = toUTC(editClockIn);
+      if (editClockOut) data.clock_out = toUTC(editClockOut);
+      await updateTimeEntry(entryId, data);
+      showToast("success", "Entry updated");
+      setEditingEntry(null);
+      await loadEntries();
+    } catch (err) {
+      console.error(err);
+      showToast("error", "Failed to update entry");
+    }
+  };
+
   // Compute date range for all visible months
   const getVisibleDateRange = useCallback(() => {
     const start = new Date(calYear, calMonth, 1);
@@ -345,13 +425,37 @@ export default function TimeClock() {
     }
   }, [getVisibleDateRange]);
 
+  const loadHours = useCallback(async () => {
+    try {
+      // Load monthly hours (full visible range)
+      const range = getVisibleDateRange();
+      const monthRes = await getScheduleHours({ start_date: range.start_date, end_date: range.end_date });
+      setMonthlyHours(monthRes.data);
+
+      // Load weekly hours (current week: Sunday to Saturday)
+      const now = new Date();
+      const weekStart = new Date(now);
+      weekStart.setDate(now.getDate() - now.getDay());
+      const weekEnd = new Date(weekStart);
+      weekEnd.setDate(weekStart.getDate() + 6);
+      const weekRes = await getScheduleHours({
+        start_date: weekStart.toISOString().split("T")[0],
+        end_date: weekEnd.toISOString().split("T")[0],
+      });
+      setWeeklyHours(weekRes.data);
+    } catch (err) {
+      console.error("Error loading schedule hours:", err);
+    }
+  }, [getVisibleDateRange]);
+
   useEffect(() => {
     if (tab === "schedule") {
       loadSchedules();
       loadTimeOff();
       loadNotes();
+      loadHours();
     }
-  }, [tab, loadSchedules, loadTimeOff, loadNotes]);
+  }, [tab, loadSchedules, loadTimeOff, loadNotes, loadHours]);
 
   const handleSaveSchedule = async (empId: number, date: string, start: string, end: string, location: string) => {
     setSavingSchedule(true);
@@ -421,8 +525,43 @@ export default function TimeClock() {
   const formatHours = (h: number | null) => {
     if (h === null || h === undefined) return "---";
     const hrs = Math.floor(h);
-    const mins = Math.round((h - hrs) * 60);
+    const mins = Math.floor((h - hrs) * 60);
     return `${hrs}h ${mins}m`;
+  };
+
+  const handleAddManualEntry = async () => {
+    if (!manualEmpId || !manualClockIn || !manualClockOut) {
+      showToast("error", "Please fill in all fields");
+      return;
+    }
+    setSavingManual(true);
+    try {
+      // Convert datetime-local (EST) to UTC ISO
+      const toUTC = (local: string) => {
+        const d = new Date(local + ":00");
+        const estStr = d.toLocaleString("en-US", { timeZone: "America/New_York" });
+        const estDate = new Date(estStr);
+        const diff = d.getTime() - estDate.getTime();
+        const utc = new Date(d.getTime() + diff);
+        return utc.toISOString();
+      };
+      const res = await createManualEntry({
+        employee_id: manualEmpId,
+        clock_in: toUTC(manualClockIn),
+        clock_out: toUTC(manualClockOut),
+      });
+      showToast("success", `Manual entry added for ${res.data.employee} (${formatHours(res.data.hours)})`);
+      setShowManualEntry(false);
+      setManualEmpId(0);
+      setManualClockIn("");
+      setManualClockOut("");
+      await loadEntries();
+    } catch (err) {
+      const axErr = err as { response?: { data?: { detail?: string } } };
+      showToast("error", axErr?.response?.data?.detail || "Failed to add manual entry");
+    } finally {
+      setSavingManual(false);
+    }
   };
 
   const activeSet = new Set(activeClocks.map((c) => c.employee_id));
@@ -436,8 +575,9 @@ export default function TimeClock() {
   const totalPages = Math.ceil(entries.length / perPage);
   const paginatedEntries = entries.slice((page - 1) * perPage, page * perPage);
 
-  // Summary for timesheet
-  const totalHours = entries.reduce((sum, e) => sum + (e.hours || 0), 0);
+  // Summary for timesheet — truncate to 2 decimal places (no rounding up)
+  const totalHoursRaw = entries.reduce((sum, e) => sum + (e.hours || 0), 0);
+  const totalHours = Math.floor(totalHoursRaw * 100) / 100;
   const employeeSummary: Record<string, number> = {};
   entries.forEach((e) => {
     employeeSummary[e.employee_name] = (employeeSummary[e.employee_name] || 0) + (e.hours || 0);
@@ -652,14 +792,74 @@ export default function TimeClock() {
                 <Download className="w-4 h-4" />
                 Export CSV
               </button>
+              <button
+                onClick={() => setShowManualEntry(!showManualEntry)}
+                className="px-4 py-1.5 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 transition-colors flex items-center gap-2"
+              >
+                <Plus className="w-4 h-4" />
+                Add Entry
+              </button>
             </div>
           </div>
+
+          {/* Manual Entry Form */}
+          {showManualEntry && (
+            <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+              <h4 className="text-sm font-semibold text-green-800 mb-3">Add Manual Time Entry</h4>
+              <div className="flex flex-wrap gap-3 items-end">
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Employee</label>
+                  <select
+                    value={manualEmpId}
+                    onChange={(e) => setManualEmpId(Number(e.target.value))}
+                    className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-green-500"
+                  >
+                    <option value={0}>Select Employee</option>
+                    {employees.filter(e => e.active).map((e) => (
+                      <option key={e.id} value={e.id}>{e.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Clock In</label>
+                  <input
+                    type="datetime-local"
+                    value={manualClockIn}
+                    onChange={(e) => setManualClockIn(e.target.value)}
+                    className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-green-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Clock Out</label>
+                  <input
+                    type="datetime-local"
+                    value={manualClockOut}
+                    onChange={(e) => setManualClockOut(e.target.value)}
+                    className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-green-500"
+                  />
+                </div>
+                <button
+                  onClick={handleAddManualEntry}
+                  disabled={savingManual}
+                  className="px-4 py-1.5 bg-green-700 text-white text-sm font-medium rounded-lg hover:bg-green-800 disabled:opacity-50 transition-colors"
+                >
+                  {savingManual ? "Saving..." : "Save Entry"}
+                </button>
+                <button
+                  onClick={() => setShowManualEntry(false)}
+                  className="px-4 py-1.5 bg-gray-200 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-300 transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Summary Cards */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
             <div className="bg-white border border-gray-200 rounded-lg p-4">
               <p className="text-xs text-gray-500 mb-1">Total Hours</p>
-              <p className="text-2xl font-bold text-gray-900">{totalHours.toFixed(1)}</p>
+              <p className="text-2xl font-bold text-gray-900">{formatHours(totalHours)}</p>
             </div>
             <div className="bg-white border border-gray-200 rounded-lg p-4">
               <p className="text-xs text-gray-500 mb-1">Entries</p>
@@ -672,7 +872,7 @@ export default function TimeClock() {
             <div className="bg-white border border-gray-200 rounded-lg p-4">
               <p className="text-xs text-gray-500 mb-1">Avg Hours/Entry</p>
               <p className="text-2xl font-bold text-gray-900">
-                {entries.length > 0 ? (totalHours / entries.length).toFixed(1) : "0"}
+                {entries.length > 0 ? formatHours(Math.floor((totalHours / entries.length) * 100) / 100) : "0"}
               </p>
             </div>
           </div>
@@ -684,18 +884,30 @@ export default function TimeClock() {
                 <thead>
                   <tr className="bg-gray-50 border-b border-gray-200">
                     <th className="text-left px-4 py-2 font-medium text-gray-600">Employee</th>
+                    <th className="text-right px-4 py-2 font-medium text-gray-600">Pay Rate</th>
                     <th className="text-right px-4 py-2 font-medium text-gray-600">Total Hours</th>
+                    <th className="text-right px-4 py-2 font-medium text-gray-600">Est. Pay</th>
                   </tr>
                 </thead>
                 <tbody>
                   {Object.entries(employeeSummary)
                     .sort(([a], [b]) => a.localeCompare(b))
-                    .map(([name, hrs]) => (
-                      <tr key={name} className="border-b border-gray-100">
-                        <td className="px-4 py-2 text-gray-900">{name}</td>
-                        <td className="px-4 py-2 text-right font-medium text-gray-900">{formatHours(hrs)}</td>
-                      </tr>
-                    ))}
+                    .map(([name, hrs]) => {
+                      const emp = employees.find((e) => e.name === name);
+                      const rate = emp?.pay_rate ?? null;
+                      return (
+                        <tr key={name} className="border-b border-gray-100">
+                          <td className="px-4 py-2 text-gray-900">{name}</td>
+                          <td className="px-4 py-2 text-right text-gray-600">
+                            {rate !== null ? `$${rate.toFixed(2)}/hr` : "—"}
+                          </td>
+                          <td className="px-4 py-2 text-right font-medium text-gray-900">{formatHours(hrs)}</td>
+                          <td className="px-4 py-2 text-right font-medium text-green-700">
+                            {rate !== null ? `$${(hrs * rate).toFixed(2)}` : "—"}
+                          </td>
+                        </tr>
+                      );
+                    })}
                 </tbody>
               </table>
             </div>
@@ -719,9 +931,27 @@ export default function TimeClock() {
                   <tr key={e.id} className="border-b border-gray-100 hover:bg-gray-50">
                     <td className="px-4 py-2 text-gray-900">{e.employee_name}</td>
                     <td className="px-4 py-2 text-gray-600">{formatDate(e.clock_in)}</td>
-                    <td className="px-4 py-2 text-gray-600">{formatTime(e.clock_in)}</td>
                     <td className="px-4 py-2 text-gray-600">
-                      {e.clock_out ? formatTime(e.clock_out) : (
+                      {editingEntry === e.id ? (
+                        <input
+                          type="datetime-local"
+                          value={editClockIn}
+                          onChange={(ev) => setEditClockIn(ev.target.value)}
+                          className="border border-gray-300 rounded px-2 py-1 text-xs w-44 focus:ring-2 focus:ring-green-500"
+                        />
+                      ) : (
+                        formatTime(e.clock_in)
+                      )}
+                    </td>
+                    <td className="px-4 py-2 text-gray-600">
+                      {editingEntry === e.id ? (
+                        <input
+                          type="datetime-local"
+                          value={editClockOut}
+                          onChange={(ev) => setEditClockOut(ev.target.value)}
+                          className="border border-gray-300 rounded px-2 py-1 text-xs w-44 focus:ring-2 focus:ring-green-500"
+                        />
+                      ) : e.clock_out ? formatTime(e.clock_out) : (
                         <span className="text-green-600 font-medium">Active</span>
                       )}
                     </td>
@@ -729,13 +959,43 @@ export default function TimeClock() {
                       {e.hours !== null ? formatHours(e.hours) : "---"}
                     </td>
                     <td className="px-4 py-2 text-right">
-                      <button
-                        onClick={() => handleDeleteEntry(e.id)}
-                        className="text-gray-400 hover:text-red-600 transition-colors"
-                        title="Delete entry"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+                      <div className="flex items-center justify-end gap-1">
+                        {editingEntry === e.id ? (
+                          <>
+                            <button
+                              onClick={() => handleSaveEditEntry(e.id)}
+                              className="text-green-600 hover:text-green-800 transition-colors"
+                              title="Save changes"
+                            >
+                              <Check className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={() => setEditingEntry(null)}
+                              className="text-gray-400 hover:text-gray-600 transition-colors"
+                              title="Cancel"
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <button
+                              onClick={() => handleStartEditEntry(e)}
+                              className="text-gray-400 hover:text-blue-600 transition-colors"
+                              title="Edit entry"
+                            >
+                              <Edit2 className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={() => handleDeleteEntry(e.id)}
+                              className="text-gray-400 hover:text-red-600 transition-colors"
+                              title="Delete entry"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -854,6 +1114,7 @@ export default function TimeClock() {
                 <tr className="bg-gray-50 border-b border-gray-200">
                   <th className="text-left px-4 py-2 font-medium text-gray-600">Name</th>
                   <th className="text-left px-4 py-2 font-medium text-gray-600">PIN</th>
+                  <th className="text-right px-4 py-2 font-medium text-gray-600">Pay Rate</th>
                   <th className="text-center px-4 py-2 font-medium text-gray-600">Status</th>
                   <th className="text-right px-4 py-2 font-medium text-gray-600">Actions</th>
                 </tr>
@@ -884,6 +1145,23 @@ export default function TimeClock() {
                       )}
                     </td>
                     <td className="px-4 py-3 text-gray-500">{emp.pin || "---"}</td>
+                    <td className="px-4 py-3 text-right">
+                      {editingEmp === emp.id ? (
+                        <input
+                          type="number"
+                          step="0.25"
+                          min="0"
+                          value={editEmpPayRate}
+                          onChange={(e) => setEditEmpPayRate(e.target.value)}
+                          className="border border-gray-300 rounded px-2 py-1 text-sm w-24 text-right"
+                          placeholder="0.00"
+                        />
+                      ) : (
+                        <span className="text-gray-600">
+                          {emp.pay_rate !== null ? `$${emp.pay_rate.toFixed(2)}/hr` : "—"}
+                        </span>
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-center">
                       <button
                         onClick={() => handleToggleActive(emp)}
@@ -899,9 +1177,9 @@ export default function TimeClock() {
                     <td className="px-4 py-3 text-right">
                       <div className="flex items-center justify-end gap-2">
                         <button
-                          onClick={() => { setEditingEmp(emp.id); setEditEmpName(emp.name); }}
+                          onClick={() => { setEditingEmp(emp.id); setEditEmpName(emp.name); setEditEmpPayRate(emp.pay_rate !== null ? String(emp.pay_rate) : ""); }}
                           className="text-gray-400 hover:text-blue-600 transition-colors"
-                          title="Edit name"
+                          title="Edit employee"
                         >
                           <Edit2 className="w-4 h-4" />
                         </button>
@@ -918,7 +1196,7 @@ export default function TimeClock() {
                 ))}
                 {employees.length === 0 && (
                   <tr>
-                    <td colSpan={4} className="px-4 py-8 text-center text-gray-400">
+                    <td colSpan={5} className="px-4 py-8 text-center text-gray-400">
                       No employees yet. Click "Add Employee" to get started.
                     </td>
                   </tr>
@@ -1000,11 +1278,22 @@ export default function TimeClock() {
 
         const handleAddNote = async () => {
           if (!selectedDate || !noteText.trim()) return;
+          if (noteType === "employee_private" && !noteEmpId) {
+            showToast("error", "Please select an employee for private notes");
+            return;
+          }
           try {
-            await createScheduleNote({ date: selectedDate, note: noteText.trim() });
+            await createScheduleNote({
+              date: selectedDate,
+              note: noteText.trim(),
+              note_type: noteType,
+              employee_id: noteType === "employee_private" ? noteEmpId : undefined,
+            });
             showToast("success", "Note added");
             setShowNoteModal(false);
             setNoteText("");
+            setNoteType("shared");
+            setNoteEmpId(0);
             setSelectedDate("");
             await loadNotes();
           } catch { showToast("error", "Failed to add note"); }
@@ -1016,6 +1305,17 @@ export default function TimeClock() {
             showToast("success", "Note removed");
             await loadNotes();
           } catch { showToast("error", "Failed to delete note"); }
+        };
+
+        const handleEditNote = async (id: number) => {
+          if (!editNoteText.trim()) return;
+          try {
+            await updateScheduleNote(id, { note: editNoteText.trim() });
+            showToast("success", "Note updated");
+            setEditingNoteId(null);
+            setEditNoteText("");
+            await loadNotes();
+          } catch { showToast("error", "Failed to update note"); }
         };
 
         const prevMonth = () => {
@@ -1083,6 +1383,36 @@ export default function TimeClock() {
               </div>
 
               {/* Month calendars */}
+              {/* Employee Hours Summary */}
+              {(weeklyHours.length > 0 || monthlyHours.length > 0) && (
+                <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+                  <div className="p-3 border-b border-gray-200 bg-emerald-50 flex items-center justify-between">
+                    <h3 className="font-semibold text-emerald-800 text-sm flex items-center gap-2"><Clock className="w-4 h-4" />Scheduled Hours Summary</h3>
+                    <div className="flex items-center gap-1 bg-emerald-100 rounded-lg p-0.5">
+                      <button onClick={() => setHoursView("week")}
+                        className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${hoursView === "week" ? "bg-white text-emerald-800 shadow-sm" : "text-emerald-600 hover:text-emerald-800"}`}>
+                        This Week
+                      </button>
+                      <button onClick={() => setHoursView("month")}
+                        className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${hoursView === "month" ? "bg-white text-emerald-800 shadow-sm" : "text-emerald-600 hover:text-emerald-800"}`}>
+                        This Month
+                      </button>
+                    </div>
+                  </div>
+                  <div className="p-3">
+                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
+                      {(hoursView === "week" ? weeklyHours : monthlyHours).map(h => (
+                        <div key={h.employee_id} className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-center">
+                          <div className="text-sm font-medium text-gray-900">{h.employee_name}</div>
+                          <div className="text-2xl font-bold text-emerald-700 mt-1">{h.total_hours}h</div>
+                          <div className="text-xs text-gray-500 mt-0.5">{h.shift_count} shift{h.shift_count !== 1 ? "s" : ""}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {renderMonths.map(({ month: mo, year: yr, days }) => {
                 return (
                   <div key={`${yr}-${mo}`} className="bg-white border border-gray-200 rounded-lg overflow-hidden">
@@ -1193,15 +1523,57 @@ export default function TimeClock() {
                               const dayNotes = notesMap[dateStr];
                               return (
                                 <td key={i} className="px-1 py-1 text-center border-r border-b border-gray-200 text-xs text-blue-700">
-                                  {dayNotes ? dayNotes.map(n => (
-                                    <div key={n.id} className="flex items-center gap-0.5 justify-center" title={n.note}>
-                                      <span className="truncate max-w-14">{n.note}</span>
-                                      <button onClick={() => handleRemoveNote(n.id)} className="text-red-400 hover:text-red-600 flex-shrink-0"><X className="w-2.5 h-2.5" /></button>
-                                    </div>
-                                  )) : (
+                                  {dayNotes ? dayNotes.map(n => {
+                                    const typeColor = n.note_type === "admin_only" ? "text-purple-700 bg-purple-50" : n.note_type === "employee_private" ? "text-orange-700 bg-orange-50" : "text-blue-700";
+                                    const typeLabel = n.note_type === "admin_only" ? "Admin" : n.note_type === "employee_private" ? (n.employee_name || "Emp") : "";
+                                    if (editingNoteId === n.id) {
+                                      return (
+                                        <div key={n.id} className="flex items-center gap-0.5">
+                                          <input type="text" value={editNoteText} onChange={e => setEditNoteText(e.target.value)}
+                                            className="w-20 px-1 py-0.5 border border-blue-300 rounded text-xs" autoFocus
+                                            onKeyDown={e => { if (e.key === "Enter") handleEditNote(n.id); if (e.key === "Escape") { setEditingNoteId(null); setEditNoteText(""); } }} />
+                                          <button onClick={() => handleEditNote(n.id)} className="text-green-600 hover:text-green-800 flex-shrink-0"><Check className="w-2.5 h-2.5" /></button>
+                                          <button onClick={() => { setEditingNoteId(null); setEditNoteText(""); }} className="text-gray-400 hover:text-gray-600 flex-shrink-0"><X className="w-2.5 h-2.5" /></button>
+                                        </div>
+                                      );
+                                    }
+                                    return (
+                                      <div key={n.id} className={`flex items-center gap-0.5 justify-center ${typeColor}`} title={`${typeLabel ? `[${typeLabel}] ` : ""}${n.note}`}>
+                                        {typeLabel && <span className="text-[9px] font-bold">{typeLabel[0]}</span>}
+                                        <span className="truncate max-w-14 cursor-pointer hover:underline" onClick={() => { setEditingNoteId(n.id); setEditNoteText(n.note); }}>{n.note}</span>
+                                        <button onClick={() => handleRemoveNote(n.id)} className="text-red-400 hover:text-red-600 flex-shrink-0"><X className="w-2.5 h-2.5" /></button>
+                                      </div>
+                                    );
+                                  }) : (
                                     <button onClick={() => { setSelectedDate(dateStr); setShowNoteModal(true); }}
                                       className="text-gray-300 hover:text-blue-500 transition-colors"><Plus className="w-3 h-3 mx-auto" /></button>
                                   )}
+                                </td>
+                              );
+                            })}
+                          </tr>
+                          {/* Hours totals row */}
+                          <tr className="bg-emerald-50/50">
+                            <td className="px-2 py-1.5 text-xs font-medium text-emerald-700 border-r border-b border-gray-200 sticky left-0 bg-emerald-50 z-10">
+                              <Clock className="w-3 h-3 inline mr-1" />Total Hrs
+                            </td>
+                            {days.map((d, i) => {
+                              const dateStr = d.toISOString().split("T")[0];
+                              // Sum hours for all employees on this date
+                              let dayTotal = 0;
+                              activeEmps.forEach(emp => {
+                                const sched = scheduleMap[`${emp.id}-${dateStr}`];
+                                if (sched) {
+                                  const [sh, sm] = sched.start_time.split(":").map(Number);
+                                  const [eh, em] = sched.end_time.split(":").map(Number);
+                                  let hrs = (eh + em / 60) - (sh + sm / 60);
+                                  if (hrs < 0) hrs += 24; // handle overnight shifts
+                                  dayTotal += hrs;
+                                }
+                              });
+                              return (
+                                <td key={i} className="px-1 py-1 text-center border-r border-b border-gray-200 text-xs font-medium text-emerald-700">
+                                  {dayTotal > 0 ? dayTotal.toFixed(1) : ""}
                                 </td>
                               );
                             })}
@@ -1214,7 +1586,9 @@ export default function TimeClock() {
                       <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-green-100 border border-green-300" /> Today</span>
                       <span className="flex items-center gap-1"><span className="inline-block px-1 rounded text-xs font-bold bg-red-100 text-red-700">OFF</span> Approved Time Off</span>
                       <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-400" /> Pending Request</span>
-                      <span className="flex items-center gap-1"><MessageSquare className="w-3 h-3 text-blue-500" /> Has Notes</span>
+                      <span className="flex items-center gap-1"><MessageSquare className="w-3 h-3 text-blue-500" /> Shared Note</span>
+                      <span className="flex items-center gap-1"><span className="text-[9px] font-bold text-purple-700 bg-purple-50 px-1 rounded">A</span> Admin Only</span>
+                      <span className="flex items-center gap-1"><span className="text-[9px] font-bold text-orange-700 bg-orange-50 px-1 rounded">E</span> Employee Private</span>
                     </div>
                   </div>
                 );
@@ -1328,14 +1702,44 @@ export default function TimeClock() {
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500" />
                   </div>
                   <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Note Type</label>
+                    <div className="flex gap-2">
+                      <button onClick={() => { setNoteType("shared"); setNoteEmpId(0); }}
+                        className={`flex-1 px-3 py-2 rounded-lg text-xs font-medium border transition-colors ${noteType === "shared" ? "bg-blue-100 border-blue-400 text-blue-700" : "bg-white border-gray-300 text-gray-600 hover:bg-gray-50"}`}>
+                        Shared (All)
+                      </button>
+                      <button onClick={() => { setNoteType("admin_only"); setNoteEmpId(0); }}
+                        className={`flex-1 px-3 py-2 rounded-lg text-xs font-medium border transition-colors ${noteType === "admin_only" ? "bg-purple-100 border-purple-400 text-purple-700" : "bg-white border-gray-300 text-gray-600 hover:bg-gray-50"}`}>
+                        Admin Only
+                      </button>
+                      <button onClick={() => setNoteType("employee_private")}
+                        className={`flex-1 px-3 py-2 rounded-lg text-xs font-medium border transition-colors ${noteType === "employee_private" ? "bg-orange-100 border-orange-400 text-orange-700" : "bg-white border-gray-300 text-gray-600 hover:bg-gray-50"}`}>
+                        Private (Emp)
+                      </button>
+                    </div>
+                    <p className="text-[10px] text-gray-400 mt-1">
+                      {noteType === "shared" ? "Visible to everyone." : noteType === "admin_only" ? "Only visible to admin, hidden from employees." : "Only visible to the selected employee."}
+                    </p>
+                  </div>
+                  {noteType === "employee_private" && (
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Employee</label>
+                      <select value={noteEmpId} onChange={e => setNoteEmpId(Number(e.target.value))}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500">
+                        <option value={0}>Select employee...</option>
+                        {activeEmps.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
+                      </select>
+                    </div>
+                  )}
+                  <div>
                     <label className="block text-xs font-medium text-gray-600 mb-1">Note</label>
                     <textarea value={noteText} onChange={e => setNoteText(e.target.value)} placeholder="Staff meeting, holiday, special event..."
                       rows={3} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 resize-y" />
                   </div>
                   <div className="flex gap-2 pt-2">
-                    <button onClick={handleAddNote} disabled={!selectedDate || !noteText.trim()}
+                    <button onClick={handleAddNote} disabled={!selectedDate || !noteText.trim() || (noteType === "employee_private" && !noteEmpId)}
                       className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 font-medium text-sm">Add Note</button>
-                    <button onClick={() => setShowNoteModal(false)} className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 font-medium text-sm">Cancel</button>
+                    <button onClick={() => { setShowNoteModal(false); setNoteType("shared"); setNoteEmpId(0); }} className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 font-medium text-sm">Cancel</button>
                   </div>
                 </div>
               </div>

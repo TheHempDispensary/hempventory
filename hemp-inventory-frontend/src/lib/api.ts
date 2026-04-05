@@ -18,8 +18,13 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
+      // Clear all token keys (generic + domain-specific) to prevent auth state mismatch
       localStorage.removeItem("token");
       localStorage.removeItem("userRole");
+      localStorage.removeItem("inventory_token");
+      localStorage.removeItem("inventory_userRole");
+      localStorage.removeItem("timeclock_token");
+      localStorage.removeItem("timeclock_userRole");
       window.location.href = "/";
     }
     return Promise.reject(error);
@@ -103,7 +108,7 @@ export const transferStock = (sku: string, fromLocationId: number, toLocationId:
 export const bulkAssignCategory = (skus: string[], categoryName: string) =>
   api.post("/api/inventory/bulk-assign-category", { skus, category_name: categoryName });
 
-export const bulkStockUpdate = (updates: { sku: string; location_id: number; quantity: number }[]) =>
+export const bulkStockUpdate = (updates: { sku: string; location_id: number; quantity: number; item_name?: string; clover_item_id?: string }[]) =>
   api.post("/api/inventory/items/bulk-stock-update", { updates });
 
 export const bulkAssignImages = (keyword: string, imageData: string, contentType: string = "image/png", skus?: string[]) =>
@@ -281,7 +286,7 @@ export const getEmployees = () => api.get("/api/timeclock/employees");
 export const createEmployee = (data: { name: string; pin?: string }) =>
   api.post("/api/timeclock/employees", data);
 
-export const updateEmployee = (id: number, data: { name?: string; pin?: string; active?: boolean }) =>
+export const updateEmployee = (id: number, data: { name?: string; pin?: string; active?: boolean; pay_rate?: number }) =>
   api.put(`/api/timeclock/employees/${id}`, data);
 
 export const deleteEmployee = (id: number) =>
@@ -303,6 +308,9 @@ export const updateTimeEntry = (id: number, data: { clock_in?: string; clock_out
 
 export const deleteTimeEntry = (id: number) =>
   api.delete(`/api/timeclock/entries/${id}`);
+
+export const createManualEntry = (data: { employee_id: number; clock_in: string; clock_out: string }) =>
+  api.post("/api/timeclock/entries", data);
 
 export const syncEmployeesFromClover = () =>
   api.post("/api/timeclock/sync-employees");
@@ -379,8 +387,11 @@ export const deleteTimeOffRequest = (requestId: number) =>
 export const getScheduleNotes = (params?: { start_date?: string; end_date?: string }) =>
   api.get("/api/timeclock/schedule-notes", { params });
 
-export const createScheduleNote = (data: { date: string; note: string }) =>
+export const createScheduleNote = (data: { date: string; note: string; note_type?: string; employee_id?: number }) =>
   api.post("/api/timeclock/schedule-notes", data);
+
+export const updateScheduleNote = (noteId: number, data: { note?: string; note_type?: string; employee_id?: number }) =>
+  api.put(`/api/timeclock/schedule-notes/${noteId}`, data);
 
 export const deleteScheduleNote = (noteId: number) =>
   api.delete(`/api/timeclock/schedule-notes/${noteId}`);
@@ -394,6 +405,36 @@ export const updateOrderStatus = (orderId: number, status: string) =>
 
 export const updateOrderNotes = (orderId: number, staffNotes: string) =>
   api.patch(`/api/ecommerce/orders/${orderId}/notes`, { staff_notes: staffNotes });
+
+export const updateOrderCustomer = (orderId: number, data: {
+  customer_first_name?: string;
+  customer_last_name?: string;
+  customer_email?: string;
+  customer_phone?: string;
+  shipping_address?: string;
+  shipping_apartment?: string;
+  shipping_city?: string;
+  shipping_state?: string;
+  shipping_zip?: string;
+}) => api.patch(`/api/ecommerce/orders/${orderId}/customer`, data);
+
+// Schedule Hours
+export const getScheduleHours = (params?: { start_date?: string; end_date?: string }) =>
+  api.get("/api/timeclock/schedule-hours", { params });
+
+// Inventory change history
+export const getInventoryChanges = (params?: { sku?: string; location?: string; limit?: number; offset?: number }) =>
+  api.get("/api/inventory/changes", { params });
+
+// Add variants to existing item
+export const addVariantsToItem = (data: {
+  item_name: string;
+  item_sku?: string;
+  price: number;
+  sku_prefix?: string;
+  variants: { attribute_name: string; option_names: string[] }[];
+  keep_original?: boolean;
+}) => api.post("/api/inventory/add-variants", data);
 
 // Shipping (Shippo)
 export const createShipment = (data: {
@@ -426,7 +467,7 @@ export const refundOrder = (orderId: number, amount?: number) =>
 export const getPromos = () => api.get("/api/ecommerce/promos");
 
 export const createPromo = (data: {
-  code: string;
+  code?: string;
   discount_pct?: number;
   discount_amount?: number;
   single_use?: boolean;
@@ -437,6 +478,7 @@ export const createPromo = (data: {
   product_ids?: string;
   exclude_from_other_coupons?: boolean;
   sync_to_clover?: boolean;
+  is_direct_discount?: boolean;
 }) => api.post("/api/ecommerce/promos", data);
 
 export const updatePromo = (promoId: number, data: {

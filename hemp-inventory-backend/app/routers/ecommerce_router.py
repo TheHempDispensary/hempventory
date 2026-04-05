@@ -90,6 +90,24 @@ CACHE_TTL = 600  # 10 minutes
 DISK_CACHE_PATH = os.environ.get("DB_PATH", "").replace("app.db", "product_cache.json") or "/tmp/product_cache.json"
 
 
+def _enforce_leaflife_price_floor(sku: str, name: str, price: int) -> int:
+    """Enforce minimum price floors for LeafLife products by weight.
+    Returns the price (in cents) with floor applied if applicable."""
+    if not isinstance(sku, str) or not sku.startswith("LF-"):
+        return price
+    sku_upper = sku.upper()
+    name_upper = name.upper()
+    if sku_upper.endswith("-28") or "28 GRAM" in name_upper:
+        return max(price, 10000)  # $100.00 minimum for 28g
+    elif sku_upper.endswith("-14") or "14 GRAM" in name_upper:
+        return max(price, 9500)   # $95.00 minimum for 14g
+    elif sku_upper.endswith("-7 G") or sku_upper.endswith("-7G") or "7 GRAM" in name_upper:
+        return max(price, 5500)   # $55.00 minimum for 7g
+    elif sku_upper.endswith("-3.5") or "3.5 GRAM" in name_upper:
+        return max(price, 2500)   # $25.00 minimum for 3.5g
+    return price
+
+
 def invalidate_product_cache():
     """Invalidate ALL product cache layers so the next request fetches fresh data.
     Called from inventory_router when images are uploaded/changed."""
@@ -235,6 +253,15 @@ async def _fetch_and_cache_products() -> dict:
             if row[1]:
                 image_by_name[row[1].upper()] = f"{image_base_url}/{url_quote(row[0], safe='')}?v=2&t={str(row[2] or '').replace(' ', '_')}"
 
+        # Load product descriptions from local DB (Clover API doesn't persist descriptions)
+        desc_db = await aiosqlite.connect(DB_PATH)
+        try:
+            desc_cursor = await desc_db.execute("SELECT sku, description FROM product_descriptions")
+            desc_rows = await desc_cursor.fetchall()
+        finally:
+            await desc_db.close()
+        desc_by_sku: dict[str, str] = {row[0]: row[1] for row in desc_rows}
+
         products = []
         categories_set: set = set()
 
@@ -248,7 +275,7 @@ async def _fetch_and_cache_products() -> dict:
             item_categories = [c.get("name", "") for c in item.get("categories", {}).get("elements", [])]
             stock_info = item.get("itemStock", {})
             hq_stock = stock_info.get("quantity", 0) if stock_info else 0
-            description = item.get("description", "")
+            description = desc_by_sku.get(sku, "") or item.get("description", "")
             online_name = item.get("onlineName", "") or name
 
             # Look up stock at West and East by SKU first, then by name
@@ -276,17 +303,7 @@ async def _fetch_and_cache_products() -> dict:
             is_shipping_only = sku.startswith("LF-") if isinstance(sku, str) else False
 
             # Enforce minimum price floors for LeafLife products by weight
-            if is_shipping_only:
-                sku_upper = sku.upper()
-                name_upper = name.upper()
-                if sku_upper.endswith("-28") or "28 GRAM" in name_upper:
-                    price = max(price, 10000)  # $100.00 minimum for 28g
-                elif sku_upper.endswith("-14") or "14 GRAM" in name_upper:
-                    price = max(price, 9500)   # $95.00 minimum for 14g
-                elif sku_upper.endswith("-7 G") or sku_upper.endswith("-7G") or "7 GRAM" in name_upper:
-                    price = max(price, 5500)   # $55.00 minimum for 7g
-                elif sku_upper.endswith("-3.5") or "3.5 GRAM" in name_upper:
-                    price = max(price, 2500)   # $25.00 minimum for 3.5g
+            price = _enforce_leaflife_price_floor(sku, name, price)
 
             total_stock = max(hq_stock, w_stock, e_stock)
 
@@ -523,14 +540,16 @@ async def list_promos(db: aiosqlite.Connection = Depends(get_db)):
             "product_ids": row["product_ids"] if "product_ids" in row.keys() else "",
             "exclude_from_other_coupons": bool(row["exclude_from_other_coupons"]) if "exclude_from_other_coupons" in row.keys() else False,
             "clover_discount_id": row["clover_discount_id"] if "clover_discount_id" in row.keys() else "",
+            "is_direct_discount": bool(row["is_direct_discount"]) if "is_direct_discount" in row.keys() else False,
             "created_at": row["created_at"],
         })
     return promos
 
 
 class PromoCreateRequest(BaseModel):
-    code: str
+    code: str = ""  # empty for direct discounts
     discount_pct: float = 0
+    is_direct_discount: bool = False  # True = no promo code, applied directly to products
     discount_amount: int = 0
     single_use: bool = False
     max_uses: int = 0
@@ -553,8 +572,15 @@ async def _get_hq_clover_client(db: aiosqlite.Connection) -> Optional[CloverClie
 
 @router.post("/promos")
 async def create_promo(body: PromoCreateRequest, db: aiosqlite.Connection = Depends(get_db)):
-    """Admin: Create a new promo code."""
-    code = body.code.strip().upper()
+    """Admin: Create a new promo code or direct discount."""
+    if body.is_direct_discount:
+        # Auto-generate an internal code for direct discounts
+        import uuid
+        code = "DIRECT-" + uuid.uuid4().hex[:8].upper()
+    else:
+        code = body.code.strip().upper()
+        if not code:
+            raise HTTPException(status_code=400, detail="Promo code is required")
     clover_discount_id = ""
 
     # Sync to Clover POS if requested
@@ -572,11 +598,11 @@ async def create_promo(body: PromoCreateRequest, db: aiosqlite.Connection = Depe
     try:
         await db.execute(
             """INSERT INTO promo_codes (code, discount_pct, discount_amount, single_use, max_uses,
-               expires_at, starts_at, applies_to, product_ids, exclude_from_other_coupons, clover_discount_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               expires_at, starts_at, applies_to, product_ids, exclude_from_other_coupons, clover_discount_id, is_direct_discount)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (code, body.discount_pct, body.discount_amount, int(body.single_use), body.max_uses,
              body.expires_at, body.starts_at, body.applies_to, body.product_ids,
-             int(body.exclude_from_other_coupons), clover_discount_id),
+             int(body.exclude_from_other_coupons), clover_discount_id, int(body.is_direct_discount)),
         )
         await db.commit()
     except Exception:
@@ -694,6 +720,21 @@ async def create_order(
     """Public endpoint: Create an e-commerce order with Clover payment processing."""
     charge_id = ""
     payment_status = "pending"
+
+    # Server-side enforcement of LeafLife minimum price floors.
+    # Prevents stale cached prices on the frontend from undercharging.
+    corrected_subtotal = 0
+    for item in order.items:
+        enforced_price = _enforce_leaflife_price_floor(item.sku, item.name, item.price)
+        if enforced_price != item.price:
+            print(f"[order] Price floor corrected: {item.name} ({item.sku}) from ${item.price/100:.2f} to ${enforced_price/100:.2f}")
+            item.price = enforced_price
+        corrected_subtotal += enforced_price * item.quantity
+    if corrected_subtotal != order.subtotal:
+        diff = corrected_subtotal - order.subtotal
+        print(f"[order] Subtotal corrected from ${order.subtotal/100:.2f} to ${corrected_subtotal/100:.2f} (diff: ${diff/100:.2f})")
+        order.subtotal = corrected_subtotal
+        order.total = order.subtotal - order.discount + order.shipping_cost + order.tax
 
     # Process payment via Clover if a payment token is provided
     if order.payment_token:
@@ -1089,24 +1130,26 @@ async def _send_order_emails(
         </html>
         """
 
-        # Send to store — route to location-specific email for pickup orders
+        # Send to store — route to location-specific email(s) for pickup orders
+        store_subject = f"New Order {order_number} — {_format_price(order.total)} from {order.customer.first_name} {order.customer.last_name}"
         if order.fulfillment_type == "pickup_west":
-            store_recipient = "west@thehempdispensary.com"
+            store_recipients = ["west@thehempdispensary.com", "THD1SHW@icloud.com"]
         elif order.fulfillment_type == "pickup_east":
-            store_recipient = "east@thehempdispensary.com"
+            store_recipients = ["east@thehempdispensary.com", "THD7SHE@icloud.com"]
         else:
-            store_recipient = STORE_EMAIL
+            store_recipients = [STORE_EMAIL]
 
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None,
-            _send_smtp_email,
-            smtp_settings,
-            store_recipient,
-            f"New Order {order_number} — {_format_price(order.total)} from {order.customer.first_name} {order.customer.last_name}",
-            store_html,
-        )
-        print(f"Store notification sent to {store_recipient} for order {order_number}")
+        for recipient in store_recipients:
+            await loop.run_in_executor(
+                None,
+                _send_smtp_email,
+                smtp_settings,
+                recipient,
+                store_subject,
+                store_html,
+            )
+            print(f"Store notification sent to {recipient} for order {order_number}")
 
         # --- Customer confirmation email ---
         customer_html = f"""
@@ -1371,6 +1414,74 @@ async def update_order_notes(
     )
     await db.commit()
     return {"success": True, "order_id": order_id, "staff_notes": staff_notes}
+
+
+@router.patch("/orders/{order_id}/customer")
+async def update_order_customer(
+    order_id: int,
+    request: Request,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Update an order's customer details (requires admin auth)."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    import jwt
+    token = auth.split(" ", 1)[1]
+    jwt_secret = os.environ.get("JWT_SECRET", "hemp-inventory-secret-key")
+    try:
+        jwt.decode(token, jwt_secret, algorithms=["HS256"])
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    body = await request.json()
+
+    # Build dynamic update query from allowed fields
+    allowed_fields = [
+        "customer_first_name", "customer_last_name", "customer_email",
+        "customer_phone", "shipping_address", "shipping_apartment",
+        "shipping_city", "shipping_state", "shipping_zip",
+    ]
+    updates = []
+    params = []
+    for field in allowed_fields:
+        if field in body:
+            updates.append(f"{field} = ?")
+            params.append(body[field])
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="No valid fields to update")
+
+    params.append(order_id)
+    query = f"UPDATE ecommerce_orders SET {', '.join(updates)}, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+    await db.execute(query, params)
+    await db.commit()
+
+    # Return the updated order fields
+    cursor = await db.execute(
+        """SELECT customer_first_name, customer_last_name, customer_email, customer_phone,
+                  shipping_address, shipping_apartment, shipping_city, shipping_state, shipping_zip
+           FROM ecommerce_orders WHERE id = ?""",
+        (order_id,),
+    )
+    row = await cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    return {
+        "success": True,
+        "order_id": order_id,
+        "customer_first_name": row[0],
+        "customer_last_name": row[1],
+        "customer_email": row[2],
+        "customer_phone": row[3],
+        "shipping_address": row[4],
+        "shipping_apartment": row[5],
+        "shipping_city": row[6],
+        "shipping_state": row[7],
+        "shipping_zip": row[8],
+    }
 
 
 @router.post("/orders/{order_id}/resend-confirmation")

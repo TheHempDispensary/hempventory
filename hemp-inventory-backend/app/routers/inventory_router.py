@@ -137,13 +137,27 @@ async def _do_sync(db: aiosqlite.Connection) -> dict:
     inventory: dict[str, dict] = {}
     location_list = []
 
+    # Pre-fetch item groups from first location to build clover_item_id -> group name map
+    item_id_to_group_name: dict[str, str] = {}
+    for loc in locations:
+        try:
+            client = CloverClient(loc[2], loc[3])
+            groups_data = await client.get_item_groups()
+            for group in groups_data.get("elements", []):
+                group_name = group.get("name", "")
+                for gi in (group.get("items", {}) or {}).get("elements", []):
+                    item_id_to_group_name[gi.get("id", "")] = group_name
+        except Exception as e:
+            print(f"Error fetching item groups for {loc[1]}: {e}")
+        break  # Only need groups from one location (names are the same across locations)
+
     for loc in locations:
         loc_id, loc_name, merchant_id, api_token = loc[0], loc[1], loc[2], loc[3]
         location_list.append({"id": loc_id, "name": loc_name, "merchant_id": merchant_id})
 
         try:
             client = CloverClient(merchant_id, api_token)
-            data = await client.get_items(expand="itemStock,categories,ageRestricted,itemGroup")
+            data = await client.get_items(expand="itemStock,categories,ageRestricted")
             items = data.get("elements", [])
         except Exception as e:
             print(f"Error syncing {loc_name}: {e}")
@@ -193,6 +207,7 @@ async def _do_sync(db: aiosqlite.Connection) -> dict:
                     "hidden": item.get("hidden", False),
                     "auto_manage": item.get("autoManage", False),
                     "default_tax_rates": item.get("defaultTaxRates", True),
+                    "item_group_name": item_id_to_group_name.get(clover_id, ""),
                 }
 
             inventory[merge_key]["locations"][loc_name] = {
@@ -221,11 +236,50 @@ async def _do_sync(db: aiosqlite.Connection) -> dict:
     items_list = sorted(inventory.values(), key=lambda x: x["name"])
     result = {"items": items_list, "locations": location_list}
 
-    # Update cache
+    # Track inventory changes: compare new data against previous cache
     async with _cache_lock:
-        _inventory_cache["items"] = result["items"]
-        _inventory_cache["locations"] = result["locations"]
-        _inventory_cache["updated_at"] = time.time()
+        old_items = _inventory_cache.get("items", [])
+    if old_items:
+        old_lookup: dict[str, dict] = {}
+        for oi in old_items:
+            old_lookup[oi.get("id", "")] = oi
+        changes = []
+        for ni in items_list:
+            nid = ni.get("id", "")
+            oi = old_lookup.get(nid)
+            if not oi:
+                continue
+            for loc_name, loc_data in ni.get("locations", {}).items():
+                new_stock = loc_data.get("stock", 0)
+                old_stock = (oi.get("locations", {}).get(loc_name, {}) or {}).get("stock", 0)
+                if new_stock != old_stock:
+                    changes.append((
+                        ni.get("sku", ""),
+                        ni.get("name", ""),
+                        loc_name,
+                        old_stock,
+                        new_stock,
+                        new_stock - old_stock,
+                        "sync",
+                    ))
+        if changes:
+            await db.executemany(
+                """INSERT INTO inventory_changes
+                   (sku, product_name, location_name, old_stock, new_stock, change_amount, change_source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                changes,
+            )
+            await db.commit()
+
+    # Update cache – but never overwrite a good cache with empty data
+    # (protects against temporary Clover API failures wiping the cache)
+    async with _cache_lock:
+        if items_list or not _inventory_cache["items"]:
+            _inventory_cache["items"] = result["items"]
+            _inventory_cache["locations"] = result["locations"]
+            _inventory_cache["updated_at"] = time.time()
+        else:
+            print("[sync] Skipping cache update: sync returned 0 items but cache has data")
 
     return result
 
@@ -807,6 +861,8 @@ class BulkStockUpdateItem(BaseModel):
     sku: str
     location_id: int
     quantity: float
+    item_name: str | None = None
+    clover_item_id: str | None = None
 
 
 class BulkStockUpdateRequest(BaseModel):
@@ -851,7 +907,21 @@ async def bulk_stock_update(
                 continue
 
         clover_items = items_cache[upd.location_id]
-        matching = [i for i in clover_items if (i.get("sku") or i.get("id", "")) == upd.sku]
+        # Try matching by SKU first
+        matching = [i for i in clover_items if i.get("sku") and i.get("sku") == upd.sku]
+        # Then try matching by location-specific Clover item ID
+        if not matching and upd.clover_item_id:
+            matching = [i for i in clover_items if i.get("id") == upd.clover_item_id]
+        # Then try matching by Clover ID (sku field may be the clover_id from another location)
+        if not matching:
+            matching = [i for i in clover_items if i.get("id") == upd.sku]
+        # Fallback: match by normalized item name
+        if not matching and upd.item_name:
+            norm_name = " ".join(upd.item_name.split()).lower()
+            matching = [
+                i for i in clover_items
+                if " ".join((i.get("name", "") or "").split()).lower() == norm_name
+            ]
         if not matching:
             results.append({"sku": upd.sku, "location": loc_name, "status": "not_found"})
             continue
@@ -1033,7 +1103,7 @@ async def update_item(
                 # that have different Clover IDs at each location)
                 matching = [
                     i for i in elements
-                    if " ".join((i.get("name", "") or "").split()) == item_name_fallback
+                    if " ".join((i.get("name", "") or "").split()).lower() == item_name_fallback.lower()
                 ]
             if not matching:
                 results.append({"location": loc_name, "status": "not_found"})
@@ -1068,8 +1138,12 @@ async def update_item(
                 error_detail = error_body.get("message", str(e))
             except Exception:
                 pass
+            import logging
+            logging.error(f"Clover update error at {loc_name}: {error_detail} | data sent: {loc_update_data}")
             results.append({"location": loc_name, "status": "error", "error": error_detail})
         except Exception as e:
+            import logging
+            logging.error(f"Update error at {loc_name}: {str(e)}")
             results.append({"location": loc_name, "status": "error", "error": str(e)})
 
     # Retry any "not_found" locations now that we may have learned the item name
@@ -1085,7 +1159,7 @@ async def update_item(
             elements = loc_items_cache.get(loc_id, [])
             matching = [
                 i for i in elements
-                if " ".join((i.get("name", "") or "").split()) == item_name_fallback
+                if " ".join((i.get("name", "") or "").split()).lower() == item_name_fallback.lower()
             ]
             if not matching:
                 continue
@@ -1110,8 +1184,81 @@ async def update_item(
             except Exception:
                 pass  # keep original not_found
 
+    # Also persist description to local SQLite DB (Clover silently ignores it)
+    if item.description is not None:
+        product_name = item.name  # may be None if only description changed
+        await db.execute(
+            """INSERT INTO product_descriptions (sku, product_name, description, updated_at)
+               VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(sku) DO UPDATE SET
+                   description = excluded.description,
+                   product_name = COALESCE(excluded.product_name, product_descriptions.product_name),
+                   updated_at = CURRENT_TIMESTAMP""",
+            (sku, product_name, item.description),
+        )
+        await db.commit()
+
     await _invalidate_cache()
     return {"results": results}
+
+
+class BulkDescriptionItem(BaseModel):
+    sku: str
+    description: str
+    product_name: Optional[str] = None
+
+
+class BulkDescriptionRequest(BaseModel):
+    items: list[BulkDescriptionItem]
+
+
+@router.post("/bulk-descriptions")
+async def bulk_update_descriptions(
+    req: BulkDescriptionRequest,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Store descriptions in local DB (Clover API does not persist descriptions)."""
+    updated = 0
+    errors = 0
+
+    for item in req.items:
+        try:
+            await db.execute(
+                """INSERT INTO product_descriptions (sku, product_name, description, updated_at)
+                   VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                   ON CONFLICT(sku) DO UPDATE SET
+                       description = excluded.description,
+                       product_name = COALESCE(excluded.product_name, product_descriptions.product_name),
+                       updated_at = CURRENT_TIMESTAMP""",
+                (item.sku, item.product_name, item.description),
+            )
+            updated += 1
+        except Exception as e:
+            errors += 1
+
+    await db.commit()
+    await _invalidate_cache()
+    return {
+        "summary": {"updated": updated, "errors": errors, "total": len(req.items)},
+    }
+
+
+@router.get("/descriptions")
+async def get_descriptions(
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """List all stored product descriptions."""
+    cursor = await db.execute("SELECT sku, product_name, description, updated_at FROM product_descriptions")
+    rows = await cursor.fetchall()
+    return {
+        "total": len(rows),
+        "descriptions": [
+            {"sku": r[0], "product_name": r[1], "description": r[2], "updated_at": r[3]}
+            for r in rows
+        ],
+    }
 
 
 class ImageUpload(BaseModel):
@@ -2008,6 +2155,152 @@ async def create_item_group(
     return {"results": results}
 
 
+class AddVariantsToItem(BaseModel):
+    item_name: str  # Name of the existing item
+    item_sku: Optional[str] = None  # SKU of the existing item (for lookup)
+    price: int  # Price in cents for the new variant items
+    sku_prefix: Optional[str] = None
+    variants: list[VariantOption]  # Attributes with their options
+    keep_original: Optional[bool] = False  # Keep the original non-variant item
+
+
+@router.post("/add-variants")
+async def add_variants_to_existing_item(
+    req: AddVariantsToItem,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Add variants to an existing item by creating an item group and variant items.
+
+    Flow:
+    1. Find the existing item by name/SKU at each location
+    2. Create an item group with the item's name
+    3. Create attributes and options
+    4. Generate variant combinations (cartesian product)
+    5. Create new variant items linked to the group
+    6. Associate options with each variant item
+    7. Optionally delete the original item (if keep_original is False)
+    """
+    locations = await _get_locations(db)
+    if not locations:
+        raise HTTPException(status_code=400, detail="No locations configured")
+
+    if not req.variants or not any(v.attribute_name.strip() and any(o.strip() for o in v.option_names) for v in req.variants):
+        raise HTTPException(status_code=400, detail="At least one attribute with options is required")
+
+    results = []
+
+    for loc in locations:
+        loc_id, loc_name, merchant_id, api_token = loc[0], loc[1], loc[2], loc[3]
+        try:
+            client = CloverClient(merchant_id, api_token)
+
+            # Find the existing item
+            existing_item_id = None
+            category_ids = []
+            items_data = await client.get_items()
+            for item in items_data.get("elements", []):
+                if req.item_sku and item.get("sku") == req.item_sku:
+                    existing_item_id = item.get("id")
+                    # Get categories from existing item
+                    cats = item.get("categories", {}).get("elements", [])
+                    category_ids = [c.get("id") for c in cats if c.get("id")]
+                    break
+                if item.get("name") == req.item_name:
+                    existing_item_id = item.get("id")
+                    cats = item.get("categories", {}).get("elements", [])
+                    category_ids = [c.get("id") for c in cats if c.get("id")]
+                    break
+
+            # Step 1: Create the item group
+            group = await client.create_item_group(req.item_name)
+            group_id = group["id"]
+
+            # Step 2 & 3: Create attributes and their options
+            attribute_options: list[list[dict]] = []
+            for variant in req.variants:
+                if not variant.attribute_name.strip():
+                    continue
+                valid_options = [o.strip() for o in variant.option_names if o.strip()]
+                if not valid_options:
+                    continue
+                attr = await client.create_attribute(variant.attribute_name.strip(), group_id)
+                attr_id = attr["id"]
+
+                options_for_attr: list[dict] = []
+                for opt_name in valid_options:
+                    opt = await client.create_option(attr_id, opt_name)
+                    options_for_attr.append({"id": opt["id"], "name": opt_name, "attr_name": variant.attribute_name})
+                attribute_options.append(options_for_attr)
+
+            if not attribute_options:
+                results.append({"location": loc_name, "status": "error", "error": "No valid attributes/options provided"})
+                continue
+
+            # Step 4: Generate cartesian product of all options
+            option_combos = list(itertools.product(*attribute_options))
+
+            # Step 5 & 6: Create items for each combination
+            created_items = []
+            for combo in option_combos:
+                item_data: dict = {
+                    "name": req.item_name,
+                    "price": req.price,
+                    "itemGroup": {"id": group_id},
+                }
+                if req.sku_prefix:
+                    option_suffix = "-".join(o["name"][:3].upper() for o in combo)
+                    item_data["sku"] = f"{req.sku_prefix}-{option_suffix}"
+
+                created_item = await client.create_item(item_data)
+                item_id = created_item.get("id", "")
+
+                for opt in combo:
+                    await client.associate_option_with_item(opt["id"], item_id)
+
+                # Assign same categories as original item
+                for cat_id in category_ids:
+                    try:
+                        await client.assign_category(item_id, cat_id)
+                    except Exception:
+                        pass
+
+                combo_desc = " / ".join(o["name"] for o in combo)
+                created_items.append({
+                    "item_id": item_id,
+                    "variant": combo_desc,
+                    "name": created_item.get("name", ""),
+                })
+
+            # Delete original non-variant item if requested
+            if not req.keep_original and existing_item_id:
+                try:
+                    await client.delete_item(existing_item_id)
+                except Exception as del_err:
+                    print(f"Warning: Could not delete original item at {loc_name}: {del_err}")
+
+            results.append({
+                "location": loc_name,
+                "status": "created",
+                "group_id": group_id,
+                "items_created": len(created_items),
+                "items": created_items,
+                "original_deleted": not req.keep_original and existing_item_id is not None,
+            })
+
+        except Exception as e:
+            error_detail = str(e)
+            try:
+                if hasattr(e, "response"):
+                    error_body = e.response.json()
+                    error_detail = error_body.get("message", str(e))
+            except Exception:
+                pass
+            results.append({"location": loc_name, "status": "error", "error": error_detail})
+
+    return {"results": results}
+
+
 @router.get("/attributes")
 async def get_attributes(
     user: dict = Depends(get_current_user),
@@ -2037,3 +2330,43 @@ async def get_attributes(
     except Exception as e:
         print(f"Error getting attributes: {e}")
         return {"attributes": []}
+
+
+@router.get("/changes")
+async def get_inventory_changes(
+    sku: str = "",
+    location: str = "",
+    limit: int = 50,
+    offset: int = 0,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Get inventory change history. Filter by SKU and/or location."""
+    query = "SELECT * FROM inventory_changes WHERE 1=1"
+    params: list = []
+    if sku:
+        query += " AND sku = ?"
+        params.append(sku)
+    if location:
+        query += " AND location_name = ?"
+        params.append(location)
+    query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+    cursor = await db.execute(query, params)
+    rows = await cursor.fetchall()
+    cols = [d[0] for d in cursor.description]
+    changes = [dict(zip(cols, row)) for row in rows]
+
+    # Also get total count
+    count_query = "SELECT COUNT(*) FROM inventory_changes WHERE 1=1"
+    count_params: list = []
+    if sku:
+        count_query += " AND sku = ?"
+        count_params.append(sku)
+    if location:
+        count_query += " AND location_name = ?"
+        count_params.append(location)
+    cursor2 = await db.execute(count_query, count_params)
+    total = (await cursor2.fetchone())[0]
+
+    return {"changes": changes, "total": total}

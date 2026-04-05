@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo } from "react";
-import { syncInventory, getCachedInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, bulkAssignCategory, bulkAssignImages, syncRefunds, getAgeRestrictionTypes, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup, bulkStockUpdate } from "../lib/api";
+import { syncInventory, getCachedInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, bulkAssignCategory, bulkAssignImages, syncRefunds, getAgeRestrictionTypes, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup, bulkStockUpdate, addVariantsToItem, getInventoryChanges } from "../lib/api";
 import { RefreshCw, Search, Plus, ChevronDown, ChevronUp, X, Save, Package, Trash2, CheckSquare, Square, Minus, Image, Download, Upload, Settings, ArrowRightLeft, Images, Layers, Tag, ChevronsLeft, ChevronsRight, ChevronLeft, ChevronRight } from "lucide-react";
 
 interface LocationStock {
@@ -33,6 +33,7 @@ interface InventoryItem {
   auto_manage?: boolean;
   default_tax_rates?: boolean;
   has_image?: boolean;
+  item_group_name?: string;
 }
 
 interface LocationInfo {
@@ -57,7 +58,7 @@ export default function Inventory() {
   const [editingPar, setEditingPar] = useState<{ sku: string; locName: string } | null>(null);
   const [parValue, setParValue] = useState("");
   // Batch stock editing: key = "sku::locName", value = string (edited value)
-  const [pendingStockChanges, setPendingStockChanges] = useState<Map<string, { sku: string; locationId: number; locName: string; value: string; originalValue: number }>>(new Map());
+  const [pendingStockChanges, setPendingStockChanges] = useState<Map<string, { sku: string; locationId: number; locName: string; value: string; originalValue: number; itemName: string; cloverItemId: string }>>(new Map());
   const [savingStock, setSavingStock] = useState(false);
   const [showAddItem, setShowAddItem] = useState(false);
   const [newItem, setNewItem] = useState<{
@@ -95,6 +96,7 @@ export default function Inventory() {
   const [confirmDelete, setConfirmDelete] = useState<InventoryItem | null>(null);
   const [addItemMessage, setAddItemMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [toast, setToast] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // Multi-select state
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
@@ -156,6 +158,17 @@ export default function Inventory() {
   const [variantAttributes, setVariantAttributes] = useState<{ attribute_name: string; option_names: string[] }[]>([
     { attribute_name: "", option_names: [""] }
   ]);
+
+  // Add-variants-to-existing-item state
+  const [editVariantAttrs, setEditVariantAttrs] = useState<{ attribute_name: string; option_names: string[] }[]>([
+    { attribute_name: "", option_names: [""] }
+  ]);
+  const [addingVariants, setAddingVariants] = useState(false);
+  const [keepOriginal, setKeepOriginal] = useState(false);
+
+  // Inventory change history state
+  const [changeHistory, setChangeHistory] = useState<Array<{ id: number; sku: string; product_name: string; location_name: string; old_stock: number; new_stock: number; change_amount: number; change_source: string; created_at: string }>>([]);
+  const [changeHistoryLoading, setChangeHistoryLoading] = useState(false);
 
   const handleAddItemWithVariants = async () => {
     setAddItemMessage(null);
@@ -232,12 +245,17 @@ export default function Inventory() {
   };
 
   const loadData = async (forceSync = false) => {
+    setLoadError(null);
     try {
       const res = forceSync ? await syncInventory() : await getCachedInventory();
-      setItems(res.data.items);
-      setLocations(res.data.locations);
+      setItems(res.data.items || []);
+      setLocations(res.data.locations || []);
     } catch (err) {
       console.error("Error loading inventory:", err);
+      // Only show error if we have no data yet (don't overwrite existing data on refresh failures)
+      if (items.length === 0) {
+        setLoadError("Failed to load inventory. Please try again.");
+      }
     } finally {
       setLoading(false);
     }
@@ -542,7 +560,40 @@ export default function Inventory() {
     setSaveMessage(null);
     setEditImageFile(null);
     setEditImagePreview(item.has_image ? getImageUrl(item.sku, imageCacheBust) : null);
+    setEditVariantAttrs([{ attribute_name: "", option_names: [""] }]);
+    setKeepOriginal(false);
     setEditItem(item);
+  };
+
+  const handleAddVariantsToExisting = async () => {
+    if (!editItem) return;
+    const validAttrs = editVariantAttrs.filter(a => a.attribute_name.trim() && a.option_names.some(o => o.trim()));
+    if (validAttrs.length === 0) {
+      setSaveMessage({ type: "error", text: "At least one attribute with options is required." });
+      return;
+    }
+    setAddingVariants(true);
+    setSaveMessage(null);
+    try {
+      await addVariantsToItem({
+        item_name: editItem.name,
+        item_sku: editItem.sku,
+        price: editItem.price,
+        variants: validAttrs.map(a => ({
+          attribute_name: a.attribute_name.trim(),
+          option_names: a.option_names.filter(o => o.trim()).map(o => o.trim()),
+        })),
+        keep_original: keepOriginal,
+      });
+      setSaveMessage({ type: "success", text: "Variants created! Run a sync to see new items." });
+      setEditVariantAttrs([{ attribute_name: "", option_names: [""] }]);
+    } catch (err) {
+      const axiosError = err as { response?: { data?: { detail?: string } } };
+      const detail = axiosError?.response?.data?.detail || "Failed to add variants";
+      setSaveMessage({ type: "error", text: detail });
+    } finally {
+      setAddingVariants(false);
+    }
   };
 
   const handleSaveEdit = async () => {
@@ -620,9 +671,11 @@ export default function Inventory() {
       const errors = results.filter((r: { status: string }) => r.status === "error");
 
       if (errors.length > 0) {
+        const firstError = (errors[0] as { error?: string }).error || "";
+        const locationNames = errors.map((e: { location: string }) => e.location).join(", ");
         setSaveMessage({
           type: "error",
-          text: `Updated with errors at: ${errors.map((e: { location: string }) => e.location).join(", ")}`,
+          text: firstError ? `${firstError} (${locationNames})` : `Updated with errors at: ${locationNames}`,
         });
       } else {
         setSaveMessage({ type: "success", text: "Changes saved to Clover!" });
@@ -992,6 +1045,8 @@ export default function Inventory() {
         sku: c.sku,
         location_id: c.locationId,
         quantity: parseFloat(c.value),
+        item_name: c.itemName,
+        clover_item_id: c.cloverItemId,
       }));
       const resp = await bulkStockUpdate(updates);
       const data = resp.data;
@@ -1032,6 +1087,21 @@ export default function Inventory() {
       <div className="flex items-center justify-center h-64">
         <RefreshCw className="w-8 h-8 text-green-600 animate-spin" />
         <span className="ml-3 text-gray-600">Loading inventory...</span>
+      </div>
+    );
+  }
+
+  if (loadError && items.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center h-64 gap-4">
+        <div className="text-red-500 text-lg font-medium">{loadError}</div>
+        <button
+          onClick={() => { setLoading(true); setLoadError(null); loadData(true); }}
+          className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
+        >
+          <RefreshCw className="w-4 h-4" />
+          Retry
+        </button>
       </div>
     );
   }
@@ -1827,7 +1897,9 @@ export default function Inventory() {
                 { id: "stock", label: "Stock & PAR" },
                 { id: "cost", label: "Cost" },
                 { id: "tracking", label: "Item Tracking" },
+                { id: "history", label: "Change History" },
                 { id: "image", label: "Image" },
+                { id: "variants", label: "Add Variants" },
               ].map((tab) => (
                 <button
                   key={tab.id}
@@ -1853,8 +1925,12 @@ export default function Inventory() {
                       type="text"
                       value={editForm.name}
                       onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 outline-none"
+                      disabled={!!editItem?.item_group_name}
+                      className={`w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 outline-none ${editItem?.item_group_name ? "bg-gray-100 cursor-not-allowed" : ""}`}
                     />
+                    {editItem?.item_group_name && (
+                      <p className="text-xs text-amber-600 mt-1">Name is controlled by the variant group &quot;{editItem.item_group_name}&quot; in Clover and cannot be changed here.</p>
+                    )}
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <div>
@@ -2197,6 +2273,65 @@ export default function Inventory() {
                 </>
               )}
 
+              {/* Change History Tab */}
+              {editTab === "history" && (
+                <>
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="text-sm font-semibold text-gray-700">Stock Change History</h4>
+                    <button
+                      onClick={async () => {
+                        if (!editItem) return;
+                        setChangeHistoryLoading(true);
+                        try {
+                          const res = await getInventoryChanges({ sku: editItem.sku, limit: 50 });
+                          setChangeHistory(res.data.changes || []);
+                        } catch { setChangeHistory([]); }
+                        setChangeHistoryLoading(false);
+                      }}
+                      className="text-xs text-green-600 hover:text-green-700 font-medium"
+                    >
+                      {changeHistoryLoading ? "Loading..." : "Refresh"}
+                    </button>
+                  </div>
+                  {changeHistoryLoading ? (
+                    <div className="flex justify-center py-8"><RefreshCw className="w-5 h-5 text-gray-400 animate-spin" /></div>
+                  ) : changeHistory.length === 0 ? (
+                    <div className="text-center py-8">
+                      <Package className="w-10 h-10 text-gray-300 mx-auto mb-2" />
+                      <p className="text-sm text-gray-500 font-medium">No changes recorded yet</p>
+                      <p className="text-xs text-gray-400 mt-1">Stock changes will appear here after the next sync detects a difference.</p>
+                    </div>
+                  ) : (
+                    <div className="max-h-[350px] overflow-y-auto border border-gray-200 rounded-lg">
+                      <table className="w-full text-sm">
+                        <thead className="bg-gray-50 sticky top-0">
+                          <tr>
+                            <th className="text-left px-3 py-2 text-xs font-medium text-gray-500">Date</th>
+                            <th className="text-left px-3 py-2 text-xs font-medium text-gray-500">Location</th>
+                            <th className="text-right px-3 py-2 text-xs font-medium text-gray-500">Old</th>
+                            <th className="text-right px-3 py-2 text-xs font-medium text-gray-500">New</th>
+                            <th className="text-right px-3 py-2 text-xs font-medium text-gray-500">Change</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                          {changeHistory.map((ch) => (
+                            <tr key={ch.id} className="hover:bg-gray-50">
+                              <td className="px-3 py-2 text-xs text-gray-600 whitespace-nowrap">{new Date(ch.created_at + "Z").toLocaleString()}</td>
+                              <td className="px-3 py-2 text-xs text-gray-700">{ch.location_name}</td>
+                              <td className="px-3 py-2 text-xs text-gray-500 text-right">{ch.old_stock}</td>
+                              <td className="px-3 py-2 text-xs text-gray-700 text-right font-medium">{ch.new_stock}</td>
+                              <td className={`px-3 py-2 text-xs text-right font-semibold ${ch.change_amount > 0 ? "text-green-600" : ch.change_amount < 0 ? "text-red-600" : "text-gray-500"}`}>
+                                {ch.change_amount > 0 ? "+" : ""}{ch.change_amount}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </>
+              )}
+
               {/* Image Tab */}
               {editTab === "image" && (
                 <>
@@ -2273,6 +2408,107 @@ export default function Inventory() {
                       <strong>For e-commerce:</strong> Images are stored in our app for your online store. They won&apos;t appear in Clover POS.
                     </p>
                   </div>
+                </>
+              )}
+
+              {/* Variants Tab */}
+              {editTab === "variants" && (
+                <>
+                  {editItem?.item_group_name ? (
+                    <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 mb-4">
+                      <div className="flex items-center gap-2 mb-2">
+                        <Layers className="w-4 h-4 text-emerald-600" />
+                        <span className="text-sm font-semibold text-emerald-800">Part of variant group: {editItem.item_group_name}</span>
+                      </div>
+                      <p className="text-xs text-emerald-700">
+                        This item is already a variant in the <strong>{editItem.item_group_name}</strong> item group. Other variants in this group:
+                      </p>
+                      <div className="mt-2 space-y-1">
+                        {items.filter(i => i.item_group_name === editItem.item_group_name && i.sku !== editItem.sku).map(sibling => (
+                          <div key={sibling.sku} className="text-xs text-emerald-700 bg-white rounded px-2 py-1 border border-emerald-100">
+                            {sibling.name} <span className="text-emerald-500">({sibling.sku})</span>
+                          </div>
+                        ))}
+                      </div>
+                      <p className="text-xs text-gray-500 mt-3">To add more variants, use the form below:</p>
+                    </div>
+                  ) : (
+                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-4">
+                      <p className="text-xs text-blue-700">
+                        <strong>Add variants</strong> to this item (e.g. Size: Small, Medium, Large). This will create an item group in Clover with variant items. Run a sync after to see the new items.
+                      </p>
+                    </div>
+                  )}
+                  {editVariantAttrs.map((attr, ai) => (
+                    <div key={ai} className="border border-gray-200 rounded-lg p-3 mb-3">
+                      <div className="flex items-center gap-2 mb-2">
+                        <input
+                          type="text"
+                          placeholder="Attribute (e.g. Size, Color)"
+                          value={attr.attribute_name}
+                          onChange={e => {
+                            const updated = [...editVariantAttrs];
+                            updated[ai] = { ...updated[ai], attribute_name: e.target.value };
+                            setEditVariantAttrs(updated);
+                          }}
+                          className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 outline-none"
+                        />
+                        {editVariantAttrs.length > 1 && (
+                          <button onClick={() => setEditVariantAttrs(editVariantAttrs.filter((_, i) => i !== ai))}
+                            className="text-red-400 hover:text-red-600"><X className="w-4 h-4" /></button>
+                        )}
+                      </div>
+                      <div className="space-y-1.5 ml-4">
+                        {attr.option_names.map((opt, oi) => (
+                          <div key={oi} className="flex items-center gap-2">
+                            <input
+                              type="text"
+                              placeholder={`Option ${oi + 1} (e.g. Small)`}
+                              value={opt}
+                              onChange={e => {
+                                const updated = [...editVariantAttrs];
+                                const opts = [...updated[ai].option_names];
+                                opts[oi] = e.target.value;
+                                updated[ai] = { ...updated[ai], option_names: opts };
+                                setEditVariantAttrs(updated);
+                              }}
+                              className="flex-1 px-2 py-1.5 border border-gray-200 rounded text-sm focus:ring-1 focus:ring-green-400 outline-none"
+                            />
+                            {attr.option_names.length > 1 && (
+                              <button onClick={() => {
+                                const updated = [...editVariantAttrs];
+                                updated[ai] = { ...updated[ai], option_names: attr.option_names.filter((_, i) => i !== oi) };
+                                setEditVariantAttrs(updated);
+                              }} className="text-red-300 hover:text-red-500"><Minus className="w-3 h-3" /></button>
+                            )}
+                          </div>
+                        ))}
+                        <button onClick={() => {
+                          const updated = [...editVariantAttrs];
+                          updated[ai] = { ...updated[ai], option_names: [...attr.option_names, ""] };
+                          setEditVariantAttrs(updated);
+                        }} className="text-xs text-green-600 hover:text-green-700 font-medium flex items-center gap-1 mt-1">
+                          <Plus className="w-3 h-3" /> Add option
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                  <button onClick={() => setEditVariantAttrs([...editVariantAttrs, { attribute_name: "", option_names: [""] }])}
+                    className="text-sm text-green-600 hover:text-green-700 font-medium flex items-center gap-1 mb-3">
+                    <Plus className="w-4 h-4" /> Add attribute
+                  </button>
+                  <label className="flex items-center gap-2 text-sm text-gray-600 mb-3">
+                    <input type="checkbox" checked={keepOriginal} onChange={e => setKeepOriginal(e.target.checked)}
+                      className="w-4 h-4 text-green-600 rounded focus:ring-green-500" />
+                    Keep original item (don&apos;t delete it after creating variants)
+                  </label>
+                  <button
+                    onClick={handleAddVariantsToExisting}
+                    disabled={addingVariants}
+                    className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-green-600 text-white rounded-lg text-sm hover:bg-green-700 disabled:opacity-50 font-medium"
+                  >
+                    {addingVariants ? <><RefreshCw className="w-4 h-4 animate-spin" /> Creating Variants...</> : <><Layers className="w-4 h-4" /> Create Variants</>}
+                  </button>
                 </>
               )}
             </div>
@@ -2611,9 +2847,16 @@ export default function Inventory() {
                           onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
                         />
                       )}
-                      <p className="text-sm font-medium text-green-700 hover:text-green-800 underline decoration-green-200 hover:decoration-green-400" title={item.name}>
-                        {item.name}
-                      </p>
+                      <div>
+                        <p className="text-sm font-medium text-green-700 hover:text-green-800 underline decoration-green-200 hover:decoration-green-400" title={item.name}>
+                          {item.name}
+                        </p>
+                        {item.item_group_name && (
+                          <span className="text-[10px] text-purple-600 bg-purple-50 border border-purple-200 rounded px-1 py-0.5 mt-0.5 inline-block">
+                            Variant: {item.item_group_name}
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </td>
                   <td className="px-4 py-3 text-xs text-gray-500 font-mono">
@@ -2686,6 +2929,8 @@ export default function Inventory() {
                                 locName: loc.name,
                                 value: locData.stock.toString(),
                                 originalValue: locData.stock,
+                                itemName: item.name,
+                                cloverItemId: locData.clover_item_id || "",
                               });
                               setPendingStockChanges(next);
                             }}

@@ -20,6 +20,10 @@ export default function EmployeeLogin({ onLogin, onSwitchToAdmin }: EmployeeLogi
       const res = await employeeLogin(username, pin);
       localStorage.setItem("token", res.data.access_token);
       localStorage.setItem("userRole", "employee");
+      // Also store under domain-specific key for login separation
+      const mode = window.location.hostname.toLowerCase().startsWith("timeclock") ? "timeclock" : "inventory";
+      localStorage.setItem(`${mode}_token`, res.data.access_token);
+      localStorage.setItem(`${mode}_userRole`, "employee");
       onLogin();
     } catch {
       setError("Invalid username or PIN");

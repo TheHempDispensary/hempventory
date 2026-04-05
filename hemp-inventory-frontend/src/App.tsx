@@ -15,17 +15,32 @@ import SalesReport from "./components/SalesReport";
 import OnlineOrders from "./components/OnlineOrders";
 import Discounts from "./components/Discounts";
 
+// Detect which domain we're on to separate login state
+function getAppMode(): "timeclock" | "inventory" {
+  const host = window.location.hostname.toLowerCase();
+  if (host.startsWith("timeclock")) return "timeclock";
+  return "inventory";
+}
+
+function getStorageKey(key: string): string {
+  const mode = getAppMode();
+  return `${mode}_${key}`;
+}
+
 function App() {
+  const appMode = getAppMode();
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [userRole, setUserRole] = useState<"admin" | "employee" | null>(null);
   const [currentPage, setCurrentPage] = useState("inventory");
-  const [showAdminLogin, setShowAdminLogin] = useState(false);
+  const [showAdminLogin, setShowAdminLogin] = useState(appMode === "inventory");
   const [employeePage, setEmployeePage] = useState<"timeclock" | "account">("timeclock");
 
   useEffect(() => {
-    const token = localStorage.getItem("token");
-    const role = localStorage.getItem("userRole");
+    const token = localStorage.getItem(getStorageKey("token"));
+    const role = localStorage.getItem(getStorageKey("userRole"));
     if (token) {
+      // Also set the generic "token" key so the API interceptor can read it
+      localStorage.setItem("token", token);
       setIsLoggedIn(true);
       setUserRole(role === "employee" ? "employee" : "admin");
     }
@@ -34,6 +49,10 @@ function App() {
   const handleAdminLogin = () => {
     setIsLoggedIn(true);
     setUserRole("admin");
+    // Store under domain-specific key + generic key for API interceptor
+    const token = localStorage.getItem("token") || "";
+    localStorage.setItem(getStorageKey("token"), token);
+    localStorage.setItem(getStorageKey("userRole"), "admin");
     localStorage.setItem("userRole", "admin");
     setCurrentPage("inventory");
   };
@@ -41,15 +60,21 @@ function App() {
   const handleEmployeeLogin = () => {
     setIsLoggedIn(true);
     setUserRole("employee");
+    // Store under domain-specific key + generic key for API interceptor
+    const token = localStorage.getItem("token") || "";
+    localStorage.setItem(getStorageKey("token"), token);
+    localStorage.setItem(getStorageKey("userRole"), "employee");
     setEmployeePage("timeclock");
   };
 
   const handleLogout = () => {
     localStorage.removeItem("token");
     localStorage.removeItem("userRole");
+    localStorage.removeItem(getStorageKey("token"));
+    localStorage.removeItem(getStorageKey("userRole"));
     setIsLoggedIn(false);
     setUserRole(null);
-    setShowAdminLogin(false);
+    setShowAdminLogin(appMode === "inventory");
   };
 
   // Not logged in — show login screens
