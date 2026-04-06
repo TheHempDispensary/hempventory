@@ -377,6 +377,18 @@ async def init_db():
             )
         """)
 
+        # Persistent inventory snapshot for change tracking across restarts
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS inventory_snapshots (
+                sku TEXT NOT NULL,
+                location_name TEXT NOT NULL,
+                stock REAL NOT NULL DEFAULT 0,
+                product_name TEXT NOT NULL DEFAULT '',
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (sku, location_name)
+            )
+        """)
+
         # Shift pickup & trade requests table
         await db.execute("""
             CREATE TABLE IF NOT EXISTS shift_requests (

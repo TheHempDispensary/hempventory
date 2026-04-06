@@ -240,40 +240,56 @@ async def _do_sync(db: aiosqlite.Connection) -> dict:
     items_list = sorted(inventory.values(), key=lambda x: x["name"])
     result = {"items": items_list, "locations": location_list}
 
-    # Track inventory changes: compare new data against previous cache
-    async with _cache_lock:
-        old_items = _inventory_cache.get("items", [])
-    if old_items:
-        old_lookup: dict[str, dict] = {}
-        for oi in old_items:
-            old_lookup[oi.get("id", "")] = oi
-        changes = []
-        for ni in items_list:
-            nid = ni.get("id", "")
-            oi = old_lookup.get(nid)
-            if not oi:
-                continue
-            for loc_name, loc_data in ni.get("locations", {}).items():
-                new_stock = loc_data.get("stock", 0)
-                old_stock = (oi.get("locations", {}).get(loc_name, {}) or {}).get("stock", 0)
-                if new_stock != old_stock:
-                    changes.append((
-                        ni.get("sku", ""),
-                        ni.get("name", ""),
-                        loc_name,
-                        old_stock,
-                        new_stock,
-                        new_stock - old_stock,
-                        "sync",
-                    ))
-        if changes:
-            await db.executemany(
-                """INSERT INTO inventory_changes
-                   (sku, product_name, location_name, old_stock, new_stock, change_amount, change_source)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                changes,
-            )
-            await db.commit()
+    # Track inventory changes: compare new data against persistent DB snapshot
+    # (survives server restarts unlike the in-memory cache)
+    cursor = await db.execute("SELECT sku, location_name, stock FROM inventory_snapshots")
+    snapshot_rows = await cursor.fetchall()
+    old_snapshot: dict[tuple[str, str], float] = {
+        (row[0], row[1]): row[2] for row in snapshot_rows
+    }
+
+    changes = []
+    snapshot_upserts = []
+    for ni in items_list:
+        sku = ni.get("sku", "")
+        name = ni.get("name", "")
+        for loc_name, loc_data in ni.get("locations", {}).items():
+            new_stock = loc_data.get("stock", 0)
+            old_stock = old_snapshot.get((sku, loc_name))
+            # Record change if we have a previous snapshot and stock differs
+            if old_stock is not None and new_stock != old_stock:
+                changes.append((
+                    sku,
+                    name,
+                    loc_name,
+                    old_stock,
+                    new_stock,
+                    new_stock - old_stock,
+                    "sync",
+                ))
+            # Always upsert the current stock into snapshot
+            snapshot_upserts.append((sku, loc_name, new_stock, name))
+
+    if changes:
+        await db.executemany(
+            """INSERT INTO inventory_changes
+               (sku, product_name, location_name, old_stock, new_stock, change_amount, change_source)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            changes,
+        )
+
+    if snapshot_upserts:
+        await db.executemany(
+            """INSERT INTO inventory_snapshots (sku, location_name, stock, product_name, updated_at)
+               VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(sku, location_name)
+               DO UPDATE SET stock = excluded.stock,
+                             product_name = excluded.product_name,
+                             updated_at = CURRENT_TIMESTAMP""",
+            snapshot_upserts,
+        )
+
+    await db.commit()
 
     # Update cache – but never overwrite a good cache with empty data
     # (protects against temporary Clover API failures wiping the cache)
