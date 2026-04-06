@@ -390,21 +390,34 @@ class CloverClient:
         self,
         limit: int = 100,
         offset: int = 0,
-        filter_str: Optional[str] = None,
+        filters: Optional[list[str]] = None,
     ) -> dict:
-        """Get payments with tip amounts and employee info."""
-        params: dict = {"limit": limit, "offset": offset, "expand": "employee"}
-        if filter_str:
-            params["filter"] = filter_str
+        """Get payments with tip amounts and employee info.
+
+        filters: list of Clover filter strings, e.g.
+            ["createdTime>=1774224000000", "createdTime<=1775519999000"]
+        Each becomes a separate &filter= query param as Clover requires.
+        """
+        # Build base query string with repeated filter params
+        base_params: list[tuple[str, str]] = [
+            ("limit", str(limit)),
+            ("expand", "employee"),
+            ("orderBy", "createdTime DESC"),
+        ]
+        if filters:
+            for f in filters:
+                base_params.append(("filter", f))
+
         async with httpx.AsyncClient(timeout=30.0) as client:
-            all_payments = []
+            all_payments: list[dict] = []
             current_offset = offset
             while True:
+                params = base_params + [("offset", str(current_offset))]
                 resp = await self._request_with_retry(
                     client, "get",
                     f"{self.base_url}/payments",
                     headers=self._headers(),
-                    params={**params, "offset": current_offset, "orderBy": "createdTime DESC"},
+                    params=params,
                 )
                 data = resp.json()
                 elements = data.get("elements", [])

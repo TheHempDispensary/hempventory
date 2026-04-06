@@ -612,8 +612,8 @@ async def sync_tips_from_clover(
             start_ms = int(start_dt.timestamp() * 1000)
             end_ms = int(end_dt.timestamp() * 1000)
 
-            filter_str = f"createdTime>={start_ms}&createdTime<={end_ms}"
-            payments_data = await client.get_payments(filter_str=filter_str)
+            filters = [f"createdTime>={start_ms}", f"createdTime<={end_ms}"]
+            payments_data = await client.get_payments(filters=filters)
 
             # Aggregate tips: (local_employee_id) -> {entry_id -> tip_total}
             entry_tips: dict[int, float] = {}  # time_entry.id -> aggregated tip amount
