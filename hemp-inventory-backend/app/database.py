@@ -377,6 +377,21 @@ async def init_db():
             )
         """)
 
+        # Shift pickup & trade requests table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS shift_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                request_type TEXT NOT NULL,
+                requester_id INTEGER NOT NULL REFERENCES employees(id),
+                schedule_id INTEGER REFERENCES date_schedules(id),
+                target_schedule_id INTEGER REFERENCES date_schedules(id),
+                message TEXT,
+                status TEXT DEFAULT 'pending',
+                reviewed_by TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Promo codes table for discount management
         await db.execute("""
             CREATE TABLE IF NOT EXISTS promo_codes (
@@ -433,14 +448,18 @@ async def init_db():
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        # Seed FIRST15 if promo_codes table is empty
+        # Seed FIRST10 if promo_codes table is empty
         cursor = await db.execute("SELECT COUNT(*) FROM promo_codes")
         count = (await cursor.fetchone())[0]
         if count == 0:
             await db.execute(
                 "INSERT INTO promo_codes (code, discount_pct, single_use, is_active) VALUES (?, ?, ?, ?)",
-                ("FIRST15", 0.15, 1, 1),
+                ("FIRST10", 0.10, 1, 1),
             )
+        # Migrate FIRST15 -> FIRST10 for existing databases
+        await db.execute(
+            "UPDATE promo_codes SET code = 'FIRST10', discount_pct = 0.10 WHERE code = 'FIRST15'"
+        )
 
         # Seed default loyalty settings if empty
         cursor = await db.execute("SELECT COUNT(*) FROM loyalty_settings")
