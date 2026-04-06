@@ -202,7 +202,7 @@ export default function ProductScraper({ onNavigate }: ProductScraperProps) {
           </button>
         </div>
         <p className="mt-2 text-xs text-gray-400">
-          Supported: Chubby Gorilla (direct catalog search). Other manufacturers searched via Google.
+          Supported: Chubby Gorilla, Calyx Containers, CRC, Loud Lock, Dispensary Supply, Kush Supply, Sana Packaging, N2 Packaging. Other manufacturers searched by domain.
         </p>
       </div>
 

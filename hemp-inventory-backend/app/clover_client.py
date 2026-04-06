@@ -384,6 +384,50 @@ class CloverClient:
             resp.raise_for_status()
             return resp.json()
 
+    # === Payments / Tips ===
+
+    async def get_payments(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        filters: Optional[list[str]] = None,
+    ) -> dict:
+        """Get payments with tip amounts and employee info.
+
+        filters: list of Clover filter strings, e.g.
+            ["createdTime>=1774224000000", "createdTime<=1775519999000"]
+        Each becomes a separate &filter= query param as Clover requires.
+        """
+        # Build base query string with repeated filter params
+        base_params: list[tuple[str, str]] = [
+            ("limit", str(limit)),
+            ("expand", "employee"),
+            ("orderBy", "createdTime DESC"),
+        ]
+        if filters:
+            for f in filters:
+                base_params.append(("filter", f))
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            all_payments: list[dict] = []
+            current_offset = offset
+            while True:
+                params = base_params + [("offset", str(current_offset))]
+                resp = await self._request_with_retry(
+                    client, "get",
+                    f"{self.base_url}/payments",
+                    headers=self._headers(),
+                    params=params,
+                )
+                data = resp.json()
+                elements = data.get("elements", [])
+                all_payments.extend(elements)
+                if len(elements) < limit:
+                    break
+                current_offset += limit
+                await asyncio.sleep(0.3)
+            return {"elements": all_payments}
+
     # === Discounts ===
 
     async def get_discounts(self) -> dict:

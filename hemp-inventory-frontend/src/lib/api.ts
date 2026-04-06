@@ -315,6 +315,9 @@ export const createManualEntry = (data: { employee_id: number; clock_in: string;
 export const syncEmployeesFromClover = () =>
   api.post("/api/timeclock/sync-employees");
 
+export const syncTipsFromClover = (params?: { start_date?: string; end_date?: string }) =>
+  api.post("/api/timeclock/sync-tips", params || {});
+
 export const getTimeclockExportUrl = (params?: { start_date?: string; end_date?: string; employee_id?: number }) => {
   const url = new URL(`${API_URL}/api/timeclock/export`);
   if (params?.start_date) url.searchParams.set("start_date", params.start_date);

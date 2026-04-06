@@ -291,6 +291,12 @@ async def init_db():
             )
         """)
 
+        # Migration: add tips column to time_entries if missing
+        try:
+            await db.execute("ALTER TABLE time_entries ADD COLUMN tips REAL DEFAULT 0")
+        except Exception:
+            pass  # Column already exists
+
         # Employee schedules table
         await db.execute("""
             CREATE TABLE IF NOT EXISTS employee_schedules (
