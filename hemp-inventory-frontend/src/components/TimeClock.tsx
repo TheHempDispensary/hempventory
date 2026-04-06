@@ -25,6 +25,10 @@ import {
   deleteScheduleNote,
   createManualEntry,
   getScheduleHours,
+  saveBulkSchedule,
+  getShiftRequests,
+  updateShiftRequest,
+  deleteShiftRequest,
 } from "../lib/api";
 import {
   Clock,
@@ -180,12 +184,48 @@ export default function TimeClock() {
   const [noteText, setNoteText] = useState("");
   const [noteType, setNoteType] = useState<"shared" | "admin_only" | "employee_private">("shared");
   const [noteEmpId, setNoteEmpId] = useState(0);
-  const [scheduleSubTab, setScheduleSubTab] = useState<"calendar" | "requests">("calendar");
+  const [scheduleSubTab, setScheduleSubTab] = useState<"calendar" | "requests" | "shift_requests">("calendar");
   const [hoursView, setHoursView] = useState<"week" | "month">("week");
   const [weeklyHours, setWeeklyHours] = useState<ScheduleHours[]>([]);
   const [monthlyHours, setMonthlyHours] = useState<ScheduleHours[]>([]);
   const [editingNoteId, setEditingNoteId] = useState<number | null>(null);
   const [editNoteText, setEditNoteText] = useState("");
+
+  // Multi-day scheduling modal
+  const [showBulkScheduleModal, setShowBulkScheduleModal] = useState(false);
+  const [bulkEmpId, setBulkEmpId] = useState(0);
+  const [bulkStartTime, setBulkStartTime] = useState("09:00");
+  const [bulkEndTime, setBulkEndTime] = useState("17:00");
+  const [bulkLocation, setBulkLocation] = useState("");
+  const [bulkDates, setBulkDates] = useState<string[]>([]);
+  const [savingBulk, setSavingBulk] = useState(false);
+
+  // Shift requests state
+  interface ShiftRequest {
+    id: number;
+    request_type: string;
+    requester_id: number;
+    requester_name: string;
+    schedule_id: number;
+    target_schedule_id: number | null;
+    message: string | null;
+    status: string;
+    reviewed_by: string | null;
+    created_at: string;
+    shift_date: string;
+    shift_start: string;
+    shift_end: string;
+    shift_location: string | null;
+    shift_employee_id: number;
+    shift_employee_name: string;
+    target_date: string | null;
+    target_start: string | null;
+    target_end: string | null;
+    target_location: string | null;
+    target_employee_id: number | null;
+    target_employee_name: string | null;
+  }
+  const [shiftRequests, setShiftRequests] = useState<ShiftRequest[]>([]);
 
   // Toast
   const [toast, setToast] = useState<{ type: "success" | "error"; text: string } | null>(null);
@@ -448,14 +488,24 @@ export default function TimeClock() {
     }
   }, [getVisibleDateRange]);
 
+  const loadShiftRequests = useCallback(async () => {
+    try {
+      const res = await getShiftRequests();
+      setShiftRequests(res.data);
+    } catch (err) {
+      console.error("Error loading shift requests:", err);
+    }
+  }, []);
+
   useEffect(() => {
     if (tab === "schedule") {
       loadSchedules();
       loadTimeOff();
       loadNotes();
       loadHours();
+      loadShiftRequests();
     }
-  }, [tab, loadSchedules, loadTimeOff, loadNotes, loadHours]);
+  }, [tab, loadSchedules, loadTimeOff, loadNotes, loadHours, loadShiftRequests]);
 
   const handleSaveSchedule = async (empId: number, date: string, start: string, end: string, location: string) => {
     setSavingSchedule(true);
@@ -482,6 +532,66 @@ export default function TimeClock() {
       console.error(err);
       showToast("error", "Failed to delete schedule");
     }
+  };
+
+  const handleSaveBulkSchedule = async () => {
+    if (!bulkEmpId || bulkDates.length === 0 || !bulkStartTime || !bulkEndTime) {
+      showToast("error", "Please select an employee and at least one date");
+      return;
+    }
+    setSavingBulk(true);
+    try {
+      await saveBulkSchedule({
+        employee_id: bulkEmpId,
+        dates: bulkDates,
+        start_time: bulkStartTime,
+        end_time: bulkEndTime,
+        location: bulkLocation || undefined,
+      });
+      showToast("success", `Scheduled ${bulkDates.length} day${bulkDates.length > 1 ? "s" : ""}`);
+      setShowBulkScheduleModal(false);
+      setBulkDates([]);
+      setBulkEmpId(0);
+      setBulkStartTime("09:00");
+      setBulkEndTime("17:00");
+      setBulkLocation("");
+      await loadSchedules();
+      await loadHours();
+    } catch (err) {
+      console.error(err);
+      showToast("error", "Failed to save bulk schedule");
+    } finally {
+      setSavingBulk(false);
+    }
+  };
+
+  const toggleBulkDate = (dateStr: string) => {
+    setBulkDates(prev => prev.includes(dateStr) ? prev.filter(d => d !== dateStr) : [...prev, dateStr].sort());
+  };
+
+  const handleApproveShiftRequest = async (id: number) => {
+    try {
+      await updateShiftRequest(id, "approved");
+      showToast("success", "Shift request approved");
+      await loadShiftRequests();
+      await loadSchedules();
+    } catch { showToast("error", "Failed to approve"); }
+  };
+
+  const handleDenyShiftRequest = async (id: number) => {
+    try {
+      await updateShiftRequest(id, "denied");
+      showToast("success", "Shift request denied");
+      await loadShiftRequests();
+    } catch { showToast("error", "Failed to deny"); }
+  };
+
+  const handleDeleteShiftRequest = async (id: number) => {
+    try {
+      await deleteShiftRequest(id);
+      showToast("success", "Shift request removed");
+      await loadShiftRequests();
+    } catch { showToast("error", "Failed to delete"); }
   };
 
   const handleExport = () => {
@@ -1340,6 +1450,7 @@ export default function TimeClock() {
               {([
                 { id: "calendar" as const, label: "Monthly View", icon: Calendar },
                 { id: "requests" as const, label: "Time-Off Requests", icon: CalendarOff },
+                { id: "shift_requests" as const, label: `Shift Requests${shiftRequests.filter(r => r.status === "pending").length ? ` (${shiftRequests.filter(r => r.status === "pending").length})` : ""}`, icon: RefreshCw },
               ]).map(st => (
                 <button key={st.id} onClick={() => setScheduleSubTab(st.id)}
                   className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${scheduleSubTab === st.id ? "bg-white text-green-700 shadow-sm" : "text-gray-600 hover:text-gray-900"}`}>
@@ -1378,6 +1489,10 @@ export default function TimeClock() {
                   <button onClick={() => { setShowTimeOffModal(true); setSelectedDate(new Date().toISOString().split("T")[0]); }}
                     className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-amber-700 bg-amber-50 rounded-lg hover:bg-amber-100">
                     <CalendarOff className="w-3 h-3" />Request Off
+                  </button>
+                  <button onClick={() => setShowBulkScheduleModal(true)}
+                    className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-purple-700 bg-purple-50 rounded-lg hover:bg-purple-100">
+                    <CalendarDays className="w-3 h-3" />Multi-Day Schedule
                   </button>
                 </div>
               </div>
@@ -1742,6 +1857,172 @@ export default function TimeClock() {
                     <button onClick={() => { setShowNoteModal(false); setNoteType("shared"); setNoteEmpId(0); }} className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 font-medium text-sm">Cancel</button>
                   </div>
                 </div>
+              </div>
+            </div>
+          )}
+
+          {/* Bulk (Multi-Day) Schedule Modal */}
+          {showBulkScheduleModal && (() => {
+            const bulkMonth = calMonth;
+            const bulkYear = calYear;
+            const daysInMonth = new Date(bulkYear, bulkMonth + 1, 0).getDate();
+            const firstDow = new Date(bulkYear, bulkMonth, 1).getDay();
+            const bulkCalDays: (number | null)[] = [];
+            for (let i = 0; i < firstDow; i++) bulkCalDays.push(null);
+            for (let d = 1; d <= daysInMonth; d++) bulkCalDays.push(d);
+            const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+            const monthNames2 = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+
+            return (
+              <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => setShowBulkScheduleModal(false)}>
+                <div className="bg-white rounded-xl shadow-xl p-6 w-full max-w-lg" onClick={e => e.stopPropagation()}>
+                  <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                    <CalendarDays className="w-5 h-5 text-purple-600" />Multi-Day Schedule
+                  </h3>
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Employee</label>
+                      <select value={bulkEmpId} onChange={e => setBulkEmpId(Number(e.target.value))}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500">
+                        <option value={0}>Select employee...</option>
+                        {activeEmps.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
+                      </select>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">Start Time</label>
+                        <input type="time" value={bulkStartTime} onChange={e => setBulkStartTime(e.target.value)}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500" />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">End Time</label>
+                        <input type="time" value={bulkEndTime} onChange={e => setBulkEndTime(e.target.value)}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500" />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Location (optional)</label>
+                      <input type="text" value={bulkLocation} onChange={e => setBulkLocation(e.target.value)} placeholder="e.g. Main Store"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500" />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">
+                        Select Dates ({bulkDates.length} selected)
+                      </label>
+                      <div className="text-center font-semibold text-gray-800 text-sm mb-2">
+                        {monthNames2[bulkMonth]} {bulkYear}
+                      </div>
+                      <div className="grid grid-cols-7 gap-1 text-center">
+                        {dayNames.map(d => (
+                          <div key={d} className="text-[10px] font-medium text-gray-500 py-1">{d}</div>
+                        ))}
+                        {bulkCalDays.map((day, idx) => {
+                          if (day === null) return <div key={`empty-${idx}`} />;
+                          const dateStr = `${bulkYear}-${String(bulkMonth + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+                          const isSelected = bulkDates.includes(dateStr);
+                          const isPast = new Date(dateStr) < new Date(new Date().toISOString().split("T")[0]);
+                          return (
+                            <button key={dateStr} onClick={() => !isPast && toggleBulkDate(dateStr)}
+                              disabled={isPast}
+                              className={`p-1.5 text-xs rounded-lg transition-colors ${
+                                isSelected ? "bg-purple-600 text-white font-bold" :
+                                isPast ? "text-gray-300 cursor-not-allowed" :
+                                "text-gray-700 hover:bg-purple-50"
+                              }`}>
+                              {day}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    <div className="flex gap-2 pt-2">
+                      <button onClick={handleSaveBulkSchedule} disabled={savingBulk || !bulkEmpId || bulkDates.length === 0}
+                        className="flex-1 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 font-medium text-sm">
+                        {savingBulk ? "Saving..." : `Schedule ${bulkDates.length} Day${bulkDates.length !== 1 ? "s" : ""}`}
+                      </button>
+                      <button onClick={() => { setShowBulkScheduleModal(false); setBulkDates([]); }}
+                        className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 font-medium text-sm">Cancel</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* =================== SHIFT REQUESTS TAB =================== */}
+          {scheduleSubTab === "shift_requests" && (
+            <div className="space-y-4">
+              <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+                <div className="p-3 border-b border-gray-200 bg-indigo-50">
+                  <h3 className="font-semibold text-indigo-800 text-sm flex items-center gap-2">
+                    <RefreshCw className="w-4 h-4" />Shift Pickup & Trade Requests
+                  </h3>
+                  <p className="text-xs text-indigo-600 mt-1">Employees can request to pick up open shifts or trade shifts with each other. Approve or deny below.</p>
+                </div>
+                {shiftRequests.length === 0 ? (
+                  <div className="p-8 text-center text-gray-400 text-sm">No shift requests yet.</div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left">
+                      <thead className="bg-gray-50 border-b border-gray-200">
+                        <tr>
+                          <th className="px-4 py-2 text-xs font-semibold text-gray-600">Type</th>
+                          <th className="px-4 py-2 text-xs font-semibold text-gray-600">Requester</th>
+                          <th className="px-4 py-2 text-xs font-semibold text-gray-600">Shift</th>
+                          <th className="px-4 py-2 text-xs font-semibold text-gray-600">Target Shift</th>
+                          <th className="px-4 py-2 text-xs font-semibold text-gray-600">Message</th>
+                          <th className="px-4 py-2 text-xs font-semibold text-gray-600">Status</th>
+                          <th className="px-4 py-2 text-xs font-semibold text-gray-600 text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {shiftRequests.map(sr => (
+                          <tr key={sr.id} className="hover:bg-gray-50">
+                            <td className="px-4 py-3">
+                              <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${sr.request_type === "pickup" ? "bg-blue-100 text-blue-700" : "bg-purple-100 text-purple-700"}`}>
+                                {sr.request_type === "pickup" ? "Pickup" : "Trade"}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-sm font-medium text-gray-900">{sr.requester_name}</td>
+                            <td className="px-4 py-3 text-sm text-gray-700">
+                              {sr.shift_date && new Date(sr.shift_date + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                              {" "}{sr.shift_start}–{sr.shift_end}
+                              {sr.shift_employee_name && <span className="text-xs text-gray-400 ml-1">({sr.shift_employee_name})</span>}
+                            </td>
+                            <td className="px-4 py-3 text-sm text-gray-700">
+                              {sr.request_type === "trade" && sr.target_date ? (
+                                <>
+                                  {new Date(sr.target_date + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                                  {" "}{sr.target_start}–{sr.target_end}
+                                  {sr.target_employee_name && <span className="text-xs text-gray-400 ml-1">({sr.target_employee_name})</span>}
+                                </>
+                              ) : "—"}
+                            </td>
+                            <td className="px-4 py-3 text-sm text-gray-500">{sr.message || "—"}</td>
+                            <td className="px-4 py-3">
+                              <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                                sr.status === "approved" ? "bg-green-100 text-green-700" :
+                                sr.status === "denied" ? "bg-red-100 text-red-700" :
+                                "bg-amber-100 text-amber-700"
+                              }`}>{sr.status}</span>
+                            </td>
+                            <td className="px-4 py-3 text-right">
+                              <div className="flex items-center justify-end gap-1">
+                                {sr.status === "pending" && (
+                                  <>
+                                    <button onClick={() => handleApproveShiftRequest(sr.id)} className="p-1.5 text-green-600 hover:bg-green-50 rounded-lg" title="Approve"><Check className="w-4 h-4" /></button>
+                                    <button onClick={() => handleDenyShiftRequest(sr.id)} className="p-1.5 text-red-600 hover:bg-red-50 rounded-lg" title="Deny"><X className="w-4 h-4" /></button>
+                                  </>
+                                )}
+                                <button onClick={() => handleDeleteShiftRequest(sr.id)} className="p-1.5 text-gray-400 hover:bg-gray-100 rounded-lg" title="Delete"><Trash2 className="w-4 h-4" /></button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
             </div>
           )}

@@ -262,6 +262,15 @@ async def _fetch_and_cache_products() -> dict:
             await desc_db.close()
         desc_by_sku: dict[str, str] = {row[0]: row[1] for row in desc_rows}
 
+        # Load product attributes (effect & strength) from local DB
+        attr_db = await aiosqlite.connect(DB_PATH)
+        try:
+            attr_cursor = await attr_db.execute("SELECT sku, effect, strength, product_type FROM product_attributes")
+            attr_rows = await attr_cursor.fetchall()
+        finally:
+            await attr_db.close()
+        attrs_by_sku: dict[str, dict] = {row[0]: {"effect": row[1], "strength": row[2], "product_type": row[3]} for row in attr_rows}
+
         products = []
         categories_set: set = set()
 
@@ -307,6 +316,9 @@ async def _fetch_and_cache_products() -> dict:
 
             total_stock = max(hq_stock, w_stock, e_stock)
 
+            # Look up stored effect/strength attributes
+            sku_attrs = attrs_by_sku.get(sku, {})
+
             products.append({
                 "id": item.get("id", ""),
                 "name": name,
@@ -324,6 +336,9 @@ async def _fetch_and_cache_products() -> dict:
                 "image_url": image_url,
                 "is_age_restricted": item.get("isAgeRestricted", False),
                 "shipping_only": is_shipping_only,
+                "effect": sku_attrs.get("effect"),
+                "strength": sku_attrs.get("strength"),
+                "product_type": sku_attrs.get("product_type"),
             })
 
         products.sort(key=lambda p: p["name"])

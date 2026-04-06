@@ -104,6 +104,10 @@ class ItemUpdate(BaseModel):
     hidden: Optional[bool] = None
     auto_manage: Optional[bool] = None
     default_tax_rates: Optional[bool] = None
+    # Product attributes for ecommerce (stored locally, not in Clover)
+    effect: Optional[str] = None  # Relax, Sleep, Energy, Focus
+    strength: Optional[str] = None  # High, Medium, Low
+    product_type: Optional[str] = None  # Hybrid, Indica, Sativa
 
 
 async def _get_locations(db: aiosqlite.Connection, location_ids: Optional[list[int]] = None):
@@ -1198,6 +1202,23 @@ async def update_item(
         )
         await db.commit()
 
+    # Persist effect/strength/type to local SQLite DB
+    if item.effect is not None or item.strength is not None or item.product_type is not None:
+        product_name = item.name
+        await db.execute(
+            """INSERT INTO product_attributes (sku, product_name, effect, strength, product_type, updated_at)
+               VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(sku) DO UPDATE SET
+                   effect = COALESCE(?, product_attributes.effect),
+                   strength = COALESCE(?, product_attributes.strength),
+                   product_type = COALESCE(?, product_attributes.product_type),
+                   product_name = COALESCE(?, product_attributes.product_name),
+                   updated_at = CURRENT_TIMESTAMP""",
+            (sku, product_name, item.effect, item.strength, item.product_type,
+             item.effect, item.strength, item.product_type, product_name),
+        )
+        await db.commit()
+
     await _invalidate_cache()
     return {"results": results}
 
@@ -1259,6 +1280,55 @@ async def get_descriptions(
             for r in rows
         ],
     }
+
+
+@router.get("/product-attributes")
+async def get_product_attributes(
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """List all stored product attributes (effect, strength & type)."""
+    cursor = await db.execute("SELECT sku, product_name, effect, strength, product_type, updated_at FROM product_attributes")
+    rows = await cursor.fetchall()
+    return {
+        "total": len(rows),
+        "attributes": [
+            {"sku": r[0], "product_name": r[1], "effect": r[2], "strength": r[3], "product_type": r[4], "updated_at": r[5]}
+            for r in rows
+        ],
+    }
+
+
+class ProductAttributeUpdate(BaseModel):
+    effect: Optional[str] = None  # Relax, Sleep, Energy, Focus
+    strength: Optional[str] = None  # High, Medium, Low
+    product_type: Optional[str] = None  # Hybrid, Indica, Sativa
+    product_name: Optional[str] = None
+
+
+@router.put("/product-attributes/{sku}")
+async def update_product_attributes(
+    sku: str,
+    attrs: ProductAttributeUpdate,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Set effect, strength and/or type for a product by SKU."""
+    await db.execute(
+        """INSERT INTO product_attributes (sku, product_name, effect, strength, product_type, updated_at)
+           VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT(sku) DO UPDATE SET
+               effect = COALESCE(?, product_attributes.effect),
+               strength = COALESCE(?, product_attributes.strength),
+               product_type = COALESCE(?, product_attributes.product_type),
+               product_name = COALESCE(?, product_attributes.product_name),
+               updated_at = CURRENT_TIMESTAMP""",
+        (sku, attrs.product_name, attrs.effect, attrs.strength, attrs.product_type,
+         attrs.effect, attrs.strength, attrs.product_type, attrs.product_name),
+    )
+    await db.commit()
+    invalidate_product_cache()
+    return {"status": "ok", "sku": sku, "effect": attrs.effect, "strength": attrs.strength, "product_type": attrs.product_type}
 
 
 class ImageUpload(BaseModel):

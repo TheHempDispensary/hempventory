@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
-import { getMyClockStatus, myClockIn, myClockOut, getMyEntries, getMySchedule, getMyTimeOff, submitMyTimeOff, cancelMyTimeOff, getMyScheduleNotes, getMyProfile } from "../lib/api";
-import { ChevronLeft, ChevronRight, CalendarOff, MessageSquare, Plus, Trash2 } from "lucide-react";
+import { getMyClockStatus, myClockIn, myClockOut, getMyEntries, getMySchedule, getMyTimeOff, submitMyTimeOff, cancelMyTimeOff, getMyScheduleNotes, getMyProfile, getShiftRequests, createShiftPickupRequest, createShiftTradeRequest, deleteShiftRequest, getSchedules } from "../lib/api";
+import { ChevronLeft, ChevronRight, CalendarOff, MessageSquare, Plus, Trash2, RefreshCw } from "lucide-react";
 
 interface ClockStatus {
   clocked_in: boolean;
@@ -63,6 +63,45 @@ export default function EmployeeTimeClock() {
   const [showRequestModal, setShowRequestModal] = useState(false);
   const [requestDate, setRequestDate] = useState("");
   const [requestReason, setRequestReason] = useState("");
+
+  // Shift requests state
+  interface ShiftRequestItem {
+    id: number;
+    request_type: string;
+    requester_id: number;
+    requester_name: string;
+    schedule_id: number;
+    target_schedule_id: number | null;
+    message: string | null;
+    status: string;
+    shift_date: string;
+    shift_start: string;
+    shift_end: string;
+    shift_location: string | null;
+    shift_employee_name: string;
+    target_date: string | null;
+    target_start: string | null;
+    target_end: string | null;
+    target_employee_name: string | null;
+  }
+  interface AllScheduleItem {
+    id: number;
+    employee_id: number;
+    employee_name: string;
+    date: string;
+    start_time: string;
+    end_time: string;
+    location: string | null;
+  }
+  const [myShiftRequests, setMyShiftRequests] = useState<ShiftRequestItem[]>([]);
+  const [allSchedules, setAllSchedules] = useState<AllScheduleItem[]>([]);
+  const [showPickupModal, setShowPickupModal] = useState(false);
+  const [showTradeModal, setShowTradeModal] = useState(false);
+  const [pickupScheduleId, setPickupScheduleId] = useState(0);
+  const [pickupMessage, setPickupMessage] = useState("");
+  const [tradeMyScheduleId, setTradeMyScheduleId] = useState(0);
+  const [tradeTargetScheduleId, setTradeTargetScheduleId] = useState(0);
+  const [tradeMessage, setTradeMessage] = useState("");
 
   const fetchProfile = useCallback(async () => {
     try {
@@ -140,13 +179,38 @@ export default function EmployeeTimeClock() {
     }
   }, [calYear, calMonth]);
 
+  const fetchMyShiftRequests = useCallback(async () => {
+    try {
+      const res = await getShiftRequests();
+      setMyShiftRequests(res.data);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const fetchAllSchedules = useCallback(async () => {
+    try {
+      const start = new Date(calYear, calMonth, 1);
+      const end = new Date(calYear, calMonth + 1, 0);
+      const res = await getSchedules({
+        start_date: start.toISOString().split("T")[0],
+        end_date: end.toISOString().split("T")[0],
+      });
+      setAllSchedules(res.data);
+    } catch {
+      // ignore
+    }
+  }, [calYear, calMonth]);
+
   useEffect(() => {
     if (tab === "schedule") {
       fetchSchedule();
       fetchTimeOff();
       fetchNotes();
+      fetchMyShiftRequests();
+      fetchAllSchedules();
     }
-  }, [tab, fetchSchedule, fetchTimeOff, fetchNotes]);
+  }, [tab, fetchSchedule, fetchTimeOff, fetchNotes, fetchMyShiftRequests, fetchAllSchedules]);
 
   // Live timer for elapsed time when clocked in
   useEffect(() => {
@@ -235,6 +299,51 @@ export default function EmployeeTimeClock() {
       await fetchTimeOff();
     } catch {
       setError("Failed to cancel request");
+    }
+  };
+
+  const handlePickupRequest = async () => {
+    if (!pickupScheduleId) return;
+    try {
+      await createShiftPickupRequest({ schedule_id: pickupScheduleId, message: pickupMessage || undefined });
+      setSuccess("Shift pickup request submitted!");
+      setShowPickupModal(false);
+      setPickupScheduleId(0);
+      setPickupMessage("");
+      await fetchMyShiftRequests();
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || "Failed to submit pickup request";
+      setError(msg);
+    }
+  };
+
+  const handleTradeRequest = async () => {
+    if (!tradeMyScheduleId || !tradeTargetScheduleId) return;
+    try {
+      await createShiftTradeRequest({
+        requester_schedule_id: tradeMyScheduleId,
+        target_schedule_id: tradeTargetScheduleId,
+        message: tradeMessage || undefined,
+      });
+      setSuccess("Shift trade request submitted!");
+      setShowTradeModal(false);
+      setTradeMyScheduleId(0);
+      setTradeTargetScheduleId(0);
+      setTradeMessage("");
+      await fetchMyShiftRequests();
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || "Failed to submit trade request";
+      setError(msg);
+    }
+  };
+
+  const handleCancelShiftRequest = async (id: number) => {
+    try {
+      await deleteShiftRequest(id);
+      setSuccess("Shift request cancelled");
+      await fetchMyShiftRequests();
+    } catch {
+      setError("Failed to cancel shift request");
     }
   };
 
@@ -513,6 +622,62 @@ export default function EmployeeTimeClock() {
                   </div>
                 )}
               </div>
+
+              {/* Shift Pickup & Trade Requests */}
+              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="font-semibold text-gray-900 flex items-center gap-2">
+                    <RefreshCw className="w-4 h-4 text-indigo-600" />Shift Requests
+                  </h3>
+                  <div className="flex gap-2">
+                    <button onClick={() => setShowPickupModal(true)}
+                      className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100">
+                      <Plus className="w-3.5 h-3.5" />Pick Up Shift
+                    </button>
+                    <button onClick={() => setShowTradeModal(true)}
+                      className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium bg-purple-50 text-purple-700 rounded-lg hover:bg-purple-100">
+                      <RefreshCw className="w-3.5 h-3.5" />Trade Shift
+                    </button>
+                  </div>
+                </div>
+                {myShiftRequests.length === 0 ? (
+                  <p className="text-sm text-gray-400">No shift requests submitted.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {myShiftRequests.map(sr => (
+                      <div key={sr.id} className="flex items-center justify-between bg-gray-50 rounded-lg p-2.5">
+                        <div>
+                          <span className={`px-2 py-0.5 rounded-full text-xs font-medium mr-2 ${sr.request_type === "pickup" ? "bg-blue-100 text-blue-700" : "bg-purple-100 text-purple-700"}`}>
+                            {sr.request_type === "pickup" ? "Pickup" : "Trade"}
+                          </span>
+                          <span className="text-sm font-medium text-gray-900">
+                            {sr.shift_date && new Date(sr.shift_date + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
+                            {" "}{sr.shift_start}–{sr.shift_end}
+                          </span>
+                          {sr.request_type === "trade" && sr.target_date && (
+                            <span className="text-sm text-gray-500 ml-1">
+                              for {new Date(sr.target_date + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" })} {sr.target_start}–{sr.target_end}
+                            </span>
+                          )}
+                          {sr.message && <span className="text-xs text-gray-400 ml-2">({sr.message})</span>}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                            sr.status === "approved" ? "bg-green-100 text-green-700" :
+                            sr.status === "denied" ? "bg-red-100 text-red-700" :
+                            "bg-amber-100 text-amber-700"
+                          }`}>{sr.status}</span>
+                          {sr.status === "pending" && (
+                            <button onClick={() => handleCancelShiftRequest(sr.id)} className="p-1 text-gray-400 hover:text-red-500 rounded" title="Cancel request">
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </>
           )}
 
@@ -541,6 +706,108 @@ export default function EmployeeTimeClock() {
                       Submit Request
                     </button>
                     <button onClick={() => setShowRequestModal(false)}
+                      className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 font-medium text-sm">
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Pickup Shift Modal */}
+          {showPickupModal && (
+            <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => setShowPickupModal(false)}>
+              <div className="bg-white rounded-xl shadow-xl p-6 w-full max-w-sm" onClick={e => e.stopPropagation()}>
+                <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                  <Plus className="w-5 h-5 text-blue-600" />Pick Up a Shift
+                </h3>
+                <p className="text-xs text-gray-500 mb-3">Select a shift from another employee that you want to pick up.</p>
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Available Shifts</label>
+                    <select value={pickupScheduleId} onChange={e => setPickupScheduleId(Number(e.target.value))}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500">
+                      <option value={0}>Select a shift...</option>
+                      {allSchedules
+                        .filter(s => new Date(s.date) >= new Date(new Date().toISOString().split("T")[0]))
+                        .map(s => (
+                          <option key={s.id} value={s.id}>
+                            {new Date(s.date + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })} {s.start_time}–{s.end_time} ({s.employee_name}){s.location ? ` @ ${s.location}` : ""}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Message (optional)</label>
+                    <input type="text" value={pickupMessage} onChange={e => setPickupMessage(e.target.value)}
+                      placeholder="I can cover this shift"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500" />
+                  </div>
+                  <div className="flex gap-2 pt-2">
+                    <button onClick={handlePickupRequest} disabled={!pickupScheduleId}
+                      className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 font-medium text-sm">
+                      Request Pickup
+                    </button>
+                    <button onClick={() => setShowPickupModal(false)}
+                      className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 font-medium text-sm">
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Trade Shift Modal */}
+          {showTradeModal && (
+            <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => setShowTradeModal(false)}>
+              <div className="bg-white rounded-xl shadow-xl p-6 w-full max-w-sm" onClick={e => e.stopPropagation()}>
+                <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                  <RefreshCw className="w-5 h-5 text-purple-600" />Trade a Shift
+                </h3>
+                <p className="text-xs text-gray-500 mb-3">Select your shift to give away and the shift you want in return.</p>
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Your Shift (to give away)</label>
+                    <select value={tradeMyScheduleId} onChange={e => setTradeMyScheduleId(Number(e.target.value))}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500">
+                      <option value={0}>Select your shift...</option>
+                      {schedule
+                        .filter(s => new Date(s.date) >= new Date(new Date().toISOString().split("T")[0]))
+                        .map(s => (
+                          <option key={s.id} value={s.id}>
+                            {new Date(s.date + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })} {s.start_time}–{s.end_time}{s.location ? ` @ ${s.location}` : ""}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Shift You Want (from another employee)</label>
+                    <select value={tradeTargetScheduleId} onChange={e => setTradeTargetScheduleId(Number(e.target.value))}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500">
+                      <option value={0}>Select target shift...</option>
+                      {allSchedules
+                        .filter(s => new Date(s.date) >= new Date(new Date().toISOString().split("T")[0]))
+                        .map(s => (
+                          <option key={s.id} value={s.id}>
+                            {new Date(s.date + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })} {s.start_time}–{s.end_time} ({s.employee_name}){s.location ? ` @ ${s.location}` : ""}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Message (optional)</label>
+                    <input type="text" value={tradeMessage} onChange={e => setTradeMessage(e.target.value)}
+                      placeholder="Would like to swap shifts"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500" />
+                  </div>
+                  <div className="flex gap-2 pt-2">
+                    <button onClick={handleTradeRequest} disabled={!tradeMyScheduleId || !tradeTargetScheduleId}
+                      className="flex-1 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 font-medium text-sm">
+                      Request Trade
+                    </button>
+                    <button onClick={() => setShowTradeModal(false)}
                       className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 font-medium text-sm">
                       Cancel
                     </button>
