@@ -2,6 +2,7 @@
 
 import json
 import re
+import urllib.parse
 from typing import Optional
 
 import httpx
@@ -24,6 +25,17 @@ MANUFACTURER_DOMAINS: dict[str, str] = {
     "chubby gorilla": "chubbygorilla.com",
     "chubbygorilla": "chubbygorilla.com",
 }
+
+# Known packaging distributor sites to search directly
+DISTRIBUTOR_SITES = [
+    "gamutpackaging.com",
+    "tricorbraun.com",
+    "liquidbottles.com",
+    "humiditypacks.com",
+    "calyxcontainers.com",
+    "berlinpackaging.com",
+    "sfrpackaging.com",
+]
 
 
 class ScrapeRequest(BaseModel):
@@ -173,60 +185,114 @@ async def scrape_chubby_gorilla(client: httpx.AsyncClient, model_number: str) ->
     return result
 
 
-async def scrape_generic(client: httpx.AsyncClient, manufacturer: str, model_number: str) -> ProductResult:
-    """Try to scrape product info by searching common packaging distributor sites."""
+async def _search_duckduckgo(client: httpx.AsyncClient, query: str) -> list[str]:
+    """Search DuckDuckGo HTML and return result URLs."""
+    urls: list[str] = []
+    search_url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote_plus(query)}"
+    try:
+        resp = await client.get(search_url, headers=HEADERS, follow_redirects=True, timeout=15.0)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for link in soup.select("a.result__a"):
+            href = link.get("href", "")
+            # DDG wraps links as //duckduckgo.com/l/?uddg=<encoded_url>
+            if "uddg=" in href:
+                parsed = urllib.parse.urlparse(href)
+                params = urllib.parse.parse_qs(parsed.query)
+                real_url = params.get("uddg", [""])[0]
+                if real_url and real_url.startswith("http") and "duckduckgo.com" not in real_url:
+                    urls.append(real_url)
+            elif href and href.startswith("http") and "duckduckgo.com" not in href:
+                urls.append(href)
+    except Exception:
+        pass
+    return urls
+
+
+async def _scrape_product_page(
+    client: httpx.AsyncClient, url: str, result: ProductResult
+) -> bool:
+    """Scrape a product page for name, description, images, specs. Returns True if useful data found."""
+    try:
+        page_soup = await _fetch_page(client, url)
+        h1 = page_soup.select_one("h1")
+        if h1:
+            result.product_name = h1.get_text(strip=True)
+
+        desc = page_soup.select_one(
+            '[itemprop="description"], .product-description, '
+            ".product__description, .product-info-description, "
+            "#tab-description, .description"
+        )
+        if desc:
+            result.description = desc.get_text(strip=True)[:1500]
+
+        images = _extract_gallery_images(
+            page_soup,
+            '.product-media img, .product-image img, [itemprop="image"], '
+            '.gallery img, .product__media img, .product-single__photo img'
+        )
+        ld_images = _extract_ld_json_images(page_soup)
+        for img in ld_images:
+            if img not in images:
+                images.append(img)
+        result.image_urls = images[:10]
+        result.source_url = url
+        result.specifications = _extract_specs(page_soup)
+
+        if result.product_name and (result.image_urls or result.description):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+async def scrape_distributor_sites(
+    client: httpx.AsyncClient, manufacturer: str, model_number: str
+) -> ProductResult:
+    """Search distributor sites via DuckDuckGo for the product."""
     result = ProductResult(manufacturer=manufacturer, model_number=model_number)
     query = f"{manufacturer} {model_number}"
 
-    # Try direct Google search and scrape first result
-    distributor_urls = [
-        f"https://www.google.com/search?q={query.replace(' ', '+')}+site:gamutpackaging.com",
-        f"https://www.google.com/search?q={query.replace(' ', '+')}+packaging",
-    ]
+    # Build a query targeting known distributor sites
+    site_query = " OR ".join(f"site:{s}" for s in DISTRIBUTOR_SITES)
+    search_query = f"{query} ({site_query})"
 
     try:
-        # First try a direct search on the manufacturer domain if known
-        for search_url in distributor_urls:
-            try:
-                soup = await _fetch_page(client, search_url)
-                # Extract Google result links
-                for link in soup.select(".yuRUbf a, a[jsname]"):
-                    href = link.get("href", "")
-                    if href and href.startswith("http") and "google.com" not in href:
-                        try:
-                            page_soup = await _fetch_page(client, href)
-                            h1 = page_soup.select_one("h1")
-                            if h1:
-                                result.product_name = h1.get_text(strip=True)
+        urls = await _search_duckduckgo(client, search_query)
+        for url in urls[:5]:
+            if await _scrape_product_page(client, url, result):
+                return result
+    except Exception:
+        pass
 
-                            desc = page_soup.select_one(
-                                '[itemprop="description"], .product-description, '
-                                ".product__description, .product-info-description, "
-                                "#tab-description, .description"
-                            )
-                            if desc:
-                                result.description = desc.get_text(strip=True)[:1500]
+    if not result.product_name and not result.image_urls:
+        result.error = "No product found on distributor sites."
+    return result
 
-                            images = _extract_gallery_images(
-                                page_soup,
-                                '.product-media img, .product-image img, [itemprop="image"], .gallery img'
-                            )
-                            result.image_urls = images[:10]
-                            result.source_url = href
-                            result.specifications = _extract_specs(page_soup)
 
-                            if result.product_name and (result.image_urls or result.description):
-                                return result
-                        except Exception:
-                            continue
-            except Exception:
-                continue
+async def scrape_generic(
+    client: httpx.AsyncClient, manufacturer: str, model_number: str
+) -> ProductResult:
+    """Try distributor sites first, then fall back to a general DuckDuckGo search."""
+    # First try distributor sites
+    result = await scrape_distributor_sites(client, manufacturer, model_number)
+    if result.product_name and (result.image_urls or result.description):
+        return result
 
-        if not result.product_name and not result.image_urls:
-            result.error = "No product found via search. Try a more specific model number or manufacturer name."
-
+    # Fall back to general search
+    result = ProductResult(manufacturer=manufacturer, model_number=model_number)
+    query = f"{manufacturer} {model_number} packaging"
+    try:
+        urls = await _search_duckduckgo(client, query)
+        for url in urls[:5]:
+            if await _scrape_product_page(client, url, result):
+                return result
     except Exception as e:
         result.error = f"Search error: {str(e)}"
+
+    if not result.product_name and not result.image_urls:
+        result.error = "No product found via search. Try a more specific model number or manufacturer name."
 
     return result
 
@@ -263,5 +329,5 @@ async def list_manufacturers():
                 "note": "Direct catalog search by product name or SKU",
             }
         ],
-        "generic": "Any manufacturer not listed above will be searched via Google and distributor sites.",
+        "generic": "Any manufacturer not listed above will be searched via distributor sites and DuckDuckGo.",
     }
