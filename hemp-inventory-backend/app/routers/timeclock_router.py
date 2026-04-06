@@ -292,7 +292,7 @@ async def get_time_entries(
     db: aiosqlite.Connection = Depends(get_db),
 ):
     query = """
-        SELECT t.id, e.id as emp_id, e.name, t.clock_in, t.clock_out, t.hours
+        SELECT t.id, e.id as emp_id, e.name, t.clock_in, t.clock_out, t.hours, COALESCE(t.tips, 0) as tips
         FROM time_entries t
         JOIN employees e ON e.id = t.employee_id
         WHERE 1=1
@@ -300,10 +300,12 @@ async def get_time_entries(
     params = []
     if start_date:
         query += " AND t.clock_in >= ?"
-        params.append(start_date)
+        # If start_date includes a time component (contains 'T'), use as-is; otherwise treat as date
+        params.append(start_date if "T" in start_date else start_date)
     if end_date:
         query += " AND t.clock_in <= ?"
-        params.append(end_date + "T23:59:59")
+        # If end_date includes a time component (contains 'T'), use as-is; otherwise append end of day
+        params.append(end_date if "T" in end_date else end_date + "T23:59:59")
     if employee_id:
         query += " AND t.employee_id = ?"
         params.append(employee_id)
@@ -319,6 +321,7 @@ async def get_time_entries(
             "clock_in": r[3],
             "clock_out": r[4],
             "hours": r[5],
+            "tips": r[6] or 0,
         }
         for r in rows
     ]
@@ -329,6 +332,7 @@ async def get_time_entries(
 class EntryUpdate(BaseModel):
     clock_in: Optional[str] = None
     clock_out: Optional[str] = None
+    tips: Optional[float] = None
 
 @router.put("/entries/{entry_id}")
 async def update_entry(
@@ -345,6 +349,9 @@ async def update_entry(
     if data.clock_out is not None:
         sets.append("clock_out = ?")
         vals.append(data.clock_out)
+    if data.tips is not None:
+        sets.append("tips = ?")
+        vals.append(data.tips)
 
     if not sets:
         raise HTTPException(status_code=400, detail="Nothing to update")
@@ -436,7 +443,7 @@ async def export_csv(
     db: aiosqlite.Connection = Depends(get_db),
 ):
     query = """
-        SELECT e.name, t.clock_in, t.clock_out, t.hours
+        SELECT e.name, t.clock_in, t.clock_out, t.hours, COALESCE(t.tips, 0) as tips, e.pay_rate
         FROM time_entries t
         JOIN employees e ON e.id = t.employee_id
         WHERE t.clock_out IS NOT NULL
@@ -444,10 +451,10 @@ async def export_csv(
     params = []
     if start_date:
         query += " AND t.clock_in >= ?"
-        params.append(start_date)
+        params.append(start_date if "T" in (start_date or "") else start_date)
     if end_date:
         query += " AND t.clock_in <= ?"
-        params.append(end_date + "T23:59:59")
+        params.append(end_date if "T" in (end_date or "") else end_date + "T23:59:59")
     if employee_id:
         query += " AND t.employee_id = ?"
         params.append(employee_id)
@@ -458,21 +465,27 @@ async def export_csv(
 
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["Employee", "Clock In", "Clock Out", "Hours"])
+    writer.writerow(["Employee", "Clock In", "Clock Out", "Hours", "Tips"])
     for r in rows:
-        writer.writerow([r[0], r[1], r[2], r[3]])
+        writer.writerow([r[0], r[1], r[2], r[3], r[4] or 0])
 
     # Add summary by employee
     writer.writerow([])
     writer.writerow(["--- Summary ---"])
-    writer.writerow(["Employee", "Total Hours"])
-    summary = {}
+    writer.writerow(["Employee", "Total Hours", "Total Tips", "Pay Rate", "Est. Pay"])
+    summary: dict = {}
     for r in rows:
         name = r[0]
         hrs = r[3] or 0
-        summary[name] = summary.get(name, 0) + hrs
-    for name, total in sorted(summary.items()):
-        writer.writerow([name, round(total, 2)])
+        tips = r[4] or 0
+        rate = r[5]
+        if name not in summary:
+            summary[name] = {"hours": 0, "tips": 0, "rate": rate}
+        summary[name]["hours"] += hrs
+        summary[name]["tips"] += tips
+    for name, data in sorted(summary.items()):
+        est_pay = round(data["hours"] * data["rate"], 2) if data["rate"] else ""
+        writer.writerow([name, round(data["hours"], 2), round(data["tips"], 2), data["rate"] or "", est_pay])
 
     output.seek(0)
     return StreamingResponse(
