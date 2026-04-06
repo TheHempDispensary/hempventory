@@ -1499,6 +1499,93 @@ async def update_order_customer(
     }
 
 
+@router.patch("/orders/{order_id}/convert-to-shipping")
+async def convert_to_shipping(
+    order_id: int,
+    request: Request,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Convert a pickup order to a shipping order (requires admin auth).
+    Accepts shipping address fields and updates fulfillment_type to 'shipping'."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    import jwt
+    token = auth.split(" ", 1)[1]
+    jwt_secret = os.environ.get("JWT_SECRET", "hemp-inventory-secret-key")
+    try:
+        jwt.decode(token, jwt_secret, algorithms=["HS256"])
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    # Verify order exists and is currently a pickup order
+    cursor = await db.execute(
+        "SELECT fulfillment_type FROM ecommerce_orders WHERE id = ?", (order_id,)
+    )
+    row = await cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    current_type = row[0] or ""
+    if not current_type.startswith("pickup"):
+        raise HTTPException(status_code=400, detail="Order is not a pickup order")
+
+    body = await request.json()
+
+    # Require shipping address fields
+    shipping_address = (body.get("shipping_address") or "").strip()
+    shipping_city = (body.get("shipping_city") or "").strip()
+    shipping_state = (body.get("shipping_state") or "").strip()
+    shipping_zip = (body.get("shipping_zip") or "").strip()
+
+    if not shipping_address or not shipping_city or not shipping_state or not shipping_zip:
+        raise HTTPException(
+            status_code=400,
+            detail="Shipping address, city, state, and zip are required",
+        )
+
+    await db.execute(
+        """UPDATE ecommerce_orders
+           SET fulfillment_type = 'shipping',
+               shipping_address = ?,
+               shipping_apartment = ?,
+               shipping_city = ?,
+               shipping_state = ?,
+               shipping_zip = ?,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?""",
+        (
+            shipping_address,
+            (body.get("shipping_apartment") or "").strip(),
+            shipping_city,
+            shipping_state,
+            shipping_zip,
+            order_id,
+        ),
+    )
+    await db.commit()
+
+    # Return the updated order data
+    cursor = await db.execute(
+        """SELECT fulfillment_type, shipping_address, shipping_apartment,
+                  shipping_city, shipping_state, shipping_zip
+           FROM ecommerce_orders WHERE id = ?""",
+        (order_id,),
+    )
+    updated = await cursor.fetchone()
+    return {
+        "success": True,
+        "order_id": order_id,
+        "fulfillment_type": updated[0],
+        "shipping_address": updated[1],
+        "shipping_apartment": updated[2],
+        "shipping_city": updated[3],
+        "shipping_state": updated[4],
+        "shipping_zip": updated[5],
+    }
+
+
 @router.post("/orders/{order_id}/resend-confirmation")
 async def resend_order_confirmation(
     order_id: int,
