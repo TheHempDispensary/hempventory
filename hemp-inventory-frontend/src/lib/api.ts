@@ -524,6 +524,15 @@ export const updatePromo = (promoId: number, data: {
 export const deletePromo = (promoId: number) =>
   api.delete(`/api/ecommerce/promos/${promoId}`);
 
+// Product Attributes (effect & strength for online store)
+export const getProductAttributes = () => api.get("/api/inventory/product-attributes");
+
+export const updateProductAttributes = (sku: string, data: {
+  effect?: string | null;
+  strength?: string | null;
+  product_name?: string;
+}) => api.put(`/api/inventory/product-attributes/${encodeURIComponent(sku)}`, data);
+
 // Product Scraper
 export const scrapeProduct = (data: { manufacturer: string; model_number: string }) =>
   api.post("/api/scraper/scrape", data);

@@ -448,6 +448,18 @@ async def init_db():
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Product attributes table (effect & strength for ecommerce filtering)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS product_attributes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sku TEXT NOT NULL UNIQUE,
+                product_name TEXT,
+                effect TEXT,
+                strength TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Seed FIRST10 if promo_codes table is empty
         cursor = await db.execute("SELECT COUNT(*) FROM promo_codes")
         count = (await cursor.fetchone())[0]
