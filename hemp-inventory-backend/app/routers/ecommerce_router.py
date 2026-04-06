@@ -726,6 +726,59 @@ async def delete_promo(promo_id: int, db: aiosqlite.Connection = Depends(get_db)
     return {"status": "deleted"}
 
 
+async def _check_realtime_stock(items: List[OrderItem], fulfillment_type: str) -> list[str]:
+    """Check real-time Clover stock for order items. Returns list of out-of-stock item names."""
+    # Determine which location to check based on fulfillment type
+    if fulfillment_type == "pickup_west" and WEST_MERCHANT_ID and WEST_API_TOKEN:
+        merchant_id = WEST_MERCHANT_ID
+        api_token = WEST_API_TOKEN
+        location_label = "West"
+    elif fulfillment_type == "pickup_east" and EAST_MERCHANT_ID and EAST_API_TOKEN:
+        merchant_id = EAST_MERCHANT_ID
+        api_token = EAST_API_TOKEN
+        location_label = "East"
+    else:
+        merchant_id = HQ_MERCHANT_ID
+        api_token = HQ_API_TOKEN
+        location_label = "HQ"
+
+    out_of_stock: list[str] = []
+    base = f"{CLOVER_BASE_URL}/merchants/{merchant_id}"
+    headers = {"Authorization": f"Bearer {api_token}"}
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            for item in items:
+                # Skip LeafLife items (shipped from supplier, not local stock)
+                if isinstance(item.sku, str) and item.sku.startswith("LF-"):
+                    continue
+                if not item.product_id:
+                    continue
+                try:
+                    resp = await client.get(
+                        f"{base}/item_stocks/{item.product_id}",
+                        headers=headers,
+                    )
+                    if resp.status_code == 200:
+                        stock_data = resp.json()
+                        current_qty = stock_data.get("quantity", 0)
+                        if current_qty < item.quantity:
+                            out_of_stock.append(
+                                f"{item.name} (only {current_qty} in stock at {location_label}, you requested {item.quantity})"
+                            )
+                            print(f"[stock-check] {item.name} INSUFFICIENT at {location_label}: {current_qty} < {item.quantity}")
+                        else:
+                            print(f"[stock-check] {item.name} OK at {location_label}: {current_qty} >= {item.quantity}")
+                    else:
+                        print(f"[stock-check] Could not verify stock for {item.name} ({item.product_id}): {resp.status_code}")
+                except Exception as e:
+                    print(f"[stock-check] Error checking {item.name}: {e}")
+    except Exception as e:
+        print(f"[stock-check] Stock check failed entirely: {e}")
+        # Don't block the order if the stock check itself fails
+    return out_of_stock
+
+
 @router.post("/orders")
 async def create_order(
     order: CreateOrderRequest,
@@ -735,6 +788,16 @@ async def create_order(
     """Public endpoint: Create an e-commerce order with Clover payment processing."""
     charge_id = ""
     payment_status = "pending"
+
+    # Real-time stock validation BEFORE charging the customer.
+    # Prevents customers from ordering items that are out of stock (stale cache).
+    out_of_stock = await _check_realtime_stock(order.items, order.fulfillment_type)
+    if out_of_stock:
+        detail_lines = "; ".join(out_of_stock)
+        raise HTTPException(
+            status_code=409,
+            detail=f"Some items are out of stock: {detail_lines}. Please update your cart and try again.",
+        )
 
     # Server-side enforcement of LeafLife minimum price floors.
     # Prevents stale cached prices on the frontend from undercharging.
