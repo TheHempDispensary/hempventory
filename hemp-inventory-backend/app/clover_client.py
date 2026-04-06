@@ -384,6 +384,37 @@ class CloverClient:
             resp.raise_for_status()
             return resp.json()
 
+    # === Payments / Tips ===
+
+    async def get_payments(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        filter_str: Optional[str] = None,
+    ) -> dict:
+        """Get payments with tip amounts and employee info."""
+        params: dict = {"limit": limit, "offset": offset, "expand": "employee"}
+        if filter_str:
+            params["filter"] = filter_str
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            all_payments = []
+            current_offset = offset
+            while True:
+                resp = await self._request_with_retry(
+                    client, "get",
+                    f"{self.base_url}/payments",
+                    headers=self._headers(),
+                    params={**params, "offset": current_offset, "orderBy": "createdTime DESC"},
+                )
+                data = resp.json()
+                elements = data.get("elements", [])
+                all_payments.extend(elements)
+                if len(elements) < limit:
+                    break
+                current_offset += limit
+                await asyncio.sleep(0.3)
+            return {"elements": all_payments}
+
     # === Discounts ===
 
     async def get_discounts(self) -> dict:

@@ -5,7 +5,7 @@ from typing import Optional, List
 import aiosqlite
 import io
 import csv
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.auth import get_current_user
 from app.database import get_db
@@ -540,6 +540,151 @@ async def sync_employees_from_clover(
 
     await db.commit()
     return {"imported": imported, "skipped": skipped, "errors": errors}
+
+
+# ---------- Sync Tips from Clover ----------
+
+
+class SyncTipsRequest(BaseModel):
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+
+
+@router.post("/sync-tips")
+async def sync_tips_from_clover(
+    body: Optional[SyncTipsRequest] = None,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Sync tip amounts from Clover payments into time_entries.
+
+    For each location, fetches payments from Clover, matches them to
+    employees by name, then finds the time_entry whose clock_in/clock_out
+    window contains the payment timestamp and aggregates the tip totals.
+    """
+    locations = await _get_locations(db)
+    if not locations:
+        raise HTTPException(status_code=400, detail="No locations configured")
+
+    # Determine date range (default: last 14 days)
+    if body and body.start_date:
+        range_start = body.start_date
+    else:
+        range_start = (datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y-%m-%d")
+    if body and body.end_date:
+        range_end = body.end_date
+    else:
+        range_end = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # Build employee name -> id map from local DB
+    cursor = await db.execute("SELECT id, LOWER(name) FROM employees")
+    emp_rows = await cursor.fetchall()
+    local_name_to_id: dict[str, int] = {r[1]: r[0] for r in emp_rows}
+
+    updated_entries = 0
+    total_tips_synced = 0.0
+    errors = []
+    details: list[dict] = []
+
+    for loc in locations:
+        loc_name, merchant_id, api_token = loc[1], loc[2], loc[3]
+        if not api_token:
+            continue
+        try:
+            client = CloverClient(merchant_id, api_token)
+
+            # Fetch Clover employees for this merchant to map clover emp id -> name
+            clover_emp_data = await client.get_employees()
+            clover_id_to_name: dict[str, str] = {}
+            for ce in clover_emp_data.get("elements", []):
+                cid = ce.get("id", "")
+                cname = ce.get("name", "").strip()
+                if cid and cname:
+                    clover_id_to_name[cid] = cname
+
+            # Convert date range to millisecond timestamps for Clover filter
+            start_dt = datetime.strptime(range_start, "%Y-%m-%d").replace(
+                hour=0, minute=0, second=0
+            )
+            end_dt = datetime.strptime(range_end, "%Y-%m-%d").replace(
+                hour=23, minute=59, second=59
+            )
+            start_ms = int(start_dt.timestamp() * 1000)
+            end_ms = int(end_dt.timestamp() * 1000)
+
+            filter_str = f"createdTime>={start_ms}&createdTime<={end_ms}"
+            payments_data = await client.get_payments(filter_str=filter_str)
+
+            # Aggregate tips: (local_employee_id) -> {entry_id -> tip_total}
+            entry_tips: dict[int, float] = {}  # time_entry.id -> aggregated tip amount
+
+            for payment in payments_data.get("elements", []):
+                tip_amount_cents = payment.get("tipAmount", 0)
+                if not tip_amount_cents or tip_amount_cents <= 0:
+                    continue
+
+                tip_dollars = tip_amount_cents / 100.0
+
+                # Get employee name from payment
+                emp_obj = payment.get("employee")
+                if not emp_obj:
+                    continue
+                clover_emp_id = emp_obj.get("id", "")
+                emp_name = clover_id_to_name.get(clover_emp_id, emp_obj.get("name", "")).strip()
+                if not emp_name:
+                    continue
+
+                local_emp_id = local_name_to_id.get(emp_name.lower())
+                if not local_emp_id:
+                    continue
+
+                # Convert payment time to local datetime string for matching
+                created_ms = payment.get("createdTime", 0)
+                if not created_ms:
+                    continue
+                payment_dt = datetime.fromtimestamp(created_ms / 1000.0)
+                payment_str = payment_dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+                # Find matching time_entry
+                entry_cursor = await db.execute(
+                    """SELECT id FROM time_entries
+                       WHERE employee_id = ?
+                         AND clock_in <= ?
+                         AND (clock_out >= ? OR clock_out IS NULL)
+                       ORDER BY clock_in DESC LIMIT 1""",
+                    (local_emp_id, payment_str, payment_str),
+                )
+                entry_row = await entry_cursor.fetchone()
+                if entry_row:
+                    entry_id = entry_row[0]
+                    entry_tips[entry_id] = entry_tips.get(entry_id, 0) + tip_dollars
+
+            # Update time_entries with aggregated tips
+            for entry_id, tip_total in entry_tips.items():
+                rounded = round(tip_total, 2)
+                await db.execute(
+                    "UPDATE time_entries SET tips = ? WHERE id = ?",
+                    (rounded, entry_id),
+                )
+                updated_entries += 1
+                total_tips_synced += rounded
+                details.append({
+                    "location": loc_name,
+                    "entry_id": entry_id,
+                    "tips": rounded,
+                })
+
+        except Exception as e:
+            errors.append({"location": loc_name, "error": str(e)})
+
+    await db.commit()
+    return {
+        "updated_entries": updated_entries,
+        "total_tips_synced": round(total_tips_synced, 2),
+        "date_range": {"start": range_start, "end": range_end},
+        "details": details,
+        "errors": errors,
+    }
 
 
 # ---------- Seed Employees ----------

@@ -29,6 +29,7 @@ import {
   getShiftRequests,
   updateShiftRequest,
   deleteShiftRequest,
+  syncTipsFromClover,
 } from "../lib/api";
 import {
   Clock,
@@ -366,6 +367,30 @@ export default function TimeClock() {
       showToast("error", "Failed to sync employees from Clover");
     } finally {
       setSyncing(false);
+    }
+  };
+
+  const [syncingTips, setSyncingTips] = useState(false);
+
+  const handleSyncTips = async () => {
+    setSyncingTips(true);
+    try {
+      const res = await syncTipsFromClover({
+        start_date: startDate || undefined,
+        end_date: endDate || undefined,
+      });
+      const { updated_entries, total_tips_synced, errors } = res.data;
+      let msg = `Synced $${total_tips_synced.toFixed(2)} in tips across ${updated_entries} entries`;
+      if (errors && errors.length > 0) {
+        msg += `. Errors: ${errors.map((e: { location: string; error: string }) => e.location).join(", ")}`;
+      }
+      showToast(errors && errors.length > 0 ? "error" : "success", msg);
+      await loadEntries();
+    } catch (err) {
+      console.error(err);
+      showToast("error", "Failed to sync tips from Clover");
+    } finally {
+      setSyncingTips(false);
     }
   };
 
@@ -927,6 +952,14 @@ export default function TimeClock() {
                   ))}
                 </select>
               </div>
+              <button
+                onClick={handleSyncTips}
+                disabled={syncingTips}
+                className="px-4 py-1.5 bg-purple-600 text-white text-sm font-medium rounded-lg hover:bg-purple-700 transition-colors flex items-center gap-2 disabled:opacity-50"
+              >
+                <RefreshCw className={`w-4 h-4 ${syncingTips ? "animate-spin" : ""}`} />
+                {syncingTips ? "Syncing..." : "Sync Tips"}
+              </button>
               <button
                 onClick={handleExport}
                 className="px-4 py-1.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2"
