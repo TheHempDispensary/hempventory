@@ -265,11 +265,11 @@ async def _fetch_and_cache_products() -> dict:
         # Load product attributes (effect & strength) from local DB
         attr_db = await aiosqlite.connect(DB_PATH)
         try:
-            attr_cursor = await attr_db.execute("SELECT sku, effect, strength FROM product_attributes")
+            attr_cursor = await attr_db.execute("SELECT sku, effect, strength, product_type FROM product_attributes")
             attr_rows = await attr_cursor.fetchall()
         finally:
             await attr_db.close()
-        attrs_by_sku: dict[str, dict] = {row[0]: {"effect": row[1], "strength": row[2]} for row in attr_rows}
+        attrs_by_sku: dict[str, dict] = {row[0]: {"effect": row[1], "strength": row[2], "product_type": row[3]} for row in attr_rows}
 
         products = []
         categories_set: set = set()
@@ -338,6 +338,7 @@ async def _fetch_and_cache_products() -> dict:
                 "shipping_only": is_shipping_only,
                 "effect": sku_attrs.get("effect"),
                 "strength": sku_attrs.get("strength"),
+                "product_type": sku_attrs.get("product_type"),
             })
 
         products.sort(key=lambda p: p["name"])

@@ -448,7 +448,7 @@ async def init_db():
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        # Product attributes table (effect & strength for ecommerce filtering)
+        # Product attributes table (effect, strength & type for ecommerce filtering)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS product_attributes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -456,9 +456,15 @@ async def init_db():
                 product_name TEXT,
                 effect TEXT,
                 strength TEXT,
+                product_type TEXT,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Migration: add product_type column if missing
+        try:
+            await db.execute("ALTER TABLE product_attributes ADD COLUMN product_type TEXT")
+        except Exception:
+            pass  # column already exists
 
         # Seed FIRST10 if promo_codes table is empty
         cursor = await db.execute("SELECT COUNT(*) FROM promo_codes")

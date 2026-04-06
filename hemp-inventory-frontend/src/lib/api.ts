@@ -530,6 +530,7 @@ export const getProductAttributes = () => api.get("/api/inventory/product-attrib
 export const updateProductAttributes = (sku: string, data: {
   effect?: string | null;
   strength?: string | null;
+  product_type?: string | null;
   product_name?: string;
 }) => api.put(`/api/inventory/product-attributes/${encodeURIComponent(sku)}`, data);
 

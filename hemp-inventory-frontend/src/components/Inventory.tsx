@@ -138,17 +138,18 @@ export default function Inventory() {
     default_tax_rates: boolean;
     effect: string;
     strength: string;
+    product_type: string;
   }>({
     name: "", price: "", stocks: {}, pars: {},
     price_type: "FIXED", cost: "", product_code: "", alternate_name: "",
     description: "", color_code: "", is_revenue: true, is_age_restricted: false,
     age_restriction_type: "Vitamin & Supplements", age_restriction_min_age: "21",
     available: true, hidden: false, auto_manage: false, default_tax_rates: true,
-    effect: "", strength: "",
+    effect: "", strength: "", product_type: "",
   });
 
   // Product attributes loaded from backend
-  const [productAttrsMap, setProductAttrsMap] = useState<Record<string, { effect?: string; strength?: string }>>({});
+  const [productAttrsMap, setProductAttrsMap] = useState<Record<string, { effect?: string; strength?: string; product_type?: string }>>({});
   const [saving, setSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
@@ -277,9 +278,9 @@ export default function Inventory() {
     loadData();
     // Load product attributes (effect/strength) from backend
     getProductAttributes().then(res => {
-      const map: Record<string, { effect?: string; strength?: string }> = {};
+      const map: Record<string, { effect?: string; strength?: string; product_type?: string }> = {};
       for (const attr of res.data.attributes || []) {
-        map[attr.sku] = { effect: attr.effect || undefined, strength: attr.strength || undefined };
+        map[attr.sku] = { effect: attr.effect || undefined, strength: attr.strength || undefined, product_type: attr.product_type || undefined };
       }
       setProductAttrsMap(map);
     }).catch(() => {});
@@ -571,6 +572,7 @@ export default function Inventory() {
       default_tax_rates: item.default_tax_rates !== undefined ? item.default_tax_rates : true,
       effect: productAttrsMap[item.sku]?.effect || "",
       strength: productAttrsMap[item.sku]?.strength || "",
+      product_type: productAttrsMap[item.sku]?.product_type || "",
     });
     setEditTab("details");
     setSaveMessage(null);
@@ -669,7 +671,8 @@ export default function Inventory() {
       const oldAttrs = productAttrsMap[editItem.sku] || {};
       const effectChanged = editForm.effect !== (oldAttrs.effect || "");
       const strengthChanged = editForm.strength !== (oldAttrs.strength || "");
-      const hasAttrChanges = effectChanged || strengthChanged;
+      const typeChanged = editForm.product_type !== (oldAttrs.product_type || "");
+      const hasAttrChanges = effectChanged || strengthChanged || typeChanged;
 
       if (Object.keys(updateData).length === 0 && parPromises.length === 0 && !hasAttrChanges) {
         setSaveMessage({ type: "success", text: "No changes to save." });
@@ -686,6 +689,7 @@ export default function Inventory() {
         await updateProductAttributes(editItem.sku, {
           effect: editForm.effect || null,
           strength: editForm.strength || null,
+          product_type: editForm.product_type || null,
           product_name: editItem.name,
         });
         // Update local cache
@@ -694,6 +698,7 @@ export default function Inventory() {
           [editItem.sku]: {
             effect: editForm.effect || undefined,
             strength: editForm.strength || undefined,
+            product_type: editForm.product_type || undefined,
           },
         }));
       }
@@ -2114,7 +2119,7 @@ export default function Inventory() {
                   </div>
                   <div className="border-t border-gray-200 pt-4 mt-2">
                     <h4 className="text-sm font-semibold text-gray-700 mb-3">Product Attributes (for website filtering)</h4>
-                    <div className="grid grid-cols-2 gap-3">
+                    <div className="grid grid-cols-3 gap-3">
                       <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">How Do You Want to Feel?</label>
                         <select
@@ -2128,7 +2133,7 @@ export default function Inventory() {
                           <option value="Energy">Energy</option>
                           <option value="Focus">Focus</option>
                         </select>
-                        <p className="text-xs text-gray-400 mt-1">Controls the &quot;How Do You Want to Feel?&quot; category on the website.</p>
+                        <p className="text-xs text-gray-400 mt-1">Website &quot;How Do You Want to Feel?&quot; filter.</p>
                       </div>
                       <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">Strength</label>
@@ -2142,7 +2147,21 @@ export default function Inventory() {
                           <option value="Medium">Medium</option>
                           <option value="Low">Low</option>
                         </select>
-                        <p className="text-xs text-gray-400 mt-1">Strength badge shown on the product card.</p>
+                        <p className="text-xs text-gray-400 mt-1">Strength badge on product card.</p>
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Type</label>
+                        <select
+                          value={editForm.product_type}
+                          onChange={(e) => setEditForm({ ...editForm, product_type: e.target.value })}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-green-500 outline-none"
+                        >
+                          <option value="">Not set</option>
+                          <option value="Hybrid">Hybrid</option>
+                          <option value="Indica">Indica</option>
+                          <option value="Sativa">Sativa</option>
+                        </select>
+                        <p className="text-xs text-gray-400 mt-1">Hybrid, Indica, or Sativa (HempVentory only).</p>
                       </div>
                     </div>
                   </div>
