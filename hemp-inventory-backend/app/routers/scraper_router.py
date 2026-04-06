@@ -3,6 +3,7 @@
 import json
 import re
 from typing import Optional
+from html import unescape
 
 import httpx
 from bs4 import BeautifulSoup
@@ -20,9 +21,25 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.5",
 }
 
-MANUFACTURER_DOMAINS: dict[str, str] = {
-    "chubby gorilla": "chubbygorilla.com",
-    "chubbygorilla": "chubbygorilla.com",
+# Map lowercase manufacturer names/aliases to their domain and platform type.
+# "shopify" domains use the /products.json API; "magento" uses catalogsearch.
+MANUFACTURER_CATALOG: dict[str, dict] = {
+    "chubby gorilla": {"domain": "chubbygorilla.com", "platform": "magento"},
+    "chubbygorilla": {"domain": "chubbygorilla.com", "platform": "magento"},
+    "calyx": {"domain": "calyxcontainers.com", "platform": "shopify"},
+    "calyx containers": {"domain": "calyxcontainers.com", "platform": "shopify"},
+    "calyxcontainers": {"domain": "calyxcontainers.com", "platform": "shopify"},
+    "crc": {"domain": "crccontainers.com", "platform": "shopify"},
+    "crc containers": {"domain": "crccontainers.com", "platform": "shopify"},
+    "loud lock": {"domain": "www.loudlock.com", "platform": "shopify"},
+    "loudlock": {"domain": "www.loudlock.com", "platform": "shopify"},
+    "dispensary supply": {"domain": "dispensarysupply.com", "platform": "shopify"},
+    "kush supply": {"domain": "kushsupply.com", "platform": "shopify"},
+    "kushsupply": {"domain": "kushsupply.com", "platform": "shopify"},
+    "sana packaging": {"domain": "sanapackaging.com", "platform": "shopify"},
+    "sana": {"domain": "sanapackaging.com", "platform": "shopify"},
+    "n2 packaging": {"domain": "n2packagingsystems.com", "platform": "shopify"},
+    "n2": {"domain": "n2packagingsystems.com", "platform": "shopify"},
 }
 
 
@@ -47,6 +64,21 @@ async def _fetch_page(client: httpx.AsyncClient, url: str) -> BeautifulSoup:
     resp = await client.get(url, headers=HEADERS, follow_redirects=True, timeout=15.0)
     resp.raise_for_status()
     return BeautifulSoup(resp.text, "html.parser")
+
+
+async def _fetch_json(client: httpx.AsyncClient, url: str) -> dict:
+    """Fetch a URL and return parsed JSON."""
+    resp = await client.get(url, headers=HEADERS, follow_redirects=True, timeout=15.0)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _strip_html(html_str: str) -> str:
+    """Strip HTML tags and return plain text."""
+    if not html_str:
+        return ""
+    soup = BeautifulSoup(html_str, "html.parser")
+    return unescape(soup.get_text(separator=" ", strip=True))
 
 
 def _extract_ld_json_images(soup: BeautifulSoup) -> list[str]:
@@ -102,11 +134,117 @@ def _extract_specs(soup: BeautifulSoup) -> dict:
     return specs
 
 
+def _score_product(product: dict, query_terms: list[str]) -> int:
+    """Score a Shopify product by how well it matches query terms."""
+    title_lower = (product.get("title") or "").lower()
+    handle_lower = (product.get("handle") or "").lower()
+    tags_lower = ""
+    if isinstance(product.get("tags"), list):
+        tags_lower = " ".join(product["tags"]).lower()
+    body_lower = _strip_html(product.get("body_html") or "").lower()
+
+    score = 0
+    for term in query_terms:
+        t = term.lower()
+        if t in title_lower:
+            score += 10
+        if t in handle_lower:
+            score += 5
+        if t in tags_lower:
+            score += 3
+        if t in body_lower:
+            score += 1
+    return score
+
+
+async def scrape_shopify(
+    client: httpx.AsyncClient,
+    domain: str,
+    manufacturer: str,
+    model_number: str,
+) -> ProductResult:
+    """Search a Shopify store for a product via the /products.json API."""
+    result = ProductResult(manufacturer=manufacturer, model_number=model_number)
+
+    try:
+        all_products: list[dict] = []
+        page = 1
+        while True:
+            url = f"https://{domain}/products.json?limit=250&page={page}"
+            data = await _fetch_json(client, url)
+            products = data.get("products", [])
+            if not products:
+                break
+            all_products.extend(products)
+            if len(products) < 250:
+                break
+            page += 1
+
+        if not all_products:
+            result.error = f"No products found on {domain}"
+            return result
+
+        query_terms = model_number.lower().split()
+        scored = [(p, _score_product(p, query_terms)) for p in all_products]
+        scored.sort(key=lambda x: x[1], reverse=True)
+
+        best_product, best_score = scored[0]
+
+        if best_score == 0:
+            titles = ", ".join(p["title"] for p in all_products[:5])
+            result.error = (
+                f"No matching product found on {domain} for '{model_number}'. "
+                f"Available products: {titles}"
+            )
+            return result
+
+        result.product_name = best_product.get("title")
+        result.description = _strip_html(best_product.get("body_html") or "")[:1500]
+        result.source_url = f"https://{domain}/products/{best_product['handle']}"
+
+        images: list[str] = []
+        for img in best_product.get("images", []):
+            src = img.get("src", "")
+            if src and src not in images:
+                images.append(src)
+        result.image_urls = images[:10]
+
+        specs: dict[str, str] = {}
+        if best_product.get("product_type"):
+            specs["Type"] = best_product["product_type"]
+        if best_product.get("vendor"):
+            specs["Vendor"] = best_product["vendor"]
+        variants = best_product.get("variants", [])
+        if variants:
+            first_variant = variants[0]
+            if first_variant.get("sku"):
+                specs["SKU"] = first_variant["sku"]
+            if first_variant.get("price"):
+                specs["Price"] = f"${first_variant['price']}"
+            if first_variant.get("weight") and first_variant.get("weight_unit"):
+                specs["Weight"] = f"{first_variant['weight']} {first_variant['weight_unit']}"
+            for opt in best_product.get("options", []):
+                opt_name = opt.get("name", "")
+                opt_values = opt.get("values", [])
+                if opt_name and opt_values and opt_name != "Title":
+                    specs[opt_name] = ", ".join(opt_values)
+
+        result.specifications = specs
+
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            result.error = f"Product catalog not available on {domain}."
+        else:
+            result.error = f"Error accessing {domain}: {e.response.status_code}"
+    except Exception as e:
+        result.error = f"Scraping error: {str(e)}"
+
+    return result
+
+
 async def scrape_chubby_gorilla(client: httpx.AsyncClient, model_number: str) -> ProductResult:
     """Scrape Chubby Gorilla's Magento catalog for a product."""
     result = ProductResult(manufacturer="Chubby Gorilla", model_number=model_number)
-    search_url = f"https://chubbygorilla.com/catalogsearch/result/?q={httpx.QueryParams({'q': model_number})}"
-    # Clean URL - just use the query param directly
     search_url = f"https://chubbygorilla.com/catalogsearch/result/?q={model_number.replace(' ', '+')}"
 
     try:
@@ -173,81 +311,107 @@ async def scrape_chubby_gorilla(client: httpx.AsyncClient, model_number: str) ->
     return result
 
 
-async def scrape_generic(client: httpx.AsyncClient, manufacturer: str, model_number: str) -> ProductResult:
-    """Try to scrape product info by searching common packaging distributor sites."""
+async def scrape_by_domain_guess(
+    client: httpx.AsyncClient,
+    manufacturer: str,
+    model_number: str,
+) -> ProductResult:
+    """Try to guess the manufacturer domain and scrape it."""
     result = ProductResult(manufacturer=manufacturer, model_number=model_number)
-    query = f"{manufacturer} {model_number}"
+    clean_name = re.sub(r"[^a-z0-9]", "", manufacturer.lower())
 
-    # Try direct Google search and scrape first result
-    distributor_urls = [
-        f"https://www.google.com/search?q={query.replace(' ', '+')}+site:gamutpackaging.com",
-        f"https://www.google.com/search?q={query.replace(' ', '+')}+packaging",
+    domain_guesses = [
+        f"{clean_name}.com",
+        f"www.{clean_name}.com",
+        f"{clean_name}packaging.com",
+        f"{clean_name}containers.com",
     ]
 
-    try:
-        # First try a direct search on the manufacturer domain if known
-        for search_url in distributor_urls:
-            try:
-                soup = await _fetch_page(client, search_url)
-                # Extract Google result links
-                for link in soup.select(".yuRUbf a, a[jsname]"):
-                    href = link.get("href", "")
-                    if href and href.startswith("http") and "google.com" not in href:
-                        try:
-                            page_soup = await _fetch_page(client, href)
-                            h1 = page_soup.select_one("h1")
-                            if h1:
-                                result.product_name = h1.get_text(strip=True)
+    for domain in domain_guesses:
+        # First try Shopify products.json
+        try:
+            url = f"https://{domain}/products.json?limit=5"
+            data = await _fetch_json(client, url)
+            products = data.get("products", [])
+            if products:
+                return await scrape_shopify(client, domain, manufacturer, model_number)
+        except Exception:
+            pass
 
-                            desc = page_soup.select_one(
-                                '[itemprop="description"], .product-description, '
-                                ".product__description, .product-info-description, "
-                                "#tab-description, .description"
-                            )
-                            if desc:
-                                result.description = desc.get_text(strip=True)[:1500]
+        # Then try HTML search
+        try:
+            search_url = f"https://{domain}/search?q={model_number.replace(' ', '+')}&type=product"
+            soup = await _fetch_page(client, search_url)
+            product_links = soup.select(
+                "a[href*='/products/'], a[href*='/product/'], "
+                "a.product-item-link, .product-card a"
+            )
+            for link in product_links[:3]:
+                href = link.get("href", "")
+                if not href:
+                    continue
+                if not href.startswith("http"):
+                    href = f"https://{domain}{href}"
+                try:
+                    page_soup = await _fetch_page(client, href)
+                    h1 = page_soup.select_one("h1")
+                    if h1:
+                        result.product_name = h1.get_text(strip=True)
+                    desc = page_soup.select_one(
+                        '[itemprop="description"], .product-description, '
+                        '.product__description, .description'
+                    )
+                    if desc:
+                        result.description = desc.get_text(strip=True)[:1500]
+                    images = _extract_gallery_images(
+                        page_soup,
+                        '.product-media img, .product-image img, [itemprop="image"], .gallery img'
+                    )
+                    ld_images = _extract_ld_json_images(page_soup)
+                    for img in ld_images:
+                        if img not in images:
+                            images.append(img)
+                    result.image_urls = images[:10]
+                    result.source_url = href
+                    result.specifications = _extract_specs(page_soup)
+                    if result.product_name and (result.image_urls or result.description):
+                        return result
+                except Exception:
+                    continue
+        except Exception:
+            continue
 
-                            images = _extract_gallery_images(
-                                page_soup,
-                                '.product-media img, .product-image img, [itemprop="image"], .gallery img'
-                            )
-                            result.image_urls = images[:10]
-                            result.source_url = href
-                            result.specifications = _extract_specs(page_soup)
-
-                            if result.product_name and (result.image_urls or result.description):
-                                return result
-                        except Exception:
-                            continue
-            except Exception:
-                continue
-
-        if not result.product_name and not result.image_urls:
-            result.error = "No product found via search. Try a more specific model number or manufacturer name."
-
-    except Exception as e:
-        result.error = f"Search error: {str(e)}"
-
+    result.error = (
+        f"Could not find manufacturer website for '{manufacturer}'. "
+        "Try one of the supported manufacturers or check the spelling."
+    )
     return result
 
 
 @router.post("/scrape", response_model=ProductResult)
 async def scrape_product(req: ScrapeRequest):
     """Scrape a manufacturer website for product images and descriptions."""
-    manufacturer = req.manufacturer.strip().lower()
+    manufacturer = req.manufacturer.strip()
+    manufacturer_key = manufacturer.lower()
     model = req.model_number.strip()
-    if not manufacturer or not model:
+    if not manufacturer_key or not model:
         raise HTTPException(status_code=400, detail="Both manufacturer and model_number are required")
 
     async with httpx.AsyncClient() as client:
-        if manufacturer in MANUFACTURER_DOMAINS:
-            domain = MANUFACTURER_DOMAINS[manufacturer]
-            if domain == "chubbygorilla.com":
+        catalog_entry = MANUFACTURER_CATALOG.get(manufacturer_key)
+
+        if catalog_entry:
+            domain = catalog_entry["domain"]
+            platform = catalog_entry["platform"]
+
+            if platform == "magento" and domain == "chubbygorilla.com":
                 result = await scrape_chubby_gorilla(client, model)
+            elif platform == "shopify":
+                result = await scrape_shopify(client, domain, manufacturer, model)
             else:
-                result = await scrape_generic(client, req.manufacturer, model)
+                result = await scrape_by_domain_guess(client, manufacturer, model)
         else:
-            result = await scrape_generic(client, req.manufacturer, model)
+            result = await scrape_by_domain_guess(client, manufacturer, model)
 
     return result
 
@@ -255,13 +419,25 @@ async def scrape_product(req: ScrapeRequest):
 @router.get("/manufacturers")
 async def list_manufacturers():
     """List supported manufacturers with direct scraping support."""
+    seen_domains: dict[str, str] = {}
+    for key, info in MANUFACTURER_CATALOG.items():
+        domain = info["domain"]
+        if domain not in seen_domains:
+            seen_domains[domain] = key
+
+    supported = []
+    for domain, key in seen_domains.items():
+        info = MANUFACTURER_CATALOG[key]
+        supported.append({
+            "name": key.replace("_", " ").title(),
+            "domain": domain,
+            "platform": info["platform"],
+        })
+
     return {
-        "supported": [
-            {
-                "name": "Chubby Gorilla",
-                "domain": "chubbygorilla.com",
-                "note": "Direct catalog search by product name or SKU",
-            }
-        ],
-        "generic": "Any manufacturer not listed above will be searched via Google and distributor sites.",
+        "supported": supported,
+        "generic": (
+            "Any manufacturer not listed above will be searched by guessing the website domain. "
+            "For best results, use one of the supported manufacturer names."
+        ),
     }
