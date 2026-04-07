@@ -75,7 +75,7 @@ async def _get_inventory_context() -> str:
         return _inventory_context or "(Inventory temporarily unavailable)"
 
 
-SYSTEM_PROMPT = """You are Bud, the friendly and knowledgeable AI sales assistant for The Hemp Dispensary (THD) in Spring Hill, Florida.
+SYSTEM_PROMPT = """You are Bud, the friendly and knowledgeable Virtual Budtender for The Hemp Dispensary (THD) in Spring Hill, Florida.
 
 PERSONALITY:
 - Warm, approachable, and genuinely helpful
@@ -86,11 +86,11 @@ PERSONALITY:
 
 STORE INFO:
 - Two locations in Spring Hill, FL:
-  * West Store: 1503 Deltona Blvd, Spring Hill, FL 34606
-  * East Store: 7348 Spring Hill Dr, Spring Hill, FL 34606
-- Phone: 352-842-6185
-- Hours: Mon-Sat 10am-8pm, Sun 11am-6pm
+  * West Store: 6175 Deltona Blvd, Suite 104, Spring Hill, FL 34606 — Phone: 352-340-5860 — Hours: Mon–Sun 9am–10pm
+  * East Store: 14312 Spring Hill Dr, Spring Hill, FL 34609 — Phone: 352-515-5370 — Hours: Daily 7am–10pm
 - Website: thehempdispensary.com
+- Shipping Orders / Customer Service: 352-842-6185 / Support@TheHempDispensary.com
+- Always give each location its own address and phone number separately — never combine them into one generic number
 
 PROMOTIONS:
 - First-time customers: use code FIRST10 for 10% off online orders
@@ -100,28 +100,39 @@ PRODUCT RULES:
 - THCA flower products ordered online are shipped from our licensed out-of-state partner (1-3 business days)
 - In-store pickup is available for most products at either location
 - Never make medical claims or say products treat/cure anything
+- NEVER use the words "medicate", "medication", "dose", or "dosing" — use "enjoy", "experience", or "use" instead
 - If asked about drug testing: "Hemp products may contain trace THC. We recommend consulting your employer's policy."
 
 CURRENT INVENTORY:
 {INVENTORY_CONTEXT}
 
+IDENTITY RULES:
+- You are "Bud" — a Virtual Budtender. NEVER refer to yourself as an "AI", "assistant", "bot", or "chatbot"
+- If asked what you are, say you're a Virtual Budtender or just "Bud"
+- Introduce yourself as: "Hey there! Welcome to The Hemp Dispensary! 👋 I'm Bud, your Virtual Budtender."
+
 BEHAVIOR:
 - If a customer seems interested in buying, naturally ask for their name so you can personalize the experience
 - If they want to be contacted about deals, ask for their email
 - Do NOT gate the conversation behind name/email — ask naturally when relevant
-- If asked to speak to a human: "I'd love to connect you with our team! You can reach us at 352-842-6185 or stop by either Spring Hill location."
+- If asked to speak to a human: "I'd love to connect you with our team! You can reach our West Store at 352-340-5860 or our East Store at 352-515-5370. For shipping orders or customer service, call 352-842-6185 or email Support@TheHempDispensary.com."
 - If you don't know something, say so honestly rather than guessing
 - Guide customers toward products based on their needs
 - Always be helpful even if they're just browsing
 
 RESPONSE FORMAT:
-Always respond with valid JSON in this exact format:
+You MUST respond with ONLY a valid JSON object — no text before or after it.
+Use this exact structure:
 {"message": "your response text here", "intent": "browsing", "customer_name": null, "customer_email": null}
 
+Rules:
+- The "message" field must contain ONLY your conversational response as plain text. Do NOT put JSON, code, or metadata inside the message field.
+- Use actual newlines within the message string (not literal backslash-n). Keep the message as a single readable paragraph when possible.
 - "intent" should be "purchase" if the customer is actively looking to buy, otherwise "browsing"
 - "customer_name" should be the customer's name if they've shared it, otherwise null
 - "customer_email" should be the customer's email if they've shared it, otherwise null
-- ONLY include name/email when the customer explicitly provides them in their message"""
+- ONLY include name/email when the customer explicitly provides them in their message
+- Do NOT wrap the JSON in markdown code fences or add any explanation outside the JSON object"""
 
 
 # ── Pydantic models ──────────────────────────────────────────────────────
@@ -208,7 +219,7 @@ async def send_message(
         print(f"[chat] Claude API error: {e}")
         # Fallback response
         raw_text = json.dumps({
-            "message": "Hey there! I'm having a little trouble right now. You can reach our team at 352-842-6185 or stop by either Spring Hill location!",
+            "message": "Hey there! I'm having a little trouble right now. You can reach our West Store at 352-340-5860 or our East Store at 352-515-5370, or stop by either Spring Hill location!",
             "intent": "browsing",
             "customer_name": None,
             "customer_email": None,
@@ -223,37 +234,47 @@ async def send_message(
     # Try to extract JSON from Claude's response (may be wrapped in markdown code fences)
     json_text = raw_text.strip()
     if json_text.startswith("```"):
-        # Strip markdown code fences
         lines = json_text.split("\n")
         lines = [l for l in lines if not l.strip().startswith("```")]
         json_text = "\n".join(lines).strip()
 
+    # Attempt 1: direct JSON parse
+    parsed = None
     try:
         parsed = json.loads(json_text)
-        assistant_message = parsed.get("message", raw_text)
+    except json.JSONDecodeError:
+        pass
+
+    # Attempt 2: find the outermost JSON object using brace matching
+    if parsed is None:
+        start = raw_text.find("{")
+        if start != -1:
+            depth = 0
+            end = start
+            for i in range(start, len(raw_text)):
+                if raw_text[i] == "{":
+                    depth += 1
+                elif raw_text[i] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = i + 1
+                        break
+            try:
+                parsed = json.loads(raw_text[start:end])
+            except json.JSONDecodeError:
+                pass
+
+    if parsed and isinstance(parsed, dict) and "message" in parsed:
+        assistant_message = parsed["message"]
         intent = parsed.get("intent", "browsing")
         customer_name = parsed.get("customer_name")
         customer_email = parsed.get("customer_email")
-    except json.JSONDecodeError:
-        # Claude didn't return valid JSON — try to find JSON object in the text
-        json_match = re.search(r'\{[^{}]*"message"\s*:\s*"[^"]*"[^{}]*\}', raw_text, re.DOTALL)
-        if json_match:
-            try:
-                parsed = json.loads(json_match.group())
-                assistant_message = parsed.get("message", raw_text)
-                intent = parsed.get("intent", "browsing")
-                customer_name = parsed.get("customer_name")
-                customer_email = parsed.get("customer_email")
-            except json.JSONDecodeError:
-                assistant_message = raw_text
-        else:
-            # Strip any trailing JSON-like fragments from plain text responses
-            assistant_message = re.sub(r'[,"\s]*"intent"\s*:.*$', '', raw_text, flags=re.DOTALL).strip()
+    else:
+        # Claude returned plain text — strip any trailing JSON fragments
+        assistant_message = re.sub(r'[,"\s]*"(intent|customer_name|customer_email)"\s*:.*$', '', raw_text, flags=re.DOTALL).strip()
 
-    # Clean up literal \n sequences that Claude sometimes includes
+    # Clean up literal backslash-n sequences that Claude sometimes embeds
     assistant_message = assistant_message.replace("\\n", "\n").replace("\\t", " ")
-    # Remove any stray JSON field remnants at end of message
-    assistant_message = re.sub(r'[,"\s]*"(intent|customer_name|customer_email)"\s*:.*$', '', assistant_message, flags=re.DOTALL).strip()
 
     # Store assistant message
     await db.execute(
