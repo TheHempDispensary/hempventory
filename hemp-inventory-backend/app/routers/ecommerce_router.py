@@ -1909,3 +1909,68 @@ async def refund_order(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Refund service error: {str(e)}")
+
+
+# ─── Address Autocomplete Proxy (Nominatim) ───────────────────────────
+@router.get("/address/autocomplete")
+async def address_autocomplete(q: str):
+    """Proxy address lookup through Nominatim to avoid browser CORS/rate-limit issues."""
+    if len(q) < 3:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={
+                    "q": q,
+                    "format": "json",
+                    "addressdetails": "1",
+                    "countrycodes": "us",
+                    "limit": "5",
+                },
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "THD-Website/1.0 (support@thehempdispensary.com)",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            results = []
+            for r in data:
+                a = r.get("address", {})
+                if not a:
+                    continue
+                house = a.get("house_number", "")
+                road = a.get("road", "")
+                street = f"{house} {road}".strip() if house else road
+                if not street:
+                    continue
+                city = a.get("city") or a.get("town") or a.get("village") or a.get("hamlet") or (a.get("county", "").replace(" County", "")) or ""
+                state = a.get("state", "FL")
+                # Normalize state name to abbreviation
+                state_map = {
+                    "Alabama": "AL", "Alaska": "AK", "Arizona": "AZ", "Arkansas": "AR",
+                    "California": "CA", "Colorado": "CO", "Connecticut": "CT", "Delaware": "DE",
+                    "Florida": "FL", "Georgia": "GA", "Hawaii": "HI", "Idaho": "ID",
+                    "Illinois": "IL", "Indiana": "IN", "Iowa": "IA", "Kansas": "KS",
+                    "Kentucky": "KY", "Louisiana": "LA", "Maine": "ME", "Maryland": "MD",
+                    "Massachusetts": "MA", "Michigan": "MI", "Minnesota": "MN", "Mississippi": "MS",
+                    "Missouri": "MO", "Montana": "MT", "Nebraska": "NE", "Nevada": "NV",
+                    "New Hampshire": "NH", "New Jersey": "NJ", "New Mexico": "NM", "New York": "NY",
+                    "North Carolina": "NC", "North Dakota": "ND", "Ohio": "OH", "Oklahoma": "OK",
+                    "Oregon": "OR", "Pennsylvania": "PA", "Rhode Island": "RI", "South Carolina": "SC",
+                    "South Dakota": "SD", "Tennessee": "TN", "Texas": "TX", "Utah": "UT",
+                    "Vermont": "VT", "Virginia": "VA", "Washington": "WA", "West Virginia": "WV",
+                    "Wisconsin": "WI", "Wyoming": "WY",
+                }
+                state_abbr = state_map.get(state, state[:2].upper() if len(state) > 2 else state)
+                results.append({
+                    "display": r.get("display_name", ""),
+                    "address": street,
+                    "city": city,
+                    "state": state_abbr,
+                    "zip": a.get("postcode", ""),
+                })
+            return results
+    except Exception:
+        return []
