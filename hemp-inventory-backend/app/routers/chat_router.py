@@ -115,7 +115,7 @@ BEHAVIOR:
 
 RESPONSE FORMAT:
 Always respond with valid JSON in this exact format:
-{{"message": "your response text here", "intent": "browsing", "customer_name": null, "customer_email": null}}
+{"message": "your response text here", "intent": "browsing", "customer_name": null, "customer_email": null}
 
 - "intent" should be "purchase" if the customer is actively looking to buy, otherwise "browsing"
 - "customer_name" should be the customer's name if they've shared it, otherwise null
@@ -219,8 +219,16 @@ async def send_message(
     customer_name = None
     customer_email = None
 
+    # Try to extract JSON from Claude's response (may be wrapped in markdown code fences)
+    json_text = raw_text.strip()
+    if json_text.startswith("```"):
+        # Strip markdown code fences
+        lines = json_text.split("\n")
+        lines = [l for l in lines if not l.strip().startswith("```")]
+        json_text = "\n".join(lines).strip()
+
     try:
-        parsed = json.loads(raw_text)
+        parsed = json.loads(json_text)
         assistant_message = parsed.get("message", raw_text)
         intent = parsed.get("intent", "browsing")
         customer_name = parsed.get("customer_name")
