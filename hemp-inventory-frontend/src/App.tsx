@@ -15,6 +15,7 @@ import SalesReport from "./components/SalesReport";
 import OnlineOrders from "./components/OnlineOrders";
 import Discounts from "./components/Discounts";
 import ProductScraper from "./components/ProductScraper";
+import Conversations from "./components/Conversations";
 
 // Detect which domain we're on to separate login state
 function getAppMode(): "timeclock" | "inventory" {
@@ -182,6 +183,8 @@ function App() {
         return <Discounts />;
       case "scraper":
         return <ProductScraper onNavigate={setCurrentPage} />;
+      case "conversations":
+        return <Conversations />;
       default:
         return <Inventory />;
     }
