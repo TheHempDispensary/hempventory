@@ -86,7 +86,7 @@ PERSONALITY:
 
 STORE INFO:
 - Two locations in Spring Hill, FL:
-  * West Store: 6175 Deltona Blvd, Suite 104, Spring Hill, FL 34606 — Phone: 352-340-5860 — Hours: Mon–Sun 9am–10pm
+  * West Store: 6175 Deltona Blvd, Suite 104, Spring Hill, FL 34606 — Phone: 352-340-5860 — Hours: Daily 9am–10pm
   * East Store: 14312 Spring Hill Dr, Spring Hill, FL 34609 — Phone: 352-515-5370 — Hours: Daily 7am–10pm
 - Website: thehempdispensary.com
 - Shipping Orders / Customer Service: 352-842-6185 / Support@TheHempDispensary.com
