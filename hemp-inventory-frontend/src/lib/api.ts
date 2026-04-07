@@ -540,4 +540,17 @@ export const scrapeProduct = (data: { manufacturer: string; model_number: string
 
 export const getManufacturers = () => api.get("/api/scraper/manufacturers");
 
+// Chat / Conversations
+export const getChatSessions = (params?: {
+  search?: string;
+  intent?: string;
+  date_from?: string;
+  date_to?: string;
+  limit?: number;
+  offset?: number;
+}) => api.get("/api/chat/sessions", { params });
+
+export const getChatSession = (sessionId: string) =>
+  api.get(`/api/chat/sessions/${sessionId}`);
+
 export default api;
