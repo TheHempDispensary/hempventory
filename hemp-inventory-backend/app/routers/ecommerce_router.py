@@ -256,11 +256,16 @@ async def _fetch_and_cache_products() -> dict:
         # Load product descriptions from local DB (Clover API doesn't persist descriptions)
         desc_db = await aiosqlite.connect(DB_PATH)
         try:
-            desc_cursor = await desc_db.execute("SELECT sku, description FROM product_descriptions")
+            desc_cursor = await desc_db.execute("SELECT sku, product_name, description FROM product_descriptions")
             desc_rows = await desc_cursor.fetchall()
         finally:
             await desc_db.close()
-        desc_by_sku: dict[str, str] = {row[0]: row[1] for row in desc_rows}
+        desc_by_sku: dict[str, str] = {row[0]: row[2] for row in desc_rows}
+        # Build a name-based lookup for products that share a SKU (e.g. syringes)
+        desc_by_name: dict[str, str] = {}
+        for row in desc_rows:
+            if row[1]:  # product_name
+                desc_by_name[row[1].upper()] = row[2]
 
         # Load product attributes (effect & strength) from local DB
         attr_db = await aiosqlite.connect(DB_PATH)
@@ -284,7 +289,9 @@ async def _fetch_and_cache_products() -> dict:
             item_categories = [c.get("name", "") for c in item.get("categories", {}).get("elements", [])]
             stock_info = item.get("itemStock", {})
             hq_stock = stock_info.get("quantity", 0) if stock_info else 0
-            description = desc_by_sku.get(sku, "") or item.get("description", "")
+            # Look up description by product name first (handles shared-SKU items like syringes),
+            # then fall back to SKU-based lookup, then Clover's own description field
+            description = desc_by_name.get(name.upper(), "") or desc_by_sku.get(sku, "") or item.get("description", "")
             online_name = item.get("onlineName", "") or name
 
             # Look up stock at West and East by SKU first, then by name
