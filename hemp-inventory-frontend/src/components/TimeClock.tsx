@@ -204,6 +204,8 @@ export default function TimeClock() {
   const [bulkLocation, setBulkLocation] = useState("");
   const [bulkDates, setBulkDates] = useState<string[]>([]);
   const [savingBulk, setSavingBulk] = useState(false);
+  const [bulkCalMonth, setBulkCalMonth] = useState(() => new Date().getMonth());
+  const [bulkCalYear, setBulkCalYear] = useState(() => new Date().getFullYear());
 
   // Shift requests state
   interface ShiftRequest {
@@ -1573,7 +1575,7 @@ export default function TimeClock() {
                     className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-amber-700 bg-amber-50 rounded-lg hover:bg-amber-100">
                     <CalendarOff className="w-3 h-3" />Request Off
                   </button>
-                  <button onClick={() => setShowBulkScheduleModal(true)}
+                  <button onClick={() => { setBulkCalMonth(new Date().getMonth()); setBulkCalYear(new Date().getFullYear()); setShowBulkScheduleModal(true); }}
                     className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-purple-700 bg-purple-50 rounded-lg hover:bg-purple-100">
                     <CalendarDays className="w-3 h-3" />Multi-Day Schedule
                   </button>
@@ -1946,8 +1948,8 @@ export default function TimeClock() {
 
           {/* Bulk (Multi-Day) Schedule Modal */}
           {showBulkScheduleModal && (() => {
-            const bulkMonth = calMonth;
-            const bulkYear = calYear;
+            const bulkMonth = bulkCalMonth;
+            const bulkYear = bulkCalYear;
             const daysInMonth = new Date(bulkYear, bulkMonth + 1, 0).getDate();
             const firstDow = new Date(bulkYear, bulkMonth, 1).getDay();
             const bulkCalDays: (number | null)[] = [];
@@ -1992,8 +1994,16 @@ export default function TimeClock() {
                       <label className="block text-xs font-medium text-gray-600 mb-1">
                         Select Dates ({bulkDates.length} selected)
                       </label>
-                      <div className="text-center font-semibold text-gray-800 text-sm mb-2">
-                        {monthNames2[bulkMonth]} {bulkYear}
+                      <div className="flex items-center justify-between mb-2">
+                        <button onClick={() => { if (bulkCalMonth === 0) { setBulkCalMonth(11); setBulkCalYear(bulkCalYear - 1); } else setBulkCalMonth(bulkCalMonth - 1); }}
+                          className="p-1 rounded hover:bg-gray-100 text-gray-600">
+                          <ChevronLeft className="w-4 h-4" />
+                        </button>
+                        <span className="font-semibold text-gray-800 text-sm">{monthNames2[bulkMonth]} {bulkYear}</span>
+                        <button onClick={() => { if (bulkCalMonth === 11) { setBulkCalMonth(0); setBulkCalYear(bulkCalYear + 1); } else setBulkCalMonth(bulkCalMonth + 1); }}
+                          className="p-1 rounded hover:bg-gray-100 text-gray-600">
+                          <ChevronRight className="w-4 h-4" />
+                        </button>
                       </div>
                       <div className="grid grid-cols-7 gap-1 text-center">
                         {dayNames.map(d => (
