@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getOnlineOrders, updateOrderStatus, updateOrderNotes, updateOrderCustomer, createShipment, purchaseLabel, getShippingLabel, refundOrder, resendOrderConfirmation } from "../lib/api";
+import { getOnlineOrders, updateOrderStatus, updateOrderNotes, updateOrderCustomer, createShipment, purchaseLabel, getShippingLabel, refundOrder, resendOrderConfirmation, convertToShipping } from "../lib/api";
 import { MessageSquare, Save, Edit2, X } from "lucide-react";
 import { RefreshCw, Search, Package, ChevronDown, ChevronUp, Truck, CheckCircle, XCircle, Clock, ShoppingCart, Printer, Tag, ExternalLink, Loader2, RotateCcw, AlertTriangle, DollarSign, Mail, MapPin } from "lucide-react";
 
@@ -295,6 +295,18 @@ export default function OnlineOrders() {
     shipping_zip: "",
   });
 
+  // Convert pickup to shipping state
+  const [convertingOrderId, setConvertingOrderId] = useState<number | null>(null);
+  const [convertingInProgress, setConvertingInProgress] = useState(false);
+  const [convertError, setConvertError] = useState("");
+  const [convertAddress, setConvertAddress] = useState({
+    shipping_address: "",
+    shipping_apartment: "",
+    shipping_city: "",
+    shipping_state: "",
+    shipping_zip: "",
+  });
+
   const loadOrders = async () => {
     setLoading(true);
     try {
@@ -484,6 +496,42 @@ export default function OnlineOrders() {
       console.error("Error saving customer details:", err);
     } finally {
       setSavingCustomer(false);
+    }
+  };
+
+  const handleConvertToShipping = async (orderId: number) => {
+    if (!convertAddress.shipping_address || !convertAddress.shipping_city || !convertAddress.shipping_state || !convertAddress.shipping_zip) {
+      setConvertError("Address, city, state, and zip are required");
+      return;
+    }
+    setConvertingInProgress(true);
+    setConvertError("");
+    try {
+      const res = await convertToShipping(orderId, convertAddress);
+      setOrders((prev) =>
+        prev.map((o) =>
+          o.id === orderId
+            ? {
+                ...o,
+                fulfillment_type: res.data.fulfillment_type,
+                shipping_address: res.data.shipping_address,
+                shipping_apartment: res.data.shipping_apartment,
+                shipping_city: res.data.shipping_city,
+                shipping_state: res.data.shipping_state,
+                shipping_zip: res.data.shipping_zip,
+              }
+            : o
+        )
+      );
+      setConvertingOrderId(null);
+      setConvertAddress({ shipping_address: "", shipping_apartment: "", shipping_city: "", shipping_state: "", shipping_zip: "" });
+    } catch (err: unknown) {
+      const msg = (err && typeof err === "object" && "response" in err)
+        ? ((err as { response?: { data?: { detail?: string } } }).response?.data?.detail || "Failed to convert order")
+        : "Failed to convert to shipping";
+      setConvertError(msg);
+    } finally {
+      setConvertingInProgress(false);
     }
   };
 
@@ -932,6 +980,25 @@ export default function OnlineOrders() {
                         </span>
                       )}
 
+                      {order.fulfillment_type && order.fulfillment_type.startsWith("pickup") && !order.label_url && (
+                        <button
+                          onClick={() => {
+                            if (convertingOrderId === order.id) {
+                              setConvertingOrderId(null);
+                              setConvertError("");
+                            } else {
+                              setConvertingOrderId(order.id);
+                              setConvertError("");
+                              setConvertAddress({ shipping_address: "", shipping_apartment: "", shipping_city: "", shipping_state: "", shipping_zip: "" });
+                            }
+                          }}
+                          className="flex items-center gap-2 px-4 py-2 bg-amber-100 text-amber-700 rounded-lg hover:bg-amber-200 transition-colors text-sm font-medium"
+                        >
+                          <Truck className="w-4 h-4" />
+                          {convertingOrderId === order.id ? "Cancel" : "Convert to Shipping"}
+                        </button>
+                      )}
+
                       {!(order.fulfillment_type && order.fulfillment_type.startsWith("pickup")) && (
                         order.label_url ? (
                           <button
@@ -962,6 +1029,64 @@ export default function OnlineOrders() {
                         )
                       )}
                     </div>
+
+                    {/* Convert to Shipping Panel */}
+                    {convertingOrderId === order.id && (
+                      <div className="mt-4 p-4 bg-amber-50 rounded-lg border border-amber-200">
+                        <h4 className="text-sm font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                          <Truck className="w-4 h-4 text-amber-600" />
+                          Convert Pickup to Shipping — Enter Shipping Address
+                        </h4>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+                          <div className="md:col-span-2">
+                            <label className="text-xs text-gray-500 block mb-1">Street Address *</label>
+                            <input type="text" value={convertAddress.shipping_address} onChange={(e) => setConvertAddress({ ...convertAddress, shipping_address: e.target.value })}
+                              placeholder="123 Main St" className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-amber-500 focus:border-amber-500" />
+                          </div>
+                          <div className="md:col-span-2">
+                            <label className="text-xs text-gray-500 block mb-1">Apt / Suite</label>
+                            <input type="text" value={convertAddress.shipping_apartment} onChange={(e) => setConvertAddress({ ...convertAddress, shipping_apartment: e.target.value })}
+                              placeholder="Apt 4B" className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-amber-500 focus:border-amber-500" />
+                          </div>
+                          <div>
+                            <label className="text-xs text-gray-500 block mb-1">City *</label>
+                            <input type="text" value={convertAddress.shipping_city} onChange={(e) => setConvertAddress({ ...convertAddress, shipping_city: e.target.value })}
+                              placeholder="Spring Hill" className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-amber-500 focus:border-amber-500" />
+                          </div>
+                          <div className="grid grid-cols-2 gap-3">
+                            <div>
+                              <label className="text-xs text-gray-500 block mb-1">State *</label>
+                              <input type="text" value={convertAddress.shipping_state} onChange={(e) => setConvertAddress({ ...convertAddress, shipping_state: e.target.value })}
+                                placeholder="FL" maxLength={2} className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-amber-500 focus:border-amber-500" />
+                            </div>
+                            <div>
+                              <label className="text-xs text-gray-500 block mb-1">ZIP *</label>
+                              <input type="text" value={convertAddress.shipping_zip} onChange={(e) => setConvertAddress({ ...convertAddress, shipping_zip: e.target.value })}
+                                placeholder="34606" maxLength={10} className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-amber-500 focus:border-amber-500" />
+                            </div>
+                          </div>
+                        </div>
+                        {convertError && (
+                          <div className="text-sm text-red-600 bg-red-50 p-3 rounded-lg mb-3">{convertError}</div>
+                        )}
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => handleConvertToShipping(order.id)}
+                            disabled={convertingInProgress}
+                            className="flex items-center gap-2 px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 disabled:opacity-50 transition-colors text-sm font-medium"
+                          >
+                            {convertingInProgress ? <Loader2 className="w-4 h-4 animate-spin" /> : <Truck className="w-4 h-4" />}
+                            {convertingInProgress ? "Converting..." : "Convert & Save Address"}
+                          </button>
+                          <button
+                            onClick={() => { setConvertingOrderId(null); setConvertError(""); }}
+                            className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm font-medium"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
 
                     {/* Resend Confirmation Feedback */}
                     {resendingOrderId === order.id && resendSuccess && (

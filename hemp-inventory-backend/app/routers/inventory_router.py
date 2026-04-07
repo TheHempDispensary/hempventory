@@ -48,6 +48,17 @@ async def _remove_from_cache(skus: list):
             _inventory_cache["updated_at"] = time.time()
 
 
+async def _remove_from_cache_by_name(name: str):
+    """Remove items matching an exact name from cache (for no-SKU items merged by name)."""
+    async with _cache_lock:
+        if _inventory_cache["items"]:
+            _inventory_cache["items"] = [
+                item for item in _inventory_cache["items"]
+                if item.get("name") != name
+            ]
+            _inventory_cache["updated_at"] = time.time()
+
+
 class LocationStockInput(BaseModel):
     location_id: int
     quantity: float
@@ -240,40 +251,56 @@ async def _do_sync(db: aiosqlite.Connection) -> dict:
     items_list = sorted(inventory.values(), key=lambda x: x["name"])
     result = {"items": items_list, "locations": location_list}
 
-    # Track inventory changes: compare new data against previous cache
-    async with _cache_lock:
-        old_items = _inventory_cache.get("items", [])
-    if old_items:
-        old_lookup: dict[str, dict] = {}
-        for oi in old_items:
-            old_lookup[oi.get("id", "")] = oi
-        changes = []
-        for ni in items_list:
-            nid = ni.get("id", "")
-            oi = old_lookup.get(nid)
-            if not oi:
-                continue
-            for loc_name, loc_data in ni.get("locations", {}).items():
-                new_stock = loc_data.get("stock", 0)
-                old_stock = (oi.get("locations", {}).get(loc_name, {}) or {}).get("stock", 0)
-                if new_stock != old_stock:
-                    changes.append((
-                        ni.get("sku", ""),
-                        ni.get("name", ""),
-                        loc_name,
-                        old_stock,
-                        new_stock,
-                        new_stock - old_stock,
-                        "sync",
-                    ))
-        if changes:
-            await db.executemany(
-                """INSERT INTO inventory_changes
-                   (sku, product_name, location_name, old_stock, new_stock, change_amount, change_source)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                changes,
-            )
-            await db.commit()
+    # Track inventory changes: compare new data against persistent DB snapshot
+    # (survives server restarts unlike the in-memory cache)
+    cursor = await db.execute("SELECT sku, location_name, stock FROM inventory_snapshots")
+    snapshot_rows = await cursor.fetchall()
+    old_snapshot: dict[tuple[str, str], float] = {
+        (row[0], row[1]): row[2] for row in snapshot_rows
+    }
+
+    changes = []
+    snapshot_upserts = []
+    for ni in items_list:
+        sku = ni.get("sku", "")
+        name = ni.get("name", "")
+        for loc_name, loc_data in ni.get("locations", {}).items():
+            new_stock = loc_data.get("stock", 0)
+            old_stock = old_snapshot.get((sku, loc_name))
+            # Record change if we have a previous snapshot and stock differs
+            if old_stock is not None and new_stock != old_stock:
+                changes.append((
+                    sku,
+                    name,
+                    loc_name,
+                    old_stock,
+                    new_stock,
+                    new_stock - old_stock,
+                    "sync",
+                ))
+            # Always upsert the current stock into snapshot
+            snapshot_upserts.append((sku, loc_name, new_stock, name))
+
+    if changes:
+        await db.executemany(
+            """INSERT INTO inventory_changes
+               (sku, product_name, location_name, old_stock, new_stock, change_amount, change_source)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            changes,
+        )
+
+    if snapshot_upserts:
+        await db.executemany(
+            """INSERT INTO inventory_snapshots (sku, location_name, stock, product_name, updated_at)
+               VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(sku, location_name)
+               DO UPDATE SET stock = excluded.stock,
+                             product_name = excluded.product_name,
+                             updated_at = CURRENT_TIMESTAMP""",
+            snapshot_upserts,
+        )
+
+    await db.commit()
 
     # Update cache – but never overwrite a good cache with empty data
     # (protects against temporary Clover API failures wiping the cache)
@@ -990,10 +1017,21 @@ async def delete_item(
     user: dict = Depends(get_current_user),
     db: aiosqlite.Connection = Depends(get_db),
 ):
-    """Delete an item from all locations by SKU."""
+    """Delete an item from all locations by SKU.
+
+    When the SKU is actually a Clover ID (no user-assigned SKU), the same
+    product may have *different* Clover IDs in each location.  To handle this
+    we first try matching by SKU / Clover ID, and if that only finds the item
+    in one location we also try matching by the resolved item name so the
+    product is removed from *every* location in a single call.
+    """
     locations = await _get_locations(db)
     if not locations:
         raise HTTPException(status_code=400, detail="No locations configured")
+
+    # First pass: find the item name so we can do a name-based fallback
+    resolved_name: str | None = None
+    all_deleted_clover_ids: list[str] = []
 
     results = []
     for loc in locations:
@@ -1001,23 +1039,45 @@ async def delete_item(
         try:
             client = CloverClient(merchant_id, api_token)
             data = await client.get_items()
-            matching = [i for i in data.get("elements", []) if i.get("sku") == sku]
+            elements = data.get("elements", [])
+
+            # Try matching by user-assigned SKU first
+            matching = [i for i in elements if i.get("sku") == sku]
+            # Then try matching by Clover ID
             if not matching:
-                matching = [i for i in data.get("elements", []) if i.get("id") == sku]
+                matching = [i for i in elements if i.get("id") == sku]
+            # Capture the name from the first match for fallback
+            if matching and not resolved_name:
+                resolved_name = " ".join((matching[0].get("name", "") or "").split())
+            # If no SKU/ID match but we know the name, match by name
+            # (handles items with no user-SKU that have different Clover IDs per location)
+            if not matching and resolved_name:
+                matching = [
+                    i for i in elements
+                    if " ".join((i.get("name", "") or "").split()) == resolved_name
+                ]
             if not matching:
                 results.append({"location": loc_name, "status": "not_found"})
                 continue
             for match in matching:
                 await client.delete_item(match["id"])
+                all_deleted_clover_ids.append(match["id"])
             results.append({"location": loc_name, "status": "deleted", "count": len(matching)})
         except Exception as e:
             results.append({"location": loc_name, "status": "error", "error": str(e)})
 
     # Also remove PAR levels
     await db.execute("DELETE FROM par_levels WHERE sku = ?", (sku,))
+    # Remove inventory snapshots so the item doesn't linger in change tracking
+    await db.execute("DELETE FROM inventory_snapshots WHERE sku = ?", (sku,))
     await db.commit()
 
-    await _remove_from_cache([sku])
+    # Remove from cache: the displayed SKU plus any Clover IDs we deleted
+    skus_to_remove = [sku] + all_deleted_clover_ids
+    await _remove_from_cache(skus_to_remove)
+    # Also remove by name from cache (for name-merged items)
+    if resolved_name:
+        await _remove_from_cache_by_name(resolved_name)
     return {"results": results}
 
 
