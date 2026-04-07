@@ -421,6 +421,14 @@ export const updateOrderCustomer = (orderId: number, data: {
   shipping_zip?: string;
 }) => api.patch(`/api/ecommerce/orders/${orderId}/customer`, data);
 
+export const convertToShipping = (orderId: number, data: {
+  shipping_address: string;
+  shipping_apartment?: string;
+  shipping_city: string;
+  shipping_state: string;
+  shipping_zip: string;
+}) => api.patch(`/api/ecommerce/orders/${orderId}/convert-to-shipping`, data);
+
 // Schedule Hours
 export const getScheduleHours = (params?: { start_date?: string; end_date?: string }) =>
   api.get("/api/timeclock/schedule-hours", { params });

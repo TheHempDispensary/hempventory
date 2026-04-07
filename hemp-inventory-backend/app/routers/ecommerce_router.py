@@ -726,6 +726,59 @@ async def delete_promo(promo_id: int, db: aiosqlite.Connection = Depends(get_db)
     return {"status": "deleted"}
 
 
+async def _check_realtime_stock(items: List[OrderItem], fulfillment_type: str) -> list[str]:
+    """Check real-time Clover stock for order items. Returns list of out-of-stock item names."""
+    # Determine which location to check based on fulfillment type
+    if fulfillment_type == "pickup_west" and WEST_MERCHANT_ID and WEST_API_TOKEN:
+        merchant_id = WEST_MERCHANT_ID
+        api_token = WEST_API_TOKEN
+        location_label = "West"
+    elif fulfillment_type == "pickup_east" and EAST_MERCHANT_ID and EAST_API_TOKEN:
+        merchant_id = EAST_MERCHANT_ID
+        api_token = EAST_API_TOKEN
+        location_label = "East"
+    else:
+        merchant_id = HQ_MERCHANT_ID
+        api_token = HQ_API_TOKEN
+        location_label = "HQ"
+
+    out_of_stock: list[str] = []
+    base = f"{CLOVER_BASE_URL}/merchants/{merchant_id}"
+    headers = {"Authorization": f"Bearer {api_token}"}
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            for item in items:
+                # Skip LeafLife items (shipped from supplier, not local stock)
+                if isinstance(item.sku, str) and item.sku.startswith("LF-"):
+                    continue
+                if not item.product_id:
+                    continue
+                try:
+                    resp = await client.get(
+                        f"{base}/item_stocks/{item.product_id}",
+                        headers=headers,
+                    )
+                    if resp.status_code == 200:
+                        stock_data = resp.json()
+                        current_qty = stock_data.get("quantity", 0)
+                        if current_qty < item.quantity:
+                            out_of_stock.append(
+                                f"{item.name} (only {current_qty} in stock at {location_label}, you requested {item.quantity})"
+                            )
+                            print(f"[stock-check] {item.name} INSUFFICIENT at {location_label}: {current_qty} < {item.quantity}")
+                        else:
+                            print(f"[stock-check] {item.name} OK at {location_label}: {current_qty} >= {item.quantity}")
+                    else:
+                        print(f"[stock-check] Could not verify stock for {item.name} ({item.product_id}): {resp.status_code}")
+                except Exception as e:
+                    print(f"[stock-check] Error checking {item.name}: {e}")
+    except Exception as e:
+        print(f"[stock-check] Stock check failed entirely: {e}")
+        # Don't block the order if the stock check itself fails
+    return out_of_stock
+
+
 @router.post("/orders")
 async def create_order(
     order: CreateOrderRequest,
@@ -735,6 +788,16 @@ async def create_order(
     """Public endpoint: Create an e-commerce order with Clover payment processing."""
     charge_id = ""
     payment_status = "pending"
+
+    # Real-time stock validation BEFORE charging the customer.
+    # Prevents customers from ordering items that are out of stock (stale cache).
+    out_of_stock = await _check_realtime_stock(order.items, order.fulfillment_type)
+    if out_of_stock:
+        detail_lines = "; ".join(out_of_stock)
+        raise HTTPException(
+            status_code=409,
+            detail=f"Some items are out of stock: {detail_lines}. Please update your cart and try again.",
+        )
 
     # Server-side enforcement of LeafLife minimum price floors.
     # Prevents stale cached prices on the frontend from undercharging.
@@ -1496,6 +1559,93 @@ async def update_order_customer(
         "shipping_city": row[6],
         "shipping_state": row[7],
         "shipping_zip": row[8],
+    }
+
+
+@router.patch("/orders/{order_id}/convert-to-shipping")
+async def convert_to_shipping(
+    order_id: int,
+    request: Request,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Convert a pickup order to a shipping order (requires admin auth).
+    Accepts shipping address fields and updates fulfillment_type to 'shipping'."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    import jwt
+    token = auth.split(" ", 1)[1]
+    jwt_secret = os.environ.get("JWT_SECRET", "hemp-inventory-secret-key")
+    try:
+        jwt.decode(token, jwt_secret, algorithms=["HS256"])
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    # Verify order exists and is currently a pickup order
+    cursor = await db.execute(
+        "SELECT fulfillment_type FROM ecommerce_orders WHERE id = ?", (order_id,)
+    )
+    row = await cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    current_type = row[0] or ""
+    if not current_type.startswith("pickup"):
+        raise HTTPException(status_code=400, detail="Order is not a pickup order")
+
+    body = await request.json()
+
+    # Require shipping address fields
+    shipping_address = (body.get("shipping_address") or "").strip()
+    shipping_city = (body.get("shipping_city") or "").strip()
+    shipping_state = (body.get("shipping_state") or "").strip()
+    shipping_zip = (body.get("shipping_zip") or "").strip()
+
+    if not shipping_address or not shipping_city or not shipping_state or not shipping_zip:
+        raise HTTPException(
+            status_code=400,
+            detail="Shipping address, city, state, and zip are required",
+        )
+
+    await db.execute(
+        """UPDATE ecommerce_orders
+           SET fulfillment_type = 'shipping',
+               shipping_address = ?,
+               shipping_apartment = ?,
+               shipping_city = ?,
+               shipping_state = ?,
+               shipping_zip = ?,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?""",
+        (
+            shipping_address,
+            (body.get("shipping_apartment") or "").strip(),
+            shipping_city,
+            shipping_state,
+            shipping_zip,
+            order_id,
+        ),
+    )
+    await db.commit()
+
+    # Return the updated order data
+    cursor = await db.execute(
+        """SELECT fulfillment_type, shipping_address, shipping_apartment,
+                  shipping_city, shipping_state, shipping_zip
+           FROM ecommerce_orders WHERE id = ?""",
+        (order_id,),
+    )
+    updated = await cursor.fetchone()
+    return {
+        "success": True,
+        "order_id": order_id,
+        "fulfillment_type": updated[0],
+        "shipping_address": updated[1],
+        "shipping_apartment": updated[2],
+        "shipping_city": updated[3],
+        "shipping_state": updated[4],
+        "shipping_zip": updated[5],
     }
 
 
