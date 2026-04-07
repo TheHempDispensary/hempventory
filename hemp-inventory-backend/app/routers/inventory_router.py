@@ -1670,6 +1670,114 @@ async def delete_image(
     return {"status": "ok", "sku": sku}
 
 
+# ─── Product Image Gallery (multiple images per product) ──────────────────
+
+@router.get("/images/{sku}/gallery")
+async def get_image_gallery(
+    sku: str,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Get all gallery images for a product (returns metadata, not image data)."""
+    cursor = await db.execute(
+        "SELECT id, position, content_type, created_at FROM product_image_gallery WHERE sku = ? ORDER BY position",
+        (sku,),
+    )
+    rows = await cursor.fetchall()
+    return [
+        {"id": row[0], "position": row[1], "content_type": row[2], "created_at": row[3]}
+        for row in rows
+    ]
+
+
+@router.post("/images/{sku}/gallery")
+async def upload_gallery_image(
+    sku: str,
+    data: ImageUpload,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Upload an additional image to the product gallery."""
+    try:
+        decoded = base64.b64decode(data.image_data)
+        if len(decoded) > 10 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="Image too large (max 10MB)")
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise
+        raise HTTPException(status_code=400, detail=f"Invalid base64 image data: {e}")
+
+    # Find next available position
+    cursor = await db.execute(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM product_image_gallery WHERE sku = ?", (sku,)
+    )
+    next_pos = (await cursor.fetchone())[0]
+
+    await db.execute(
+        """INSERT INTO product_image_gallery (sku, position, image_data, content_type)
+           VALUES (?, ?, ?, ?)""",
+        (sku, next_pos, data.image_data, data.content_type),
+    )
+    await db.commit()
+    return {"status": "ok", "sku": sku, "position": next_pos}
+
+
+@router.get("/images/{sku}/gallery/{position}")
+async def get_gallery_image(
+    sku: str,
+    position: int,
+    w: Optional[int] = None,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Get a specific gallery image by SKU and position."""
+    cursor = await db.execute(
+        "SELECT image_data, content_type FROM product_image_gallery WHERE sku = ? AND position = ?",
+        (sku, position),
+    )
+    row = await cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Gallery image not found")
+
+    image_bytes = base64.b64decode(row[0])
+    media_type = row[1]
+
+    if w and w > 0:
+        try:
+            from PIL import Image as PILImage
+            import io
+            img = PILImage.open(io.BytesIO(image_bytes))
+            ratio = w / img.width
+            new_h = int(img.height * ratio)
+            img = img.resize((w, new_h), PILImage.LANCZOS)
+            buf = io.BytesIO()
+            fmt = "WEBP" if "webp" in media_type else "PNG"
+            img.save(buf, format=fmt, quality=85)
+            image_bytes = buf.getvalue()
+            media_type = f"image/{fmt.lower()}"
+        except Exception:
+            pass
+
+    return Response(
+        content=image_bytes,
+        media_type=media_type,
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@router.delete("/images/{sku}/gallery/{position}")
+async def delete_gallery_image(
+    sku: str,
+    position: int,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Delete a specific gallery image."""
+    await db.execute(
+        "DELETE FROM product_image_gallery WHERE sku = ? AND position = ?", (sku, position)
+    )
+    await db.commit()
+    return {"status": "ok", "sku": sku, "position": position}
+
+
 @router.post("/sync-refunds")
 async def sync_refunds(
     user: dict = Depends(get_current_user),

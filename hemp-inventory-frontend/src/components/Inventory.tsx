@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo } from "react";
-import { syncInventory, getCachedInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, bulkAssignCategory, bulkAssignImages, syncRefunds, getAgeRestrictionTypes, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup, bulkStockUpdate, addVariantsToItem, getInventoryChanges, getProductAttributes, updateProductAttributes } from "../lib/api";
+import { syncInventory, getCachedInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, bulkAssignCategory, bulkAssignImages, syncRefunds, getAgeRestrictionTypes, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup, bulkStockUpdate, addVariantsToItem, getInventoryChanges, getProductAttributes, updateProductAttributes, getImageGallery, uploadGalleryImage, getGalleryImageUrl, deleteGalleryImage } from "../lib/api";
 import { RefreshCw, Search, Plus, ChevronDown, ChevronUp, X, Save, Package, Trash2, CheckSquare, Square, Minus, Image, Download, Upload, Settings, ArrowRightLeft, Images, Layers, Tag, ChevronsLeft, ChevronsRight, ChevronLeft, ChevronRight } from "lucide-react";
 
 interface LocationStock {
@@ -159,6 +159,10 @@ export default function Inventory() {
   const [editImageFile, setEditImageFile] = useState<File | null>(null);
   const [editImagePreview, setEditImagePreview] = useState<string | null>(null);
   const [imageUploading, setImageUploading] = useState(false);
+
+  // Gallery state (additional images beyond the primary one)
+  const [galleryImages, setGalleryImages] = useState<{ id: number; position: number; content_type: string; created_at: string }[]>([]);
+  const [galleryUploading, setGalleryUploading] = useState(false);
 
   // Variant state
   const [hasVariants, setHasVariants] = useState(false);
@@ -433,6 +437,53 @@ export default function Inventory() {
     }
   };
 
+  const loadGalleryImages = async (sku: string) => {
+    try {
+      const res = await getImageGallery(sku);
+      setGalleryImages(res.data);
+    } catch {
+      setGalleryImages([]);
+    }
+  };
+
+  const handleGalleryFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!editItem) return;
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    setGalleryUploading(true);
+    try {
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const base64 = await handleFileToBase64(file);
+        await uploadGalleryImage(editItem.sku, base64, file.type);
+      }
+      setSaveMessage({ type: "success", text: `${files.length} image${files.length > 1 ? "s" : ""} added to gallery!` });
+      await loadGalleryImages(editItem.sku);
+      setImageCacheBust(Date.now());
+    } catch (err) {
+      console.error("Error uploading gallery image:", err);
+      setSaveMessage({ type: "error", text: "Failed to upload gallery image." });
+    } finally {
+      setGalleryUploading(false);
+      e.target.value = "";
+    }
+  };
+
+  const handleDeleteGalleryImage = async (position: number) => {
+    if (!editItem) return;
+    setGalleryUploading(true);
+    try {
+      await deleteGalleryImage(editItem.sku, position);
+      setSaveMessage({ type: "success", text: "Gallery image deleted." });
+      await loadGalleryImages(editItem.sku);
+      setImageCacheBust(Date.now());
+    } catch (err) {
+      console.error("Error deleting gallery image:", err);
+    } finally {
+      setGalleryUploading(false);
+    }
+  };
+
   const handleAddItem = async () => {
     setAddItemMessage(null);
     if (!newItem.name) {
@@ -580,6 +631,8 @@ export default function Inventory() {
     setEditImagePreview(item.has_image ? getImageUrl(item.sku, imageCacheBust) : null);
     setEditVariantAttrs([{ attribute_name: "", option_names: [""] }]);
     setKeepOriginal(false);
+    setGalleryImages([]);
+    loadGalleryImages(item.sku);
     setEditItem(item);
   };
 
@@ -2427,10 +2480,10 @@ export default function Inventory() {
               {/* Image Tab */}
               {editTab === "image" && (
                 <>
-                  {/* Current Image Display */}
+                  {/* Primary Image */}
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Primary Image</label>
                   {editImagePreview && !editImageFile ? (
                     <div className="mb-4">
-                      <label className="block text-sm font-medium text-gray-700 mb-2">Current Image</label>
                       <div className="relative inline-block">
                         <img src={editImagePreview} alt={editItem?.name} className="w-48 h-48 object-cover rounded-lg border border-gray-200" />
                         <button
@@ -2444,23 +2497,18 @@ export default function Inventory() {
                       </div>
                     </div>
                   ) : !editImageFile ? (
-                    <div className="flex flex-col items-center justify-center py-6 text-center mb-4 bg-gray-50 rounded-lg border border-dashed border-gray-300">
-                      <Image className="w-10 h-10 text-gray-300 mb-2" />
-                      <p className="text-sm text-gray-500 font-medium">No image</p>
-                      <p className="text-xs text-gray-400">Upload an image below</p>
+                    <div className="flex flex-col items-center justify-center py-4 text-center mb-4 bg-gray-50 rounded-lg border border-dashed border-gray-300">
+                      <Image className="w-8 h-8 text-gray-300 mb-1" />
+                      <p className="text-xs text-gray-500">No primary image</p>
                     </div>
                   ) : null}
 
-                  {/* Upload Section */}
+                  {/* Upload Primary Image */}
                   <div className="mb-4">
-                    <div className="flex items-center gap-2 mb-2">
-                      <Upload className="w-5 h-5 text-green-600" />
-                      <span className="text-sm font-medium text-gray-700">Upload New Image</span>
-                    </div>
                     <div className="flex items-center gap-3">
                       <label className="flex items-center gap-2 px-4 py-2 bg-green-50 text-green-700 rounded-lg cursor-pointer hover:bg-green-100 border border-green-200 text-sm font-medium">
                         <Upload className="w-4 h-4" />
-                        Choose File
+                        {editImagePreview && !editImageFile ? "Replace Primary" : "Choose Primary Image"}
                         <input
                           type="file"
                           accept="image/*"
@@ -2495,9 +2543,59 @@ export default function Inventory() {
                     )}
                   </div>
 
-                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mt-3">
+                  {/* Gallery Images */}
+                  <div className="border-t border-gray-200 pt-4 mt-2">
+                    <div className="flex items-center justify-between mb-3">
+                      <div className="flex items-center gap-2">
+                        <Images className="w-5 h-5 text-indigo-600" />
+                        <span className="text-sm font-medium text-gray-700">Additional Photos ({galleryImages.length})</span>
+                      </div>
+                      <label className="flex items-center gap-2 px-3 py-1.5 bg-indigo-50 text-indigo-700 rounded-lg cursor-pointer hover:bg-indigo-100 border border-indigo-200 text-xs font-medium">
+                        {galleryUploading ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
+                        {galleryUploading ? "Uploading..." : "Add Photos"}
+                        <input
+                          type="file"
+                          accept="image/*"
+                          multiple
+                          onChange={handleGalleryFileSelect}
+                          disabled={galleryUploading}
+                          className="hidden"
+                        />
+                      </label>
+                    </div>
+
+                    {galleryImages.length > 0 ? (
+                      <div className="grid grid-cols-3 gap-3">
+                        {galleryImages.map((img) => (
+                          <div key={img.id} className="relative group">
+                            <img
+                              src={getGalleryImageUrl(editItem!.sku, img.position, imageCacheBust)}
+                              alt={`Gallery ${img.position + 1}`}
+                              className="w-full h-28 object-cover rounded-lg border border-gray-200"
+                            />
+                            <button
+                              onClick={() => handleDeleteGalleryImage(img.position)}
+                              disabled={galleryUploading}
+                              className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full p-1 hover:bg-red-600 disabled:opacity-50 opacity-0 group-hover:opacity-100 transition-opacity"
+                              title="Delete gallery image"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="flex flex-col items-center justify-center py-4 text-center bg-gray-50 rounded-lg border border-dashed border-gray-300">
+                        <Images className="w-8 h-8 text-gray-300 mb-1" />
+                        <p className="text-xs text-gray-500">No additional photos yet</p>
+                        <p className="text-xs text-gray-400">Click &quot;Add Photos&quot; to upload multiple images</p>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mt-4">
                     <p className="text-xs text-blue-700">
-                      <strong>For e-commerce:</strong> Images are stored in our app for your online store. They won&apos;t appear in Clover POS.
+                      <strong>For e-commerce:</strong> The primary image shows on the product card. Additional photos appear in the product detail gallery. Images are stored in our app and won&apos;t appear in Clover POS.
                     </p>
                   </div>
                 </>

@@ -72,6 +72,19 @@ async def init_db():
         except Exception:
             pass  # Column already exists
 
+        # Product image gallery (additional images beyond the primary one in product_images)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS product_image_gallery (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sku TEXT NOT NULL,
+                position INTEGER NOT NULL DEFAULT 0,
+                image_data TEXT NOT NULL,
+                content_type TEXT DEFAULT 'image/png',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(sku, position)
+            )
+        """)
+
         # Loyalty program tables
         await db.execute("""
             CREATE TABLE IF NOT EXISTS loyalty_customers (
