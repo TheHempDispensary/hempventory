@@ -67,7 +67,13 @@ function formatPrice(cents: number): string {
 
 function formatDate(dateStr: string): string {
   if (!dateStr) return "N/A";
-  const d = new Date(dateStr);
+  // SQLite CURRENT_TIMESTAMP stores UTC without timezone indicator.
+  // Normalize to ISO 8601 with Z suffix so JS treats it as UTC before converting to EST.
+  let normalized = dateStr.replace(" ", "T");
+  if (!normalized.endsWith("Z") && !normalized.includes("+") && !/\d{2}:\d{2}:\d{2}-/.test(normalized)) {
+    normalized += "Z";
+  }
+  const d = new Date(normalized);
   return d.toLocaleDateString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
