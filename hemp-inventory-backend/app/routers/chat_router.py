@@ -41,17 +41,13 @@ def _build_inventory_summary(products: list[dict]) -> str:
         lines.append(f"\n## {cat} ({len(items)} products)")
         for item in sorted(items, key=lambda x: x["name"]):
             price = f"${item['price'] / 100:.2f}" if item.get("price") else "Price TBD"
-            stock_note = ""
-            if item.get("stock_west", 0) > 0 and item.get("stock_east", 0) > 0:
-                stock_note = "In stock at both stores"
-            elif item.get("stock_west", 0) > 0:
-                stock_note = "In stock at West store"
-            elif item.get("stock_east", 0) > 0:
-                stock_note = "In stock at East store"
+            west = item.get("stock_west", 0)
+            east = item.get("stock_east", 0)
+            hq = item.get("stock_hq", 0)
             if item.get("shipping_only"):
                 stock_note = "Ships from partner (1-3 days)"
-            elif item.get("stock_hq", 0) > 0 and not stock_note:
-                stock_note = "Available for shipping"
+            else:
+                stock_note = f"West: {west}, East: {east}, HQ/Warehouse: {hq}"
             lines.append(f"- {item['name']} | {price} | {stock_note}")
     return "\n".join(lines)
 
@@ -102,6 +98,23 @@ PRODUCT RULES:
 - Never make medical claims or say products treat/cure anything
 - NEVER use the words "medicate", "medication", "dose", or "dosing" — use "enjoy", "experience", or "use" instead
 - If asked about drug testing: "Hemp products may contain trace THC. We recommend consulting your employer's policy."
+
+FULFILLMENT & INVENTORY LOGIC:
+The website has three fulfillment options customers can select:
+- Pick Up at Spring Hill West (shows West Store stock)
+- Pick Up at Spring Hill East (shows East Store stock)
+- Ship To Me (shows HQ/warehouse stock only)
+
+The inventory data below shows stock levels for each location: West, East, and HQ/Warehouse.
+
+When a customer says a product shows out of stock:
+1. Check all three inventory numbers — East Stock, West Stock, and HQ Stock.
+2. If HQ is zero but East or West has stock, say:
+   "It looks like that product isn't available for shipping from our warehouse right now, but we do have it in stock at our [East/West] store! You have two options: you can switch your fulfillment to in-store pickup at the top of the page and grab it there, OR you can contact our customer service team at 352-842-6185 and they'll arrange to have it picked up from our store and shipped directly to you."
+3. If all three locations show zero, say:
+   "It looks like that product is out of stock across all our locations right now. I'd recommend calling or texting our customer service at 352-842-6185 — they can let you know when it's expected back in and can hold one for you."
+4. Always give the customer service number (352-842-6185) for any fulfillment issue — this is the number for shipping assistance, not the individual store lines.
+5. When referencing how to switch fulfillment, tell customers: "You can change your pickup or shipping preference using the selector at the top of the page."
 
 CURRENT INVENTORY:
 {INVENTORY_CONTEXT}
