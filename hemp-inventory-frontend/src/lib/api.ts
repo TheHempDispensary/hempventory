@@ -171,6 +171,19 @@ export const getImageUrl = (sku: string, cacheBust?: number) =>
 export const deleteImage = (sku: string) =>
   api.delete(`/api/inventory/images/${sku}`);
 
+// Product Image Gallery (multiple images per product)
+export const getImageGallery = (sku: string) =>
+  api.get(`/api/inventory/images/${sku}/gallery`);
+
+export const uploadGalleryImage = (sku: string, imageData: string, contentType: string = "image/png") =>
+  api.post(`/api/inventory/images/${sku}/gallery`, { image_data: imageData, content_type: contentType });
+
+export const getGalleryImageUrl = (sku: string, position: number, cacheBust?: number) =>
+  `${API_URL}/api/inventory/images/${sku}/gallery/${position}${cacheBust ? `?t=${cacheBust}` : ''}`;
+
+export const deleteGalleryImage = (sku: string, position: number) =>
+  api.delete(`/api/inventory/images/${sku}/gallery/${position}`);
+
 // Loyalty Program
 export const getLoyaltyDashboard = () => api.get("/api/loyalty/dashboard");
 
