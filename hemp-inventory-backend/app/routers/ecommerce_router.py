@@ -282,6 +282,14 @@ async def _fetch_and_cache_products() -> dict:
             sku = item.get("sku", "") or item.get("id", "")
             price = item.get("price", 0)
             item_categories = [c.get("name", "") for c in item.get("categories", {}).get("elements", [])]
+
+            # Remap apparel items (hoodies, t-shirts, shirts) to "Apparel" category
+            name_lower = name.lower()
+            is_apparel = any(kw in name_lower for kw in ("hoodie", "t-shirt", "shirt", "tee ", "jersey", "hat", "cap", "beanie"))
+            if is_apparel:
+                item_categories = [c if c != "Accessories" else "Apparel" for c in item_categories]
+                if not item_categories:
+                    item_categories = ["Apparel"]
             stock_info = item.get("itemStock", {})
             hq_stock = stock_info.get("quantity", 0) if stock_info else 0
             description = desc_by_sku.get(sku, "") or item.get("description", "")
