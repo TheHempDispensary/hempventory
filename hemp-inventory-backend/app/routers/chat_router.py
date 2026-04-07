@@ -1,6 +1,7 @@
 """Bud AI Chat Router — Claude-powered sales assistant with live inventory context."""
 
 import os
+import re
 import time
 import json
 from typing import Optional
@@ -234,8 +235,25 @@ async def send_message(
         customer_name = parsed.get("customer_name")
         customer_email = parsed.get("customer_email")
     except json.JSONDecodeError:
-        # Claude didn't return JSON — use raw text as message
-        assistant_message = raw_text
+        # Claude didn't return valid JSON — try to find JSON object in the text
+        json_match = re.search(r'\{[^{}]*"message"\s*:\s*"[^"]*"[^{}]*\}', raw_text, re.DOTALL)
+        if json_match:
+            try:
+                parsed = json.loads(json_match.group())
+                assistant_message = parsed.get("message", raw_text)
+                intent = parsed.get("intent", "browsing")
+                customer_name = parsed.get("customer_name")
+                customer_email = parsed.get("customer_email")
+            except json.JSONDecodeError:
+                assistant_message = raw_text
+        else:
+            # Strip any trailing JSON-like fragments from plain text responses
+            assistant_message = re.sub(r'[,"\s]*"intent"\s*:.*$', '', raw_text, flags=re.DOTALL).strip()
+
+    # Clean up literal \n sequences that Claude sometimes includes
+    assistant_message = assistant_message.replace("\\n", "\n").replace("\\t", " ")
+    # Remove any stray JSON field remnants at end of message
+    assistant_message = re.sub(r'[,"\s]*"(intent|customer_name|customer_email)"\s*:.*$', '', assistant_message, flags=re.DOTALL).strip()
 
     # Store assistant message
     await db.execute(

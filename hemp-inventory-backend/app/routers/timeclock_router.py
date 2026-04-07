@@ -5,7 +5,7 @@ from typing import Optional, List
 import aiosqlite
 import io
 import csv
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.auth import get_current_user
 from app.database import get_db
@@ -292,7 +292,7 @@ async def get_time_entries(
     db: aiosqlite.Connection = Depends(get_db),
 ):
     query = """
-        SELECT t.id, e.id as emp_id, e.name, t.clock_in, t.clock_out, t.hours
+        SELECT t.id, e.id as emp_id, e.name, t.clock_in, t.clock_out, t.hours, COALESCE(t.tips, 0) as tips
         FROM time_entries t
         JOIN employees e ON e.id = t.employee_id
         WHERE 1=1
@@ -300,10 +300,12 @@ async def get_time_entries(
     params = []
     if start_date:
         query += " AND t.clock_in >= ?"
-        params.append(start_date)
+        # If start_date includes a time component (contains 'T'), use as-is; otherwise treat as date
+        params.append(start_date if "T" in start_date else start_date)
     if end_date:
         query += " AND t.clock_in <= ?"
-        params.append(end_date + "T23:59:59")
+        # If end_date includes a time component (contains 'T'), use as-is; otherwise append end of day
+        params.append(end_date if "T" in end_date else end_date + "T23:59:59")
     if employee_id:
         query += " AND t.employee_id = ?"
         params.append(employee_id)
@@ -319,6 +321,7 @@ async def get_time_entries(
             "clock_in": r[3],
             "clock_out": r[4],
             "hours": r[5],
+            "tips": r[6] or 0,
         }
         for r in rows
     ]
@@ -329,6 +332,7 @@ async def get_time_entries(
 class EntryUpdate(BaseModel):
     clock_in: Optional[str] = None
     clock_out: Optional[str] = None
+    tips: Optional[float] = None
 
 @router.put("/entries/{entry_id}")
 async def update_entry(
@@ -345,6 +349,9 @@ async def update_entry(
     if data.clock_out is not None:
         sets.append("clock_out = ?")
         vals.append(data.clock_out)
+    if data.tips is not None:
+        sets.append("tips = ?")
+        vals.append(data.tips)
 
     if not sets:
         raise HTTPException(status_code=400, detail="Nothing to update")
@@ -436,7 +443,7 @@ async def export_csv(
     db: aiosqlite.Connection = Depends(get_db),
 ):
     query = """
-        SELECT e.name, t.clock_in, t.clock_out, t.hours
+        SELECT e.name, t.clock_in, t.clock_out, t.hours, COALESCE(t.tips, 0) as tips, e.pay_rate
         FROM time_entries t
         JOIN employees e ON e.id = t.employee_id
         WHERE t.clock_out IS NOT NULL
@@ -444,10 +451,10 @@ async def export_csv(
     params = []
     if start_date:
         query += " AND t.clock_in >= ?"
-        params.append(start_date)
+        params.append(start_date if "T" in (start_date or "") else start_date)
     if end_date:
         query += " AND t.clock_in <= ?"
-        params.append(end_date + "T23:59:59")
+        params.append(end_date if "T" in (end_date or "") else end_date + "T23:59:59")
     if employee_id:
         query += " AND t.employee_id = ?"
         params.append(employee_id)
@@ -458,21 +465,27 @@ async def export_csv(
 
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["Employee", "Clock In", "Clock Out", "Hours"])
+    writer.writerow(["Employee", "Clock In", "Clock Out", "Hours", "Tips"])
     for r in rows:
-        writer.writerow([r[0], r[1], r[2], r[3]])
+        writer.writerow([r[0], r[1], r[2], r[3], r[4] or 0])
 
     # Add summary by employee
     writer.writerow([])
     writer.writerow(["--- Summary ---"])
-    writer.writerow(["Employee", "Total Hours"])
-    summary = {}
+    writer.writerow(["Employee", "Total Hours", "Total Tips", "Pay Rate", "Est. Pay"])
+    summary: dict = {}
     for r in rows:
         name = r[0]
         hrs = r[3] or 0
-        summary[name] = summary.get(name, 0) + hrs
-    for name, total in sorted(summary.items()):
-        writer.writerow([name, round(total, 2)])
+        tips = r[4] or 0
+        rate = r[5]
+        if name not in summary:
+            summary[name] = {"hours": 0, "tips": 0, "rate": rate}
+        summary[name]["hours"] += hrs
+        summary[name]["tips"] += tips
+    for name, data in sorted(summary.items()):
+        est_pay = round(data["hours"] * data["rate"], 2) if data["rate"] else ""
+        writer.writerow([name, round(data["hours"], 2), round(data["tips"], 2), data["rate"] or "", est_pay])
 
     output.seek(0)
     return StreamingResponse(
@@ -527,6 +540,151 @@ async def sync_employees_from_clover(
 
     await db.commit()
     return {"imported": imported, "skipped": skipped, "errors": errors}
+
+
+# ---------- Sync Tips from Clover ----------
+
+
+class SyncTipsRequest(BaseModel):
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+
+
+@router.post("/sync-tips")
+async def sync_tips_from_clover(
+    body: Optional[SyncTipsRequest] = None,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Sync tip amounts from Clover payments into time_entries.
+
+    For each location, fetches payments from Clover, matches them to
+    employees by name, then finds the time_entry whose clock_in/clock_out
+    window contains the payment timestamp and aggregates the tip totals.
+    """
+    locations = await _get_locations(db)
+    if not locations:
+        raise HTTPException(status_code=400, detail="No locations configured")
+
+    # Determine date range (default: last 14 days)
+    if body and body.start_date:
+        range_start = body.start_date
+    else:
+        range_start = (datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y-%m-%d")
+    if body and body.end_date:
+        range_end = body.end_date
+    else:
+        range_end = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # Build employee name -> id map from local DB
+    cursor = await db.execute("SELECT id, LOWER(name) FROM employees")
+    emp_rows = await cursor.fetchall()
+    local_name_to_id: dict[str, int] = {r[1]: r[0] for r in emp_rows}
+
+    updated_entries = 0
+    total_tips_synced = 0.0
+    errors = []
+    details: list[dict] = []
+
+    for loc in locations:
+        loc_name, merchant_id, api_token = loc[1], loc[2], loc[3]
+        if not api_token:
+            continue
+        try:
+            client = CloverClient(merchant_id, api_token)
+
+            # Fetch Clover employees for this merchant to map clover emp id -> name
+            clover_emp_data = await client.get_employees()
+            clover_id_to_name: dict[str, str] = {}
+            for ce in clover_emp_data.get("elements", []):
+                cid = ce.get("id", "")
+                cname = ce.get("name", "").strip()
+                if cid and cname:
+                    clover_id_to_name[cid] = cname
+
+            # Convert date range to millisecond timestamps for Clover filter
+            start_dt = datetime.strptime(range_start, "%Y-%m-%d").replace(
+                hour=0, minute=0, second=0
+            )
+            end_dt = datetime.strptime(range_end, "%Y-%m-%d").replace(
+                hour=23, minute=59, second=59
+            )
+            start_ms = int(start_dt.timestamp() * 1000)
+            end_ms = int(end_dt.timestamp() * 1000)
+
+            filters = [f"createdTime>={start_ms}", f"createdTime<={end_ms}"]
+            payments_data = await client.get_payments(filters=filters)
+
+            # Aggregate tips: (local_employee_id) -> {entry_id -> tip_total}
+            entry_tips: dict[int, float] = {}  # time_entry.id -> aggregated tip amount
+
+            for payment in payments_data.get("elements", []):
+                tip_amount_cents = payment.get("tipAmount", 0)
+                if not tip_amount_cents or tip_amount_cents <= 0:
+                    continue
+
+                tip_dollars = tip_amount_cents / 100.0
+
+                # Get employee name from payment
+                emp_obj = payment.get("employee")
+                if not emp_obj:
+                    continue
+                clover_emp_id = emp_obj.get("id", "")
+                emp_name = clover_id_to_name.get(clover_emp_id, emp_obj.get("name", "")).strip()
+                if not emp_name:
+                    continue
+
+                local_emp_id = local_name_to_id.get(emp_name.lower())
+                if not local_emp_id:
+                    continue
+
+                # Convert payment time to local datetime string for matching
+                created_ms = payment.get("createdTime", 0)
+                if not created_ms:
+                    continue
+                payment_dt = datetime.fromtimestamp(created_ms / 1000.0)
+                payment_str = payment_dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+                # Find matching time_entry
+                entry_cursor = await db.execute(
+                    """SELECT id FROM time_entries
+                       WHERE employee_id = ?
+                         AND clock_in <= ?
+                         AND (clock_out >= ? OR clock_out IS NULL)
+                       ORDER BY clock_in DESC LIMIT 1""",
+                    (local_emp_id, payment_str, payment_str),
+                )
+                entry_row = await entry_cursor.fetchone()
+                if entry_row:
+                    entry_id = entry_row[0]
+                    entry_tips[entry_id] = entry_tips.get(entry_id, 0) + tip_dollars
+
+            # Update time_entries with aggregated tips
+            for entry_id, tip_total in entry_tips.items():
+                rounded = round(tip_total, 2)
+                await db.execute(
+                    "UPDATE time_entries SET tips = ? WHERE id = ?",
+                    (rounded, entry_id),
+                )
+                updated_entries += 1
+                total_tips_synced += rounded
+                details.append({
+                    "location": loc_name,
+                    "entry_id": entry_id,
+                    "tips": rounded,
+                })
+
+        except Exception as e:
+            errors.append({"location": loc_name, "error": str(e)})
+
+    await db.commit()
+    return {
+        "updated_entries": updated_entries,
+        "total_tips_synced": round(total_tips_synced, 2),
+        "date_range": {"start": range_start, "end": range_end},
+        "details": details,
+        "errors": errors,
+    }
 
 
 # ---------- Seed Employees ----------

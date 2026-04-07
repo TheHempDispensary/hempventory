@@ -29,6 +29,7 @@ import {
   getShiftRequests,
   updateShiftRequest,
   deleteShiftRequest,
+  syncTipsFromClover,
 } from "../lib/api";
 import {
   Clock,
@@ -77,6 +78,7 @@ interface TimeEntry {
   clock_in: string;
   clock_out: string | null;
   hours: number | null;
+  tips: number;
 }
 
 type Tab = "clock" | "timesheet" | "employees" | "schedule";
@@ -136,13 +138,15 @@ export default function TimeClock() {
   const [editEmpName, setEditEmpName] = useState("");
   const [editEmpPayRate, setEditEmpPayRate] = useState("");
 
-  // Timesheet filters
+  // Timesheet filters (datetime-local values for time-precise filtering)
   const [startDate, setStartDate] = useState(() => {
     const d = new Date();
     d.setDate(d.getDate() - d.getDay()); // Start of current week (Sunday)
     return d.toISOString().split("T")[0];
   });
   const [endDate, setEndDate] = useState(() => new Date().toISOString().split("T")[0]);
+  const [startTime, setStartTime] = useState("");
+  const [endTime, setEndTime] = useState("");
   const [filterEmployee, setFilterEmployee] = useState<number | 0>(0);
   const [searchActive, setSearchActive] = useState("");
 
@@ -154,6 +158,7 @@ export default function TimeClock() {
   const [editingEntry, setEditingEntry] = useState<number | null>(null);
   const [editClockIn, setEditClockIn] = useState("");
   const [editClockOut, setEditClockOut] = useState("");
+  const [editTips, setEditTips] = useState("");
 
   // Sync
   const [syncing, setSyncing] = useState(false);
@@ -256,15 +261,20 @@ export default function TimeClock() {
   const loadEntries = useCallback(async () => {
     try {
       const params: { start_date?: string; end_date?: string; employee_id?: number } = {};
-      if (startDate) params.start_date = startDate;
-      if (endDate) params.end_date = endDate;
+      if (startDate) {
+        // If time is set, combine date+time into ISO format for precise filtering
+        params.start_date = startTime ? `${startDate}T${startTime}:00` : startDate;
+      }
+      if (endDate) {
+        params.end_date = endTime ? `${endDate}T${endTime}:00` : endDate;
+      }
       if (filterEmployee) params.employee_id = filterEmployee;
       const res = await getTimeEntries(params);
       setEntries(res.data);
     } catch (err) {
       console.error("Error loading entries:", err);
     }
-  }, [startDate, endDate, filterEmployee]);
+  }, [startDate, startTime, endDate, endTime, filterEmployee]);
 
   useEffect(() => {
     const init = async () => {
@@ -360,6 +370,30 @@ export default function TimeClock() {
     }
   };
 
+  const [syncingTips, setSyncingTips] = useState(false);
+
+  const handleSyncTips = async () => {
+    setSyncingTips(true);
+    try {
+      const res = await syncTipsFromClover({
+        start_date: startDate || undefined,
+        end_date: endDate || undefined,
+      });
+      const { updated_entries, total_tips_synced, errors } = res.data;
+      let msg = `Synced $${total_tips_synced.toFixed(2)} in tips across ${updated_entries} entries`;
+      if (errors && errors.length > 0) {
+        msg += `. Errors: ${errors.map((e: { location: string; error: string }) => e.location).join(", ")}`;
+      }
+      showToast(errors && errors.length > 0 ? "error" : "success", msg);
+      await loadEntries();
+    } catch (err) {
+      console.error(err);
+      showToast("error", "Failed to sync tips from Clover");
+    } finally {
+      setSyncingTips(false);
+    }
+  };
+
   const handleDeleteEmployee = async (emp: Employee) => {
     if (!confirm(`Delete ${emp.name} and all their time entries?`)) return;
     try {
@@ -397,6 +431,7 @@ export default function TimeClock() {
     };
     setEditClockIn(toLocal(entry.clock_in));
     setEditClockOut(entry.clock_out ? toLocal(entry.clock_out) : "");
+    setEditTips(entry.tips ? String(entry.tips) : "");
   };
 
   const handleSaveEditEntry = async (entryId: number) => {
@@ -412,9 +447,10 @@ export default function TimeClock() {
         const utc = new Date(d.getTime() + diff);
         return utc.toISOString();
       };
-      const data: { clock_in?: string; clock_out?: string } = {};
+      const data: { clock_in?: string; clock_out?: string; tips?: number } = {};
       if (editClockIn) data.clock_in = toUTC(editClockIn);
       if (editClockOut) data.clock_out = toUTC(editClockOut);
+      if (editTips !== "") data.tips = parseFloat(editTips) || 0;
       await updateTimeEntry(entryId, data);
       showToast("success", "Entry updated");
       setEditingEntry(null);
@@ -596,8 +632,8 @@ export default function TimeClock() {
 
   const handleExport = () => {
     const params: { start_date?: string; end_date?: string; employee_id?: number } = {};
-    if (startDate) params.start_date = startDate;
-    if (endDate) params.end_date = endDate;
+    if (startDate) params.start_date = startTime ? `${startDate}T${startTime}:00` : startDate;
+    if (endDate) params.end_date = endTime ? `${endDate}T${endTime}:00` : endDate;
     if (filterEmployee) params.employee_id = filterEmployee;
     const url = getTimeclockExportUrl(params);
     const token = localStorage.getItem("token");
@@ -688,9 +724,12 @@ export default function TimeClock() {
   // Summary for timesheet — truncate to 2 decimal places (no rounding up)
   const totalHoursRaw = entries.reduce((sum, e) => sum + (e.hours || 0), 0);
   const totalHours = Math.floor(totalHoursRaw * 100) / 100;
-  const employeeSummary: Record<string, number> = {};
+  const totalTips = entries.reduce((sum, e) => sum + (e.tips || 0), 0);
+  const employeeSummary: Record<string, { hours: number; tips: number }> = {};
   entries.forEach((e) => {
-    employeeSummary[e.employee_name] = (employeeSummary[e.employee_name] || 0) + (e.hours || 0);
+    if (!employeeSummary[e.employee_name]) employeeSummary[e.employee_name] = { hours: 0, tips: 0 };
+    employeeSummary[e.employee_name].hours += (e.hours || 0);
+    employeeSummary[e.employee_name].tips += (e.tips || 0);
   });
 
   if (loading) {
@@ -866,21 +905,39 @@ export default function TimeClock() {
             <div className="flex flex-wrap gap-3 items-end">
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">Start Date</label>
-                <input
-                  type="date"
-                  value={startDate}
-                  onChange={(e) => { setStartDate(e.target.value); setPage(1); }}
-                  className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-green-500"
-                />
+                <div className="flex gap-1">
+                  <input
+                    type="date"
+                    value={startDate}
+                    onChange={(e) => { setStartDate(e.target.value); setPage(1); }}
+                    className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-green-500"
+                  />
+                  <input
+                    type="time"
+                    value={startTime}
+                    onChange={(e) => { setStartTime(e.target.value); setPage(1); }}
+                    className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm focus:ring-2 focus:ring-green-500 w-28"
+                    placeholder="Time"
+                  />
+                </div>
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">End Date</label>
-                <input
-                  type="date"
-                  value={endDate}
-                  onChange={(e) => { setEndDate(e.target.value); setPage(1); }}
-                  className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-green-500"
-                />
+                <div className="flex gap-1">
+                  <input
+                    type="date"
+                    value={endDate}
+                    onChange={(e) => { setEndDate(e.target.value); setPage(1); }}
+                    className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-green-500"
+                  />
+                  <input
+                    type="time"
+                    value={endTime}
+                    onChange={(e) => { setEndTime(e.target.value); setPage(1); }}
+                    className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm focus:ring-2 focus:ring-green-500 w-28"
+                    placeholder="Time"
+                  />
+                </div>
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">Employee</label>
@@ -895,6 +952,14 @@ export default function TimeClock() {
                   ))}
                 </select>
               </div>
+              <button
+                onClick={handleSyncTips}
+                disabled={syncingTips}
+                className="px-4 py-1.5 bg-purple-600 text-white text-sm font-medium rounded-lg hover:bg-purple-700 transition-colors flex items-center gap-2 disabled:opacity-50"
+              >
+                <RefreshCw className={`w-4 h-4 ${syncingTips ? "animate-spin" : ""}`} />
+                {syncingTips ? "Syncing..." : "Sync Tips"}
+              </button>
               <button
                 onClick={handleExport}
                 className="px-4 py-1.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2"
@@ -980,10 +1045,8 @@ export default function TimeClock() {
               <p className="text-2xl font-bold text-gray-900">{Object.keys(employeeSummary).length}</p>
             </div>
             <div className="bg-white border border-gray-200 rounded-lg p-4">
-              <p className="text-xs text-gray-500 mb-1">Avg Hours/Entry</p>
-              <p className="text-2xl font-bold text-gray-900">
-                {entries.length > 0 ? formatHours(Math.floor((totalHours / entries.length) * 100) / 100) : "0"}
-              </p>
+              <p className="text-xs text-gray-500 mb-1">Total Tips</p>
+              <p className="text-2xl font-bold text-green-700">${totalTips.toFixed(2)}</p>
             </div>
           </div>
 
@@ -992,17 +1055,18 @@ export default function TimeClock() {
             <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
               <table className="w-full text-sm">
                 <thead>
-                  <tr className="bg-gray-50 border-b border-gray-200">
-                    <th className="text-left px-4 py-2 font-medium text-gray-600">Employee</th>
-                    <th className="text-right px-4 py-2 font-medium text-gray-600">Pay Rate</th>
-                    <th className="text-right px-4 py-2 font-medium text-gray-600">Total Hours</th>
-                    <th className="text-right px-4 py-2 font-medium text-gray-600">Est. Pay</th>
-                  </tr>
+                    <tr className="bg-gray-50 border-b border-gray-200">
+                      <th className="text-left px-4 py-2 font-medium text-gray-600">Employee</th>
+                      <th className="text-right px-4 py-2 font-medium text-gray-600">Pay Rate</th>
+                      <th className="text-right px-4 py-2 font-medium text-gray-600">Total Hours</th>
+                      <th className="text-right px-4 py-2 font-medium text-gray-600">Tips</th>
+                      <th className="text-right px-4 py-2 font-medium text-gray-600">Est. Pay</th>
+                    </tr>
                 </thead>
                 <tbody>
                   {Object.entries(employeeSummary)
                     .sort(([a], [b]) => a.localeCompare(b))
-                    .map(([name, hrs]) => {
+                    .map(([name, data]) => {
                       const emp = employees.find((e) => e.name === name);
                       const rate = emp?.pay_rate ?? null;
                       return (
@@ -1011,9 +1075,12 @@ export default function TimeClock() {
                           <td className="px-4 py-2 text-right text-gray-600">
                             {rate !== null ? `$${rate.toFixed(2)}/hr` : "—"}
                           </td>
-                          <td className="px-4 py-2 text-right font-medium text-gray-900">{formatHours(hrs)}</td>
+                          <td className="px-4 py-2 text-right font-medium text-gray-900">{formatHours(data.hours)}</td>
                           <td className="px-4 py-2 text-right font-medium text-green-700">
-                            {rate !== null ? `$${(hrs * rate).toFixed(2)}` : "—"}
+                            ${data.tips.toFixed(2)}
+                          </td>
+                          <td className="px-4 py-2 text-right font-medium text-green-700">
+                            {rate !== null ? `$${(data.hours * rate + data.tips).toFixed(2)}` : "—"}
                           </td>
                         </tr>
                       );
@@ -1033,6 +1100,7 @@ export default function TimeClock() {
                   <th className="text-left px-4 py-2 font-medium text-gray-600">Clock In</th>
                   <th className="text-left px-4 py-2 font-medium text-gray-600">Clock Out</th>
                   <th className="text-right px-4 py-2 font-medium text-gray-600">Hours</th>
+                  <th className="text-right px-4 py-2 font-medium text-gray-600">Tips</th>
                   <th className="text-right px-4 py-2 font-medium text-gray-600">Actions</th>
                 </tr>
               </thead>
@@ -1067,6 +1135,21 @@ export default function TimeClock() {
                     </td>
                     <td className="px-4 py-2 text-right font-medium text-gray-900">
                       {e.hours !== null ? formatHours(e.hours) : "---"}
+                    </td>
+                    <td className="px-4 py-2 text-right text-green-700">
+                      {editingEntry === e.id ? (
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          value={editTips}
+                          onChange={(ev) => setEditTips(ev.target.value)}
+                          className="border border-gray-300 rounded px-2 py-1 text-xs w-20 text-right focus:ring-2 focus:ring-green-500"
+                          placeholder="0.00"
+                        />
+                      ) : (
+                        e.tips > 0 ? `$${e.tips.toFixed(2)}` : "—"
+                      )}
                     </td>
                     <td className="px-4 py-2 text-right">
                       <div className="flex items-center justify-end gap-1">
@@ -1111,7 +1194,7 @@ export default function TimeClock() {
                 ))}
                 {entries.length === 0 && (
                   <tr>
-                    <td colSpan={6} className="px-4 py-8 text-center text-gray-400">
+                    <td colSpan={7} className="px-4 py-8 text-center text-gray-400">
                       No time entries for this period
                     </td>
                   </tr>
