@@ -1119,19 +1119,28 @@ async def create_order(
         )
 
     await db.commit()
+    print(f"[order] Order {order_number} saved to DB (id={order_id}, fulfillment={order.fulfillment_type}, total=${order.total/100:.2f})")
 
     # Fetch SMTP settings while DB is still open
     smtp_settings = await _get_smtp_settings(db)
 
-    # Send email notifications (non-blocking)
-    asyncio.create_task(
+    # Send email notifications (non-blocking, with error logging)
+    def _log_task_error(task: asyncio.Task, label: str = "") -> None:
+        if task.cancelled():
+            print(f"[order] Background task {label} was cancelled for {order_number}")
+        elif task.exception():
+            print(f"[order] Background task {label} FAILED for {order_number}: {task.exception()}")
+
+    email_task = asyncio.create_task(
         _send_order_emails(smtp_settings, order, order_number, charge_id, payment_status)
     )
+    email_task.add_done_callback(lambda t: _log_task_error(t, "email"))
 
     # Deduct stock from correct Clover location based on fulfillment type (non-blocking)
-    asyncio.create_task(
+    stock_task = asyncio.create_task(
         _deduct_stock_for_order(order.items, order.fulfillment_type)
     )
+    stock_task.add_done_callback(lambda t: _log_task_error(t, "stock_deduct"))
 
     return {
         "success": True,
@@ -1228,7 +1237,7 @@ async def _get_smtp_settings(db: aiosqlite.Connection) -> dict[str, str]:
 
 
 def _send_smtp_email(smtp_settings: dict[str, str], to_email: str, subject: str, html_body: str) -> bool:
-    """Send an email via SMTP (synchronous)."""
+    """Send an email via SMTP (synchronous). to_email can be a single address or comma-separated list."""
     smtp_host = smtp_settings.get("smtp_host", "smtp.gmail.com")
     smtp_port = int(smtp_settings.get("smtp_port", "587"))
     smtp_user = smtp_settings.get("smtp_user", "")
@@ -1238,20 +1247,23 @@ def _send_smtp_email(smtp_settings: dict[str, str], to_email: str, subject: str,
         print("SMTP credentials not configured, skipping email")
         return False
 
+    # Support multiple recipients in a single SMTP session
+    recipients = [r.strip() for r in to_email.split(",") if r.strip()]
+
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = smtp_user
-    msg["To"] = to_email
+    msg["To"] = ", ".join(recipients)
     msg.attach(MIMEText(html_body, "html"))
 
     try:
         with smtplib.SMTP(smtp_host, smtp_port) as server:
             server.starttls()
             server.login(smtp_user, smtp_password)
-            server.send_message(msg)
+            server.sendmail(smtp_user, recipients, msg.as_string())
         return True
     except Exception as e:
-        print(f"Failed to send email to {to_email}: {e}")
+        print(f"Failed to send email to {recipients}: {e}")
         return False
 
 
@@ -1387,16 +1399,21 @@ async def _send_order_emails(
             store_recipients = [STORE_EMAIL]
 
         loop = asyncio.get_event_loop()
-        for recipient in store_recipients:
-            await loop.run_in_executor(
-                None,
-                _send_smtp_email,
-                smtp_settings,
-                recipient,
-                store_subject,
-                store_html,
-            )
-            print(f"Store notification sent to {recipient} for order {order_number}")
+        # Send to ALL store recipients in a single SMTP session to avoid
+        # Gmail rate-limiting or transient failures between connections.
+        all_store_recipients = ", ".join(store_recipients)
+        sent = await loop.run_in_executor(
+            None,
+            _send_smtp_email,
+            smtp_settings,
+            all_store_recipients,
+            store_subject,
+            store_html,
+        )
+        if sent:
+            print(f"Store notification sent to {store_recipients} for order {order_number}")
+        else:
+            print(f"FAILED to send store notification to {store_recipients} for order {order_number}")
 
         # --- Customer confirmation email ---
         customer_html = f"""
