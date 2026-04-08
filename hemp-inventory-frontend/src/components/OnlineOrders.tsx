@@ -280,7 +280,6 @@ export default function OnlineOrders() {
   const [refundError, setRefundError] = useState("");
   const [refundSuccess, setRefundSuccess] = useState("");
   const [refundType, setRefundType] = useState<"full" | "partial">("full");
-  const [partialRefundAmount, setPartialRefundAmount] = useState("");
   const [selectedRefundItems, setSelectedRefundItems] = useState<Record<string, boolean>>({});
 
   // Edit customer details state
@@ -476,7 +475,6 @@ export default function OnlineOrders() {
         setRefundingOrderId(null);
         setRefundSuccess("");
         setRefundType("full");
-        setPartialRefundAmount("");
         setSelectedRefundItems({});
       }, 4000);
     } catch (err: unknown) {
@@ -1173,7 +1171,7 @@ export default function OnlineOrders() {
                                 {processingRefund ? "Processing Refund..." : `Yes, Refund ${refundType === "partial" ? formatPrice(calcItemRefundSummary(order).total) : formatPrice(order.total)}`}
                               </button>
                               <button
-                                onClick={() => { setRefundConfirm(false); setRefundingOrderId(null); setRefundType("full"); setPartialRefundAmount(""); setSelectedRefundItems({}); }}
+                                onClick={() => { setRefundConfirm(false); setRefundingOrderId(null); setRefundType("full"); setSelectedRefundItems({}); }}
                                 disabled={processingRefund}
                                 className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm font-medium"
                               >
@@ -1186,7 +1184,7 @@ export default function OnlineOrders() {
                             {/* Refund Type Toggle */}
                             <div className="flex gap-2">
                               <button
-                                onClick={() => { setRefundType("full"); setPartialRefundAmount(""); setSelectedRefundItems({}); }}
+                                onClick={() => { setRefundType("full"); setSelectedRefundItems({}); }}
                                 className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${
                                   refundType === "full"
                                     ? "bg-red-600 text-white border-red-600"
@@ -1318,7 +1316,7 @@ export default function OnlineOrders() {
                                   : "Process Full Refund"}
                               </button>
                               <button
-                                onClick={() => { setRefundingOrderId(null); setRefundType("full"); setPartialRefundAmount(""); setSelectedRefundItems({}); }}
+                                onClick={() => { setRefundingOrderId(null); setRefundType("full"); setSelectedRefundItems({}); }}
                                 className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm font-medium"
                               >
                                 Cancel
