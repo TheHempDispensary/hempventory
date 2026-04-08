@@ -223,7 +223,7 @@ async def send_message(
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         response = client.messages.create(
             model=MODEL,
-            max_tokens=512,
+            max_tokens=1024,
             system=system,
             messages=messages,
         )
@@ -284,7 +284,13 @@ async def send_message(
         customer_email = parsed.get("customer_email")
     else:
         # Claude returned plain text — strip any trailing JSON fragments
-        assistant_message = re.sub(r'[,"\s]*"(intent|customer_name|customer_email)"\s*:.*$', '', raw_text, flags=re.DOTALL).strip()
+        # Common failure: Claude writes the message as plain text, then appends a JSON object
+        # e.g. "Hello!\n{\"message\": \"Hello!\"..." — strip the JSON suffix
+        json_suffix = re.search(r'\s*\{\s*"message"\s*:', raw_text)
+        if json_suffix:
+            assistant_message = raw_text[:json_suffix.start()].strip()
+        else:
+            assistant_message = re.sub(r'[,"\s]*"(intent|customer_name|customer_email)"\s*:.*$', '', raw_text, flags=re.DOTALL).strip()
 
     # Clean up literal backslash-n sequences that Claude sometimes embeds
     assistant_message = assistant_message.replace("\\n", "\n").replace("\\t", " ")

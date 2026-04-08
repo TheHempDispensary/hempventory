@@ -1262,9 +1262,8 @@ async def update_item(
         await db.execute(
             """INSERT INTO product_descriptions (sku, product_name, description, updated_at)
                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-               ON CONFLICT(sku) DO UPDATE SET
+               ON CONFLICT(sku, product_name) DO UPDATE SET
                    description = excluded.description,
-                   product_name = COALESCE(excluded.product_name, product_descriptions.product_name),
                    updated_at = CURRENT_TIMESTAMP""",
             (sku, product_name, item.description),
         )
@@ -1316,9 +1315,8 @@ async def bulk_update_descriptions(
             await db.execute(
                 """INSERT INTO product_descriptions (sku, product_name, description, updated_at)
                    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-                   ON CONFLICT(sku) DO UPDATE SET
+                   ON CONFLICT(sku, product_name) DO UPDATE SET
                        description = excluded.description,
-                       product_name = COALESCE(excluded.product_name, product_descriptions.product_name),
                        updated_at = CURRENT_TIMESTAMP""",
                 (item.sku, item.product_name, item.description),
             )

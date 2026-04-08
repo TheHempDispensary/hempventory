@@ -473,12 +473,41 @@ async def init_db():
         await db.execute("""
             CREATE TABLE IF NOT EXISTS product_descriptions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                sku TEXT NOT NULL UNIQUE,
+                sku TEXT NOT NULL,
                 product_name TEXT,
                 description TEXT NOT NULL,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(sku, product_name)
             )
         """)
+        # Migration: rebuild product_descriptions with composite unique key (sku, product_name)
+        # Old schema had UNIQUE(sku) which broke products sharing the same SKU (e.g. syringes)
+        try:
+            cursor = await db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='product_descriptions'")
+            row = await cursor.fetchone()
+            if row:
+                create_sql = row[0] if isinstance(row, tuple) else row['sql']
+                if 'UNIQUE(sku, product_name)' not in create_sql and 'sku TEXT NOT NULL UNIQUE' in create_sql:
+                    # Need to migrate: rename old table, create new one, copy data
+                    await db.execute("ALTER TABLE product_descriptions RENAME TO product_descriptions_old")
+                    await db.execute("""
+                        CREATE TABLE product_descriptions (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            sku TEXT NOT NULL,
+                            product_name TEXT,
+                            description TEXT NOT NULL,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            UNIQUE(sku, product_name)
+                        )
+                    """)
+                    await db.execute("""
+                        INSERT OR IGNORE INTO product_descriptions (sku, product_name, description, updated_at)
+                        SELECT sku, product_name, description, updated_at FROM product_descriptions_old
+                    """)
+                    await db.execute("DROP TABLE product_descriptions_old")
+                    print("[migration] Rebuilt product_descriptions with composite UNIQUE(sku, product_name)")
+        except Exception as e:
+            print(f"[migration] product_descriptions migration check: {e}")
         # Product attributes table (effect, strength & type for ecommerce filtering)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS product_attributes (
