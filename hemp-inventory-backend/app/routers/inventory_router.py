@@ -10,6 +10,7 @@ import json
 import io
 import itertools
 import time
+import re
 import httpx
 from PIL import Image as PILImage
 
@@ -197,6 +198,13 @@ async def _do_sync(db: aiosqlite.Connection) -> dict:
 
             categories = item.get("categories", {}).get("elements", [])
             category_names = [c.get("name", "") for c in categories]
+
+            # Remap apparel items (hoodies, t-shirts, shirts) to "Apparel" category
+            name_lower = item_name.lower()
+            if re.search(r'\b(hoodie|t-shirt|shirt|tee|jersey|hat|beanie)\b', name_lower):
+                category_names = [c if c != "Accessories" else "Apparel" for c in category_names]
+                if not category_names:
+                    category_names = ["Apparel"]
 
             par = par_levels.get((display_sku, loc_id), None)
 
