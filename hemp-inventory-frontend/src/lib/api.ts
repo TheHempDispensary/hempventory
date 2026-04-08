@@ -510,8 +510,8 @@ export const resendOrderConfirmation = (orderId: number) =>
   api.post(`/api/ecommerce/orders/${orderId}/resend-confirmation`);
 
 // Refunds
-export const refundOrder = (orderId: number, amount?: number) =>
-  api.post(`/api/ecommerce/orders/${orderId}/refund`, amount ? { amount } : {});
+export const refundOrder = (orderId: number, data?: { amount?: number; refunded_items?: { product_id: string; product_name: string; sku: string; price: number; quantity: number }[] }) =>
+  api.post(`/api/ecommerce/orders/${orderId}/refund`, data || {});
 
 // Promo / Discount Management
 export const getPromos = () => api.get("/api/ecommerce/promos");

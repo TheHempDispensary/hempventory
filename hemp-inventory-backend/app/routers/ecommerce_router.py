@@ -1814,13 +1814,67 @@ async def resend_order_confirmation(
     return {"success": True, "order_id": order_id, "email": customer_email}
 
 
+async def _restock_items(items: list, fulfillment_type: str = "shipping") -> None:
+    """Re-add stock to the correct Clover location when items are refunded (inverse of _deduct_stock_for_order)."""
+    try:
+        if fulfillment_type == "pickup_west" and WEST_MERCHANT_ID and WEST_API_TOKEN:
+            merchant_id = WEST_MERCHANT_ID
+            api_token = WEST_API_TOKEN
+        elif fulfillment_type == "pickup_east" and EAST_MERCHANT_ID and EAST_API_TOKEN:
+            merchant_id = EAST_MERCHANT_ID
+            api_token = EAST_API_TOKEN
+        else:
+            merchant_id = HQ_MERCHANT_ID
+            api_token = HQ_API_TOKEN
+        base = f"{CLOVER_BASE_URL}/merchants/{merchant_id}"
+        headers = {"Authorization": f"Bearer {api_token}"}
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for item in items:
+                clover_item_id = item.get("product_id", "")
+                qty = item.get("quantity", 1)
+                name = item.get("product_name", "unknown")
+                if not clover_item_id:
+                    print(f"[restock] Skipping restock for '{name}' — no product_id")
+                    continue
+                try:
+                    resp = await client.get(f"{base}/item_stocks/{clover_item_id}", headers=headers)
+                    if resp.status_code != 200:
+                        print(f"[restock] Could not get stock for {clover_item_id} ({name}): {resp.status_code}")
+                        continue
+                    stock_data = resp.json()
+                    current_stock = stock_data.get("quantity", 0)
+                    new_stock = current_stock + qty
+                    update_resp = await client.post(
+                        f"{base}/item_stocks/{clover_item_id}",
+                        headers={**headers, "Content-Type": "application/json"},
+                        json={"quantity": new_stock},
+                    )
+                    if update_resp.status_code in (200, 201):
+                        print(f"[restock] Restocked {qty} of '{name}' ({clover_item_id}): {current_stock} -> {new_stock}")
+                    else:
+                        print(f"[restock] Failed to restock {clover_item_id}: {update_resp.status_code} {update_resp.text[:200]}")
+                except Exception as e:
+                    print(f"[restock] Error restocking '{name}': {e}")
+
+        invalidate_product_cache()
+        print(f"[restock] Restock complete for {len(items)} item(s), cache invalidated")
+    except Exception as e:
+        print(f"[restock] Restock task failed: {e}")
+
+
 @router.post("/orders/{order_id}/refund")
 async def refund_order(
     order_id: int,
     request: Request,
     db: aiosqlite.Connection = Depends(get_db),
 ):
-    """Refund an order via Clover (requires admin auth)."""
+    """Refund an order via Clover (requires admin auth).
+    Supports full refund, dollar-amount partial refund, and item-level partial refund with inventory restock.
+    Body params:
+      - amount (int, optional): partial refund in cents
+      - refunded_items (list, optional): [{product_id, product_name, sku, price, quantity}] for item-level refund
+    """
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Authentication required")
@@ -1835,10 +1889,11 @@ async def refund_order(
 
     body = await request.json()
     refund_amount = body.get("amount")  # Optional: partial refund in cents
+    refunded_items = body.get("refunded_items")  # Optional: list of items to refund
 
     # Get order details
     async with db.execute(
-        "SELECT charge_id, total, payment_status FROM ecommerce_orders WHERE id = ?",
+        "SELECT charge_id, total, tax, subtotal, payment_status, fulfillment_type FROM ecommerce_orders WHERE id = ?",
         (order_id,),
     ) as cursor:
         row = await cursor.fetchone()
@@ -1846,7 +1901,7 @@ async def refund_order(
     if not row:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    charge_id, order_total, payment_status = row
+    charge_id, order_total, order_tax, order_subtotal, payment_status, fulfillment_type = row
 
     if payment_status == "refunded":
         raise HTTPException(status_code=400, detail="Order has already been refunded")
@@ -1854,18 +1909,48 @@ async def refund_order(
     if not charge_id:
         raise HTTPException(status_code=400, detail="No charge ID found for this order — cannot refund")
 
-    amount = refund_amount if refund_amount else order_total
+    # Calculate refund amount based on item selection or explicit amount
+    if refunded_items and len(refunded_items) > 0:
+        # Item-level partial refund: calculate subtotal of selected items
+        items_subtotal = sum(item["price"] * item["quantity"] for item in refunded_items)
+        # Calculate proportional tax: (items_subtotal / order_subtotal) * order_tax
+        if order_subtotal and order_subtotal > 0:
+            tax_proportion = items_subtotal / order_subtotal
+            items_tax = round(order_tax * tax_proportion)
+        else:
+            items_tax = 0
+        amount = items_subtotal + items_tax
+        print(f"[refund] Item-level refund: items_subtotal={items_subtotal}, tax={items_tax}, total={amount}")
+
+        # Check if all items are being refunded (= full refund)
+        item_cursor = await db.execute(
+            "SELECT product_id, quantity FROM ecommerce_order_items WHERE order_id = ?",
+            (order_id,),
+        )
+        all_items = await item_cursor.fetchall()
+        all_item_map = {}
+        for r in all_items:
+            all_item_map[r[0]] = all_item_map.get(r[0], 0) + r[1]
+        refund_item_map = {}
+        for ri in refunded_items:
+            refund_item_map[ri["product_id"]] = refund_item_map.get(ri["product_id"], 0) + ri["quantity"]
+        is_full_refund = (all_item_map == refund_item_map)
+    elif refund_amount:
+        amount = refund_amount
+        is_full_refund = (amount >= order_total)
+    else:
+        amount = order_total
+        is_full_refund = True
 
     # Call Clover refund API
-    import httpx
     refund_url = "https://scl.clover.com/v1/refunds"
     refund_headers = {
         "Authorization": f"Bearer {HQ_ECOMM_TOKEN}",
         "Content-Type": "application/json",
     }
     refund_data: dict = {"charge": charge_id, "reason": "requested_by_customer"}
-    if refund_amount:
-        refund_data["amount"] = refund_amount
+    if not is_full_refund:
+        refund_data["amount"] = amount
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -1877,19 +1962,22 @@ async def refund_order(
             except Exception:
                 # Clover sometimes returns non-JSON responses
                 if resp.status_code in (200, 201):
-                    # Refund succeeded but response wasn't JSON
-                    new_status = "refunded"
+                    new_status = "refunded" if is_full_refund else "partially_refunded"
                     await db.execute(
                         "UPDATE ecommerce_orders SET payment_status = ?, refund_amount = ? WHERE id = ?",
                         (new_status, amount, order_id),
                     )
                     await db.commit()
+                    # Restock items in background if item-level refund
+                    if refunded_items:
+                        asyncio.create_task(_restock_items(refunded_items, fulfillment_type or "shipping"))
                     return {
                         "success": True,
                         "order_id": order_id,
                         "refund_id": "",
                         "refund_amount": amount,
                         "status": new_status,
+                        "restocked_items": len(refunded_items) if refunded_items else 0,
                     }
                 raise HTTPException(
                     status_code=400,
@@ -1898,18 +1986,22 @@ async def refund_order(
 
             if resp.status_code in (200, 201):
                 refund_id = result.get("id", "")
-                new_status = "refunded"
+                new_status = "refunded" if is_full_refund else "partially_refunded"
                 await db.execute(
                     "UPDATE ecommerce_orders SET payment_status = ?, refund_id = ?, refund_amount = ? WHERE id = ?",
                     (new_status, refund_id, amount, order_id),
                 )
                 await db.commit()
+                # Restock items in background if item-level refund
+                if refunded_items:
+                    asyncio.create_task(_restock_items(refunded_items, fulfillment_type or "shipping"))
                 return {
                     "success": True,
                     "order_id": order_id,
                     "refund_id": refund_id,
                     "refund_amount": amount,
                     "status": new_status,
+                    "restocked_items": len(refunded_items) if refunded_items else 0,
                 }
             else:
                 error_msg = result.get("message") or result.get("error", {}).get("message", "Refund failed")

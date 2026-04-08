@@ -85,7 +85,7 @@ export default function Inventory() {
   }>({
     name: "", price: "", sku: "", category: "", stocks: {}, pars: {},
     price_type: "FIXED", cost: "", product_code: "", alternate_name: "",
-    description: "", color_code: "", is_revenue: true, is_age_restricted: false,
+    description: "", color_code: "", is_revenue: true, is_age_restricted: true,
     age_restriction_type: "Vitamin & Supplements", age_restriction_min_age: "21",
     available: true, hidden: false, auto_manage: true, default_tax_rates: true,
   });
@@ -142,7 +142,7 @@ export default function Inventory() {
   }>({
     name: "", price: "", stocks: {}, pars: {},
     price_type: "FIXED", cost: "", product_code: "", alternate_name: "",
-    description: "", color_code: "", is_revenue: true, is_age_restricted: false,
+    description: "", color_code: "", is_revenue: true, is_age_restricted: true,
     age_restriction_type: "Vitamin & Supplements", age_restriction_min_age: "21",
     available: true, hidden: false, auto_manage: false, default_tax_rates: true,
     effect: "", strength: "", product_type: "",
@@ -234,7 +234,7 @@ export default function Inventory() {
       setNewItem({
         name: "", price: "", sku: "", category: "", stocks: {}, pars: {},
         price_type: "FIXED", cost: "", product_code: "", alternate_name: "",
-        description: "", color_code: "", is_revenue: true, is_age_restricted: false,
+        description: "", color_code: "", is_revenue: true, is_age_restricted: true,
         age_restriction_type: "Vitamin & Supplements", age_restriction_min_age: "21",
           available: true, hidden: false, auto_manage: true, default_tax_rates: true,
         });
@@ -553,7 +553,7 @@ export default function Inventory() {
       setNewItem({
         name: "", price: "", sku: "", category: "", stocks: {}, pars: {},
         price_type: "FIXED", cost: "", product_code: "", alternate_name: "",
-        description: "", color_code: "", is_revenue: true, is_age_restricted: false,
+        description: "", color_code: "", is_revenue: true, is_age_restricted: true,
         age_restriction_type: "Vitamin & Supplements", age_restriction_min_age: "21",
           available: true, hidden: false, auto_manage: true, default_tax_rates: true,
         });
@@ -614,7 +614,7 @@ export default function Inventory() {
       description: item.description || "",
       color_code: item.color_code || "",
       is_revenue: item.is_revenue !== undefined ? item.is_revenue : true,
-      is_age_restricted: item.is_age_restricted || false,
+      is_age_restricted: true,
       age_restriction_type: item.age_restriction_type || "Vitamin & Supplements",
       age_restriction_min_age: item.age_restriction_min_age ? item.age_restriction_min_age.toString() : "21",
       available: item.available !== undefined ? item.available : true,
@@ -699,11 +699,9 @@ export default function Inventory() {
       updateData.hidden = editForm.hidden;
       updateData.auto_manage = editForm.auto_manage;
       updateData.default_tax_rates = editForm.default_tax_rates;
-      updateData.is_age_restricted = editForm.is_age_restricted;
-      if (editForm.is_age_restricted && editForm.age_restriction_type) {
-        updateData.age_restriction_type = editForm.age_restriction_type;
-        updateData.age_restriction_min_age = parseInt(editForm.age_restriction_min_age) || 21;
-      }
+      updateData.is_age_restricted = true;
+      updateData.age_restriction_type = "Vitamin & Supplements";
+      updateData.age_restriction_min_age = 21;
 
       // Save PAR level changes
       const parPromises: Promise<unknown>[] = [];
@@ -1444,53 +1442,13 @@ export default function Inventory() {
                       <option value="#95a5a6">Gray</option>
                     </select>
                   </div>
-                  <label className="flex items-center gap-3 px-3 py-2.5 bg-gray-50 rounded-lg cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={newItem.is_age_restricted}
-                      onChange={(e) => {
-                        const checked = e.target.checked;
-                        setNewItem({ ...newItem, is_age_restricted: checked });
-                        if (checked && ageRestrictionTypes.length === 0) {
-                          getAgeRestrictionTypes().then(res => setAgeRestrictionTypes(res.data.types)).catch(() => {});
-                        }
-                      }}
-                      className="w-4 h-4 text-green-600 rounded focus:ring-green-500"
-                    />
+                  <div className="flex items-center gap-3 px-3 py-2.5 bg-amber-50 rounded-lg border border-amber-200">
+                    <span className="inline-flex items-center justify-center w-8 h-8 rounded-full bg-amber-100 text-amber-700 font-bold text-sm">21+</span>
                     <div>
-                      <span className="text-sm font-medium text-gray-700">This is an age-restricted item</span>
-                      <p className="text-xs text-gray-400">This item requires additional confirmation or approval during the item fulfillment process. For example, alcoholic beverages.</p>
+                      <span className="text-sm font-medium text-amber-800">Age Restricted — 21+ Required</span>
+                      <p className="text-xs text-amber-600">All products are age-restricted (Vitamin & Supplements, min. age 21). This cannot be changed.</p>
                     </div>
-                  </label>
-                  {newItem.is_age_restricted && (
-                    <div className="grid grid-cols-2 gap-3 pl-4 border-l-2 border-green-200">
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Type of restriction *</label>
-                        <select
-                          value={newItem.age_restriction_type}
-                          onChange={(e) => setNewItem({ ...newItem, age_restriction_type: e.target.value })}
-                          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-green-500 outline-none"
-                        >
-                          <option value="">Select</option>
-                          <option value="Alcohol">Alcohol</option>
-                          <option value="Tobacco">Tobacco</option>
-                          <option value="OTC drugs">OTC drugs</option>
-                          <option value="Vitamin & Supplements">Vitamin & Supplements</option>
-                        </select>
-                      </div>
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Min. Age *</label>
-                        <input
-                          type="number"
-                          value={newItem.age_restriction_min_age}
-                          onChange={(e) => setNewItem({ ...newItem, age_restriction_min_age: e.target.value })}
-                          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 outline-none"
-                          placeholder="21"
-                          min="1"
-                        />
-                      </div>
-                    </div>
-                  )}
+                  </div>
                 </>
               )}
 
@@ -2084,53 +2042,13 @@ export default function Inventory() {
                     </div>
                     <p className="text-xs text-gray-400 mt-1">Categories can be managed from the Clover dashboard.</p>
                   </div>
-                  <label className="flex items-center gap-3 px-3 py-2.5 bg-gray-50 rounded-lg cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={editForm.is_age_restricted}
-                      onChange={(e) => {
-                        const checked = e.target.checked;
-                        setEditForm({ ...editForm, is_age_restricted: checked });
-                        if (checked && ageRestrictionTypes.length === 0) {
-                          getAgeRestrictionTypes().then(res => setAgeRestrictionTypes(res.data.types)).catch(() => {});
-                        }
-                      }}
-                      className="w-4 h-4 text-green-600 rounded focus:ring-green-500"
-                    />
+                  <div className="flex items-center gap-3 px-3 py-2.5 bg-amber-50 rounded-lg border border-amber-200">
+                    <span className="inline-flex items-center justify-center w-8 h-8 rounded-full bg-amber-100 text-amber-700 font-bold text-sm">21+</span>
                     <div>
-                      <span className="text-sm font-medium text-gray-700">This is an age-restricted item</span>
-                      <p className="text-xs text-gray-400">Requires additional confirmation or approval during fulfillment.</p>
+                      <span className="text-sm font-medium text-amber-800">Age Restricted — 21+ Required</span>
+                      <p className="text-xs text-amber-600">All products are age-restricted (Vitamin & Supplements, min. age 21). This cannot be changed.</p>
                     </div>
-                  </label>
-                  {editForm.is_age_restricted && (
-                    <div className="grid grid-cols-2 gap-3 pl-4 border-l-2 border-green-200">
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Type of restriction *</label>
-                        <select
-                          value={editForm.age_restriction_type}
-                          onChange={(e) => setEditForm({ ...editForm, age_restriction_type: e.target.value })}
-                          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-green-500 outline-none"
-                        >
-                          <option value="">Select</option>
-                          <option value="Alcohol">Alcohol</option>
-                          <option value="Tobacco">Tobacco</option>
-                          <option value="OTC drugs">OTC drugs</option>
-                          <option value="Vitamin & Supplements">Vitamin & Supplements</option>
-                        </select>
-                      </div>
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Min. Age *</label>
-                        <input
-                          type="number"
-                          value={editForm.age_restriction_min_age}
-                          onChange={(e) => setEditForm({ ...editForm, age_restriction_min_age: e.target.value })}
-                          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 outline-none"
-                          placeholder="21"
-                          min="1"
-                        />
-                      </div>
-                    </div>
-                  )}
+                  </div>
                 </>
               )}
 
