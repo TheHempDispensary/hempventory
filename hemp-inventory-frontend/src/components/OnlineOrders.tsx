@@ -279,6 +279,8 @@ export default function OnlineOrders() {
   const [processingRefund, setProcessingRefund] = useState(false);
   const [refundError, setRefundError] = useState("");
   const [refundSuccess, setRefundSuccess] = useState("");
+  const [refundType, setRefundType] = useState<"full" | "partial">("full");
+  const [partialRefundAmount, setPartialRefundAmount] = useState("");
 
   // Edit customer details state
   const [editingCustomer, setEditingCustomer] = useState<number | null>(null);
@@ -418,22 +420,25 @@ export default function OnlineOrders() {
     }
   };
 
-  const handleRefund = async (order: Order) => {
+  const handleRefund = async (order: Order, amount?: number) => {
     setProcessingRefund(true);
     setRefundError("");
     setRefundSuccess("");
     try {
-      await refundOrder(order.id);
+      const refundAmountCents = amount || order.total;
+      await refundOrder(order.id, amount);
       setOrders((prev) =>
         prev.map((o) =>
-          o.id === order.id ? { ...o, payment_status: "refunded" } : o
+          o.id === order.id ? { ...o, payment_status: amount ? "partially_refunded" : "refunded" } : o
         )
       );
-      setRefundSuccess(`Refund of ${formatPrice(order.total)} processed successfully.`);
+      setRefundSuccess(`Refund of ${formatPrice(refundAmountCents)} processed successfully.`);
       setRefundConfirm(false);
       setTimeout(() => {
         setRefundingOrderId(null);
         setRefundSuccess("");
+        setRefundType("full");
+        setPartialRefundAmount("");
       }, 3000);
     } catch (err: unknown) {
       const msg = (err && typeof err === "object" && "response" in err)
@@ -1117,19 +1122,26 @@ export default function OnlineOrders() {
                         ) : refundConfirm ? (
                           <div className="space-y-3">
                             <p className="text-sm text-red-800">
-                              <strong>Are you sure?</strong> This will refund <strong>{formatPrice(order.total)}</strong> to the customer&apos;s original payment method. This action cannot be undone.
+                              <strong>Are you sure?</strong> This will refund <strong>{refundType === "partial" ? `$${partialRefundAmount}` : formatPrice(order.total)}</strong> to the customer&apos;s original payment method. This action cannot be undone.
                             </p>
                             <div className="flex gap-2">
                               <button
-                                onClick={() => handleRefund(order)}
+                                onClick={() => {
+                                  if (refundType === "partial") {
+                                    const cents = Math.round(parseFloat(partialRefundAmount) * 100);
+                                    handleRefund(order, cents);
+                                  } else {
+                                    handleRefund(order);
+                                  }
+                                }}
                                 disabled={processingRefund}
                                 className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 transition-colors text-sm font-medium"
                               >
                                 {processingRefund ? <Loader2 className="w-4 h-4 animate-spin" /> : <DollarSign className="w-4 h-4" />}
-                                {processingRefund ? "Processing Refund..." : `Yes, Refund ${formatPrice(order.total)}`}
+                                {processingRefund ? "Processing Refund..." : `Yes, Refund ${refundType === "partial" ? `$${partialRefundAmount}` : formatPrice(order.total)}`}
                               </button>
                               <button
-                                onClick={() => { setRefundConfirm(false); setRefundingOrderId(null); }}
+                                onClick={() => { setRefundConfirm(false); setRefundingOrderId(null); setRefundType("full"); setPartialRefundAmount(""); }}
                                 disabled={processingRefund}
                                 className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm font-medium"
                               >
@@ -1159,23 +1171,83 @@ export default function OnlineOrders() {
                                 <span>{formatPrice(order.tax)}</span>
                               </div>
                               <div className="flex justify-between text-sm font-bold mt-1 pt-1 border-t border-gray-200">
-                                <span>Refund Total:</span>
+                                <span>Order Total:</span>
                                 <span className="text-red-600">{formatPrice(order.total)}</span>
                               </div>
                             </div>
+
+                            {/* Refund Type Toggle */}
+                            <div className="flex gap-2">
+                              <button
+                                onClick={() => { setRefundType("full"); setPartialRefundAmount(""); }}
+                                className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${
+                                  refundType === "full"
+                                    ? "bg-red-600 text-white border-red-600"
+                                    : "bg-white text-gray-700 border-gray-300 hover:border-red-300"
+                                }`}
+                              >
+                                Full Refund
+                              </button>
+                              <button
+                                onClick={() => setRefundType("partial")}
+                                className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${
+                                  refundType === "partial"
+                                    ? "bg-red-600 text-white border-red-600"
+                                    : "bg-white text-gray-700 border-gray-300 hover:border-red-300"
+                                }`}
+                              >
+                                Partial Refund
+                              </button>
+                            </div>
+
+                            {/* Partial Refund Amount Input */}
+                            {refundType === "partial" && (
+                              <div className="flex items-center gap-2">
+                                <span className="text-sm font-medium text-gray-700">Refund Amount:</span>
+                                <div className="relative">
+                                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">$</span>
+                                  <input
+                                    type="number"
+                                    step="0.01"
+                                    min="0.01"
+                                    max={(order.total / 100).toFixed(2)}
+                                    value={partialRefundAmount}
+                                    onChange={(e) => setPartialRefundAmount(e.target.value)}
+                                    placeholder="0.00"
+                                    className="w-32 pl-7 pr-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-red-500 focus:border-red-500"
+                                  />
+                                </div>
+                                <span className="text-xs text-gray-500">of {formatPrice(order.total)}</span>
+                              </div>
+                            )}
+
                             {refundError && (
                               <div className="text-sm text-red-600 bg-red-100 p-3 rounded-lg">{refundError}</div>
                             )}
                             <div className="flex gap-2">
                               <button
-                                onClick={() => setRefundConfirm(true)}
+                                onClick={() => {
+                                  if (refundType === "partial") {
+                                    const amt = parseFloat(partialRefundAmount);
+                                    if (!amt || amt <= 0) {
+                                      setRefundError("Please enter a valid refund amount.");
+                                      return;
+                                    }
+                                    if (amt > order.total / 100) {
+                                      setRefundError(`Refund amount cannot exceed order total of ${formatPrice(order.total)}.`);
+                                      return;
+                                    }
+                                  }
+                                  setRefundError("");
+                                  setRefundConfirm(true);
+                                }}
                                 className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-sm font-medium"
                               >
                                 <RotateCcw className="w-4 h-4" />
-                                Process Full Refund
+                                {refundType === "partial" ? `Refund $${partialRefundAmount || "0.00"}` : "Process Full Refund"}
                               </button>
                               <button
-                                onClick={() => setRefundingOrderId(null)}
+                                onClick={() => { setRefundingOrderId(null); setRefundType("full"); setPartialRefundAmount(""); }}
                                 className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm font-medium"
                               >
                                 Cancel
