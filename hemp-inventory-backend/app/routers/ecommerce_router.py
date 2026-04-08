@@ -9,6 +9,7 @@ import json
 import smtplib
 import asyncio
 import os
+import re
 from urllib.parse import quote as url_quote
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -285,7 +286,7 @@ async def _fetch_and_cache_products() -> dict:
 
             # Remap apparel items (hoodies, t-shirts, shirts) to "Apparel" category
             name_lower = name.lower()
-            is_apparel = any(kw in name_lower for kw in ("hoodie", "t-shirt", "shirt", "tee ", "jersey", "hat", "cap", "beanie"))
+            is_apparel = bool(re.search(r'\b(hoodie|t-shirt|shirt|tee|jersey|hat|beanie)\b', name_lower))
             if is_apparel:
                 item_categories = [c if c != "Accessories" else "Apparel" for c in item_categories]
                 if not item_categories:
