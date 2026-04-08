@@ -2300,3 +2300,72 @@ async def address_autocomplete(q: str):
             return results
     except Exception:
         return []
+
+
+# ── Public Order Lookup (for customers) ─────────────────────────────────
+
+@router.get("/orders/lookup")
+async def lookup_customer_orders(
+    email: Optional[str] = None,
+    phone: Optional[str] = None,
+    order_number: Optional[str] = None,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Public endpoint: customers look up their orders by email, phone, or order number.
+    No auth required. Returns order summary with tracking info but no sensitive payment details."""
+    if not email and not phone and not order_number:
+        raise HTTPException(status_code=400, detail="Provide email, phone, or order_number")
+
+    where_clauses = []
+    params: list = []
+
+    if order_number:
+        where_clauses.append("o.order_number = ?")
+        params.append(order_number)
+    if email:
+        where_clauses.append("LOWER(o.customer_email) = LOWER(?)")
+        params.append(email)
+    if phone:
+        # Normalize phone: strip non-digits for comparison
+        digits = re.sub(r'\D', '', phone)
+        if len(digits) >= 10:
+            # Match last 10 digits
+            where_clauses.append(
+                "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(o.customer_phone, '-', ''), '(', ''), ')', ''), ' ', ''), '+', '') LIKE ?"
+            )
+            params.append(f"%{digits[-10:]}")
+
+    if not where_clauses:
+        return {"orders": [], "total": 0}
+
+    where_sql = " OR ".join(where_clauses)
+    query = f"""
+        SELECT o.order_number, o.status, o.customer_first_name, o.customer_last_name,
+               o.customer_email, o.subtotal, o.shipping_cost, o.tax, o.total,
+               o.discount, o.promo_code, o.fulfillment_type, o.shipping_service,
+               o.tracking_number, o.tracking_url, o.tracking_status,
+               o.payment_status, o.created_at, o.id
+        FROM ecommerce_orders o
+        WHERE ({where_sql})
+        ORDER BY o.created_at DESC
+        LIMIT 50
+    """
+
+    cursor = await db.execute(query, params)
+    columns = [desc[0] for desc in cursor.description]
+    rows = await cursor.fetchall()
+    orders = []
+    for row in rows:
+        order = dict(zip(columns, row))
+        order_id = order.pop("id")
+        # Fetch items
+        item_cursor = await db.execute(
+            "SELECT product_name, sku, price, quantity FROM ecommerce_order_items WHERE order_id = ?",
+            (order_id,),
+        )
+        item_cols = [desc[0] for desc in item_cursor.description]
+        item_rows = await item_cursor.fetchall()
+        order["items"] = [dict(zip(item_cols, r)) for r in item_rows]
+        orders.append(order)
+
+    return {"orders": orders, "total": len(orders)}
