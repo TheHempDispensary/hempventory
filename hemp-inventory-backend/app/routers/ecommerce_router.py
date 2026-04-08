@@ -321,7 +321,10 @@ async def _fetch_and_cache_products() -> dict:
             if not image_url:
                 image_url = image_by_name.get(name.upper())
 
-            slug = name.lower().replace(" ", "-").replace(",", "").replace(".", "")
+            slug = name.lower()
+            slug = slug.replace("/", "-").replace('"', "").replace("(", "").replace(")", "").replace("$", "").replace("'", "").replace("&", "-and-")
+            slug = slug.replace(" ", "-").replace(",", "").replace(".", "")
+            slug = re.sub(r"-+", "-", slug).strip("-")
             slug = "-".join(slug.split())
 
             # LeafLife products (SKU starts with LF-) are shipped from supplier, not available for pickup
