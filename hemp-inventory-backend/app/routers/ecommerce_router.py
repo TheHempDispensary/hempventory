@@ -1079,59 +1079,116 @@ async def create_order(
     # Payment succeeded — create the order
     order_number = "HD-" + hex(int(time.time()))[2:].upper() + "-" + str(int(time.time() * 1000) % 10000)
 
-    cursor = await db.execute(
-        """INSERT INTO ecommerce_orders
-           (order_number, customer_first_name, customer_last_name, customer_email, customer_phone,
-            shipping_address, shipping_apartment, shipping_city, shipping_state, shipping_zip,
-            subtotal, discount, promo_code, shipping_cost, tax, total, notes, charge_id, payment_status, fulfillment_type, shipping_service)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            order_number,
-            order.customer.first_name,
-            order.customer.last_name,
-            order.customer.email,
-            order.customer.phone,
-            order.shipping_address.address,
-            order.shipping_address.apartment,
-            order.shipping_address.city,
-            order.shipping_address.state,
-            order.shipping_address.zip,
-            order.subtotal,
-            order.discount,
-            order.promo_code or "",
-            order.shipping_cost,
-            order.tax,
-            order.total,
-            order.notes,
-            charge_id,
-            payment_status,
-            order.fulfillment_type,
-            order.shipping_service,
-        ),
-    )
-    order_id = cursor.lastrowid
-
-    for item in order.items:
-        await db.execute(
-            """INSERT INTO ecommerce_order_items (order_id, product_id, product_name, sku, price, quantity)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (order_id, item.product_id, item.name, item.sku, item.price, item.quantity),
+    # CRITICAL: DB save is wrapped in try/except so paid orders are NEVER lost silently.
+    # If the DB insert fails after payment, we log the full order details for manual recovery.
+    order_id = 0
+    db_save_ok = False
+    try:
+        cursor = await db.execute(
+            """INSERT INTO ecommerce_orders
+               (order_number, customer_first_name, customer_last_name, customer_email, customer_phone,
+                shipping_address, shipping_apartment, shipping_city, shipping_state, shipping_zip,
+                subtotal, discount, promo_code, shipping_cost, tax, total, notes, charge_id, payment_status, fulfillment_type, shipping_service)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                order_number,
+                order.customer.first_name,
+                order.customer.last_name,
+                order.customer.email,
+                order.customer.phone,
+                order.shipping_address.address,
+                order.shipping_address.apartment,
+                order.shipping_address.city,
+                order.shipping_address.state,
+                order.shipping_address.zip,
+                order.subtotal,
+                order.discount,
+                order.promo_code or "",
+                order.shipping_cost,
+                order.tax,
+                order.total,
+                order.notes,
+                charge_id,
+                payment_status,
+                order.fulfillment_type,
+                order.shipping_service,
+            ),
         )
+        order_id = cursor.lastrowid
 
-    await db.commit()
+        for item in order.items:
+            await db.execute(
+                """INSERT INTO ecommerce_order_items (order_id, product_id, product_name, sku, price, quantity)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (order_id, item.product_id, item.name, item.sku, item.price, item.quantity),
+            )
+
+        await db.commit()
+        db_save_ok = True
+        print(f"[order] Order {order_number} saved to DB (id={order_id}, fulfillment={order.fulfillment_type}, total=${order.total/100:.2f})")
+    except Exception as db_err:
+        # CRITICAL ERROR: Payment was charged but order could not be saved to DB.
+        # Log EVERYTHING so the order can be manually recovered.
+        items_dump = "; ".join(f"{it.name} x{it.quantity} @${it.price/100:.2f} (SKU:{it.sku})" for it in order.items)
+        print(f"[ORDER LOST] DB SAVE FAILED for {order_number} — PAYMENT WAS CHARGED!")
+        print(f"[ORDER LOST] charge_id={charge_id} total=${order.total/100:.2f} fulfillment={order.fulfillment_type}")
+        print(f"[ORDER LOST] customer={order.customer.first_name} {order.customer.last_name} email={order.customer.email} phone={order.customer.phone}")
+        print(f"[ORDER LOST] items: {items_dump}")
+        print(f"[ORDER LOST] DB error: {db_err}")
+        # Try a simplified insert as a last resort (fewer columns, in case a column is missing)
+        try:
+            cursor2 = await db.execute(
+                """INSERT INTO ecommerce_orders
+                   (order_number, customer_first_name, customer_last_name, customer_email, customer_phone,
+                    subtotal, tax, total, charge_id, payment_status, fulfillment_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    order_number,
+                    order.customer.first_name,
+                    order.customer.last_name,
+                    order.customer.email,
+                    order.customer.phone,
+                    order.subtotal,
+                    order.tax,
+                    order.total,
+                    charge_id,
+                    payment_status,
+                    order.fulfillment_type,
+                ),
+            )
+            order_id = cursor2.lastrowid
+            for item in order.items:
+                await db.execute(
+                    """INSERT INTO ecommerce_order_items (order_id, product_id, product_name, sku, price, quantity)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (order_id, item.product_id, item.name, item.sku, item.price, item.quantity),
+                )
+            await db.commit()
+            db_save_ok = True
+            print(f"[ORDER RECOVERED] Saved with simplified insert: {order_number} (id={order_id})")
+        except Exception as retry_err:
+            print(f"[ORDER LOST] Retry also failed: {retry_err}")
 
     # Fetch SMTP settings while DB is still open
     smtp_settings = await _get_smtp_settings(db)
 
-    # Send email notifications (non-blocking)
-    asyncio.create_task(
+    # Send email notifications (non-blocking, with error logging)
+    def _log_task_error(task: asyncio.Task, label: str = "") -> None:
+        if task.cancelled():
+            print(f"[order] Background task {label} was cancelled for {order_number}")
+        elif task.exception():
+            print(f"[order] Background task {label} FAILED for {order_number}: {task.exception()}")
+
+    email_task = asyncio.create_task(
         _send_order_emails(smtp_settings, order, order_number, charge_id, payment_status)
     )
+    email_task.add_done_callback(lambda t: _log_task_error(t, "email"))
 
     # Deduct stock from correct Clover location based on fulfillment type (non-blocking)
-    asyncio.create_task(
+    stock_task = asyncio.create_task(
         _deduct_stock_for_order(order.items, order.fulfillment_type)
     )
+    stock_task.add_done_callback(lambda t: _log_task_error(t, "stock_deduct"))
 
     return {
         "success": True,
@@ -1228,7 +1285,7 @@ async def _get_smtp_settings(db: aiosqlite.Connection) -> dict[str, str]:
 
 
 def _send_smtp_email(smtp_settings: dict[str, str], to_email: str, subject: str, html_body: str) -> bool:
-    """Send an email via SMTP (synchronous)."""
+    """Send an email via SMTP (synchronous). to_email can be a single address or comma-separated list."""
     smtp_host = smtp_settings.get("smtp_host", "smtp.gmail.com")
     smtp_port = int(smtp_settings.get("smtp_port", "587"))
     smtp_user = smtp_settings.get("smtp_user", "")
@@ -1238,20 +1295,23 @@ def _send_smtp_email(smtp_settings: dict[str, str], to_email: str, subject: str,
         print("SMTP credentials not configured, skipping email")
         return False
 
+    # Support multiple recipients in a single SMTP session
+    recipients = [r.strip() for r in to_email.split(",") if r.strip()]
+
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = smtp_user
-    msg["To"] = to_email
+    msg["To"] = ", ".join(recipients)
     msg.attach(MIMEText(html_body, "html"))
 
     try:
         with smtplib.SMTP(smtp_host, smtp_port) as server:
             server.starttls()
             server.login(smtp_user, smtp_password)
-            server.send_message(msg)
+            server.sendmail(smtp_user, recipients, msg.as_string())
         return True
     except Exception as e:
-        print(f"Failed to send email to {to_email}: {e}")
+        print(f"Failed to send email to {recipients}: {e}")
         return False
 
 
@@ -1387,16 +1447,21 @@ async def _send_order_emails(
             store_recipients = [STORE_EMAIL]
 
         loop = asyncio.get_event_loop()
-        for recipient in store_recipients:
-            await loop.run_in_executor(
-                None,
-                _send_smtp_email,
-                smtp_settings,
-                recipient,
-                store_subject,
-                store_html,
-            )
-            print(f"Store notification sent to {recipient} for order {order_number}")
+        # Send to ALL store recipients in a single SMTP session to avoid
+        # Gmail rate-limiting or transient failures between connections.
+        all_store_recipients = ", ".join(store_recipients)
+        sent = await loop.run_in_executor(
+            None,
+            _send_smtp_email,
+            smtp_settings,
+            all_store_recipients,
+            store_subject,
+            store_html,
+        )
+        if sent:
+            print(f"Store notification sent to {store_recipients} for order {order_number}")
+        else:
+            print(f"FAILED to send store notification to {store_recipients} for order {order_number}")
 
         # --- Customer confirmation email ---
         customer_html = f"""
