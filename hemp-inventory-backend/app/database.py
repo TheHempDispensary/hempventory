@@ -553,6 +553,24 @@ async def init_db():
             )
         """)
 
+        # Volume discounts table (auto-apply when qty threshold met)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS volume_discounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                product_sku TEXT NOT NULL,
+                product_name TEXT NOT NULL,
+                min_quantity INTEGER NOT NULL DEFAULT 2,
+                discount_type TEXT NOT NULL DEFAULT 'fixed_total',
+                discount_value REAL NOT NULL DEFAULT 0,
+                customer_label TEXT NOT NULL DEFAULT '',
+                is_active INTEGER DEFAULT 1,
+                sync_to_clover INTEGER DEFAULT 0,
+                clover_discount_id TEXT DEFAULT '',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Seed FIRST10 if promo_codes table is empty
         cursor = await db.execute("SELECT COUNT(*) FROM promo_codes")
         count = (await cursor.fetchone())[0]
