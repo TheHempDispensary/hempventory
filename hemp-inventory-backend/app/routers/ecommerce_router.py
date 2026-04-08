@@ -745,6 +745,156 @@ async def delete_promo(promo_id: int, db: aiosqlite.Connection = Depends(get_db)
     return {"status": "deleted"}
 
 
+# ─── Volume Discounts ───────────────────────────────────────────────
+
+class VolumeDiscountCreateRequest(BaseModel):
+    product_sku: str
+    product_name: str
+    min_quantity: int = 2
+    discount_type: str = "fixed_total"  # fixed_total | amount_off | percent_off
+    discount_value: float = 0
+    customer_label: str = ""
+    is_active: bool = True
+    sync_to_clover: bool = False
+
+
+class VolumeDiscountUpdateRequest(BaseModel):
+    product_sku: Optional[str] = None
+    product_name: Optional[str] = None
+    min_quantity: Optional[int] = None
+    discount_type: Optional[str] = None
+    discount_value: Optional[float] = None
+    customer_label: Optional[str] = None
+    is_active: Optional[bool] = None
+    sync_to_clover: Optional[bool] = None
+
+
+@router.get("/volume-discounts")
+async def list_volume_discounts(db: aiosqlite.Connection = Depends(get_db)):
+    """Admin: List all volume discounts."""
+    cursor = await db.execute("SELECT * FROM volume_discounts ORDER BY created_at DESC")
+    rows = await cursor.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.get("/volume-discounts/active")
+async def list_active_volume_discounts(db: aiosqlite.Connection = Depends(get_db)):
+    """Public: List active volume discounts (for website auto-apply)."""
+    cursor = await db.execute("SELECT * FROM volume_discounts WHERE is_active = 1")
+    rows = await cursor.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.post("/volume-discounts")
+async def create_volume_discount(body: VolumeDiscountCreateRequest, db: aiosqlite.Connection = Depends(get_db)):
+    """Admin: Create a new volume discount."""
+    if body.min_quantity < 2:
+        raise HTTPException(status_code=400, detail="Minimum quantity must be at least 2")
+    if body.discount_value <= 0:
+        raise HTTPException(status_code=400, detail="Discount value must be greater than 0")
+
+    clover_discount_id = ""
+    if body.sync_to_clover:
+        try:
+            client = await _get_hq_clover_client(db)
+            if client:
+                label = body.customer_label or f"Buy {body.min_quantity}+ {body.product_name}"
+                if body.discount_type == "percent_off":
+                    pct = int(round(body.discount_value))
+                    result = await client.create_discount(name=label, percentage=pct, amount=0)
+                else:
+                    # For fixed_total and amount_off, compute a per-unit amount
+                    amt = int(round(body.discount_value * 100))
+                    result = await client.create_discount(name=label, percentage=0, amount=amt)
+                clover_discount_id = result.get("id", "")
+        except Exception as e:
+            print(f"[volume-discount] Clover sync failed: {e}")
+
+    await db.execute(
+        """INSERT INTO volume_discounts (product_sku, product_name, min_quantity, discount_type,
+           discount_value, customer_label, is_active, sync_to_clover, clover_discount_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (body.product_sku, body.product_name, body.min_quantity, body.discount_type,
+         body.discount_value, body.customer_label, int(body.is_active),
+         int(body.sync_to_clover), clover_discount_id),
+    )
+    await db.commit()
+    return {"status": "created", "clover_discount_id": clover_discount_id}
+
+
+@router.put("/volume-discounts/{discount_id}")
+async def update_volume_discount(discount_id: int, body: VolumeDiscountUpdateRequest, db: aiosqlite.Connection = Depends(get_db)):
+    """Admin: Update a volume discount."""
+    updates = []
+    params = []
+    for field in ["product_sku", "product_name", "min_quantity", "discount_type",
+                   "discount_value", "customer_label"]:
+        val = getattr(body, field, None)
+        if val is not None:
+            updates.append(f"{field} = ?")
+            params.append(val)
+    if body.is_active is not None:
+        updates.append("is_active = ?")
+        params.append(int(body.is_active))
+    if body.sync_to_clover is not None:
+        updates.append("sync_to_clover = ?")
+        params.append(int(body.sync_to_clover))
+    if not updates:
+        return {"status": "no changes"}
+    updates.append("updated_at = CURRENT_TIMESTAMP")
+    params.append(discount_id)
+    await db.execute(f"UPDATE volume_discounts SET {', '.join(updates)} WHERE id = ?", params)
+    await db.commit()
+
+    # Sync to Clover if requested
+    if body.sync_to_clover:
+        try:
+            cursor = await db.execute("SELECT * FROM volume_discounts WHERE id = ?", (discount_id,))
+            vd = await cursor.fetchone()
+            if vd:
+                client = await _get_hq_clover_client(db)
+                if client:
+                    label = vd["customer_label"] or f"Buy {vd['min_quantity']}+ {vd['product_name']}"
+                    clover_id = vd["clover_discount_id"] if "clover_discount_id" in vd.keys() else ""
+                    if vd["discount_type"] == "percent_off":
+                        pct = int(round(vd["discount_value"]))
+                        amt = 0
+                    else:
+                        pct = 0
+                        amt = int(round(vd["discount_value"] * 100))
+                    if clover_id:
+                        await client.update_discount(clover_id, name=label, percentage=pct, amount=amt)
+                    else:
+                        result = await client.create_discount(name=label, percentage=pct, amount=amt)
+                        new_id = result.get("id", "")
+                        if new_id:
+                            await db.execute("UPDATE volume_discounts SET clover_discount_id = ? WHERE id = ?", (new_id, discount_id))
+                            await db.commit()
+        except Exception as e:
+            print(f"[volume-discount] Clover sync failed: {e}")
+
+    return {"status": "updated"}
+
+
+@router.delete("/volume-discounts/{discount_id}")
+async def delete_volume_discount(discount_id: int, db: aiosqlite.Connection = Depends(get_db)):
+    """Admin: Delete a volume discount."""
+    cursor = await db.execute("SELECT * FROM volume_discounts WHERE id = ?", (discount_id,))
+    vd = await cursor.fetchone()
+    if vd:
+        clover_id = vd["clover_discount_id"] if "clover_discount_id" in vd.keys() else ""
+        if clover_id:
+            try:
+                client = await _get_hq_clover_client(db)
+                if client:
+                    await client.delete_discount(clover_id)
+            except Exception as e:
+                print(f"[volume-discount] Clover delete failed: {e}")
+    await db.execute("DELETE FROM volume_discounts WHERE id = ?", (discount_id,))
+    await db.commit()
+    return {"status": "deleted"}
+
+
 async def _check_realtime_stock(items: List[OrderItem], fulfillment_type: str) -> list[str]:
     """Check real-time Clover stock for order items. Returns list of out-of-stock item names."""
     # Determine which location to check based on fulfillment type

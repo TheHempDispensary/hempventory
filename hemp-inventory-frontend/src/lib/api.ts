@@ -548,6 +548,36 @@ export const updatePromo = (promoId: number, data: {
 export const deletePromo = (promoId: number) =>
   api.delete(`/api/ecommerce/promos/${promoId}`);
 
+// Volume Discounts
+export const getVolumeDiscounts = () => api.get("/api/ecommerce/volume-discounts");
+
+export const getActiveVolumeDiscounts = () => api.get("/api/ecommerce/volume-discounts/active");
+
+export const createVolumeDiscount = (data: {
+  product_sku: string;
+  product_name: string;
+  min_quantity: number;
+  discount_type: string;
+  discount_value: number;
+  customer_label?: string;
+  is_active?: boolean;
+  sync_to_clover?: boolean;
+}) => api.post("/api/ecommerce/volume-discounts", data);
+
+export const updateVolumeDiscount = (id: number, data: {
+  product_sku?: string;
+  product_name?: string;
+  min_quantity?: number;
+  discount_type?: string;
+  discount_value?: number;
+  customer_label?: string;
+  is_active?: boolean;
+  sync_to_clover?: boolean;
+}) => api.put(`/api/ecommerce/volume-discounts/${id}`, data);
+
+export const deleteVolumeDiscount = (id: number) =>
+  api.delete(`/api/ecommerce/volume-discounts/${id}`);
+
 // Product Attributes (effect & strength for online store)
 export const getProductAttributes = () => api.get("/api/inventory/product-attributes");
 
