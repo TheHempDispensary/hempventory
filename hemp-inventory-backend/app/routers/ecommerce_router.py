@@ -958,6 +958,29 @@ async def create_order(
     charge_id = ""
     payment_status = "pending"
 
+    # Server-side enforcement: Block LeafLife / HQ-only items from pickup orders.
+    # LeafLife products ship from an out-of-state partner and are NEVER available for in-store pickup.
+    # HQ stock is warehouse-only and also not available for pickup.
+    if order.fulfillment_type in ("pickup_west", "pickup_east"):
+        blocked_items = []
+        for item in order.items:
+            # LeafLife products (SKU starts with LF-) are shipping-only
+            if isinstance(item.sku, str) and item.sku.startswith("LF-"):
+                blocked_items.append(item.name)
+                continue
+            # Check name keywords as fallback for LeafLife detection
+            item_name_lower = (item.name or "").lower()
+            leaflife_keywords = ["everyday", "premium", "essential", "smalls", "snowcaps"]
+            if any(kw in item_name_lower for kw in leaflife_keywords):
+                blocked_items.append(item.name)
+        if blocked_items:
+            names = ", ".join(blocked_items)
+            print(f"[order] BLOCKED pickup order containing shipping-only items: {names}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"The following items are only available for shipping and cannot be picked up in store: {names}. Please switch to 'Ship To Me' to order these products.",
+            )
+
     # Real-time stock validation BEFORE charging the customer.
     # Prevents customers from ordering items that are out of stock (stale cache).
     out_of_stock = await _check_realtime_stock(order.items, order.fulfillment_type)
