@@ -1395,6 +1395,63 @@ async def create_order(
         except Exception as retry_err:
             print(f"[ORDER LOST] Retry also failed: {retry_err}")
 
+    # Log discount usage if a promo code was used
+    if db_save_ok and order.promo_code:
+        try:
+            # Determine location name from fulfillment type
+            loc_name = ""
+            if order.fulfillment_type == "pickup_west":
+                loc_name = "West"
+            elif order.fulfillment_type == "pickup_east":
+                loc_name = "East"
+            elif order.fulfillment_type == "shipping":
+                loc_name = "Online / Shipping"
+
+            # For POS/pickup orders, find which employee was clocked in at order time
+            employee_id = None
+            employee_name = None
+            if order.fulfillment_type in ("pickup_west", "pickup_east"):
+                try:
+                    emp_cursor = await db.execute(
+                        """SELECT e.id, e.name FROM time_entries te
+                           JOIN employees e ON e.id = te.employee_id
+                           WHERE te.clock_in <= CURRENT_TIMESTAMP
+                             AND (te.clock_out IS NULL OR te.clock_out >= CURRENT_TIMESTAMP)
+                           ORDER BY te.clock_in DESC LIMIT 1"""
+                    )
+                    emp_row = await emp_cursor.fetchone()
+                    if emp_row:
+                        employee_id = emp_row[0]
+                        employee_name = emp_row[1]
+                except Exception:
+                    pass  # Non-critical — don't block order completion
+
+            customer_name = f"{order.customer.first_name} {order.customer.last_name}".strip()
+            await db.execute(
+                """INSERT INTO discount_usage
+                   (discount_code, customer_email, customer_name, order_id, order_number,
+                    location_name, employee_id, employee_name, order_total,
+                    discount_amount_applied, fulfillment_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    order.promo_code,
+                    order.customer.email,
+                    customer_name,
+                    order_id,
+                    order_number,
+                    loc_name,
+                    employee_id,
+                    employee_name,
+                    order.total,
+                    order.discount,
+                    order.fulfillment_type,
+                ),
+            )
+            await db.commit()
+            print(f"[order] Discount usage logged: code={order.promo_code} customer={order.customer.email} order={order_number}")
+        except Exception as usage_err:
+            print(f"[order] Failed to log discount usage (non-critical): {usage_err}")
+
     # Fetch SMTP settings while DB is still open
     smtp_settings = await _get_smtp_settings(db)
 
@@ -2595,3 +2652,38 @@ async def lookup_customer_orders(
         orders.append(order)
 
     return {"orders": orders, "total": len(orders)}
+
+
+@router.get("/discount-usage/{code}")
+async def get_discount_usage(code: str, db=Depends(get_db)):
+    """Get usage history for a specific discount code."""
+    cursor = await db.execute(
+        """SELECT id, discount_code, usage_timestamp, customer_email, customer_name,
+                  order_id, order_number, location_name, employee_id, employee_name,
+                  order_total, discount_amount_applied, fulfillment_type, created_at
+           FROM discount_usage
+           WHERE discount_code = ?
+           ORDER BY usage_timestamp DESC""",
+        (code,),
+    )
+    cols = [desc[0] for desc in cursor.description]
+    rows = await cursor.fetchall()
+    usage_records = [dict(zip(cols, row)) for row in rows]
+    return {"code": code, "total_uses": len(usage_records), "usage": usage_records}
+
+
+@router.get("/discount-usage")
+async def get_all_discount_usage(db=Depends(get_db)):
+    """Get aggregated usage stats for all discount codes."""
+    cursor = await db.execute(
+        """SELECT discount_code, COUNT(*) as use_count,
+                  MAX(usage_timestamp) as last_used,
+                  SUM(discount_amount_applied) as total_discount_given
+           FROM discount_usage
+           GROUP BY discount_code
+           ORDER BY use_count DESC"""
+    )
+    cols = [desc[0] for desc in cursor.description]
+    rows = await cursor.fetchall()
+    stats = [dict(zip(cols, row)) for row in rows]
+    return {"codes": stats}

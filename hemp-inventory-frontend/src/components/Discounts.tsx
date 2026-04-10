@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
-import { Percent, Plus, Trash2, Edit3, ToggleLeft, ToggleRight, RefreshCw, AlertTriangle, Save, X, Calendar, ShoppingBag, Ban, Cloud, Tag, Package, Search } from "lucide-react";
-import { getPromos, createPromo, updatePromo, deletePromo, getVolumeDiscounts, createVolumeDiscount, updateVolumeDiscount, deleteVolumeDiscount } from "../lib/api";
+import { Percent, Plus, Trash2, Edit3, ToggleLeft, ToggleRight, RefreshCw, AlertTriangle, Save, X, Calendar, ShoppingBag, Ban, Cloud, Tag, Package, Search, Eye, Clock, User, MapPin, Download } from "lucide-react";
+import { getPromos, createPromo, updatePromo, deletePromo, getVolumeDiscounts, createVolumeDiscount, updateVolumeDiscount, deleteVolumeDiscount, getDiscountUsage } from "../lib/api";
 import api from "../lib/api";
 
 interface PromoCode {
@@ -26,6 +26,23 @@ interface CloverItem {
   id: string;
   name: string;
   sku?: string;
+}
+
+interface DiscountUsageRecord {
+  id: number;
+  discount_code: string;
+  usage_timestamp: string;
+  customer_email: string;
+  customer_name: string;
+  order_id: number;
+  order_number: string;
+  location_name: string;
+  employee_id: number | null;
+  employee_name: string | null;
+  order_total: number;
+  discount_amount_applied: number;
+  fulfillment_type: string;
+  created_at: string;
 }
 
 interface VolumeDiscount {
@@ -81,6 +98,11 @@ export default function Discounts() {
   const [newProductIds, setNewProductIds] = useState<string[]>([]);
   const [newExcludeOtherCoupons, setNewExcludeOtherCoupons] = useState(false);
   const [newSyncToClover, setNewSyncToClover] = useState(false);
+
+  // Usage history
+  const [usageCode, setUsageCode] = useState<string | null>(null);
+  const [usageRecords, setUsageRecords] = useState<DiscountUsageRecord[]>([]);
+  const [usageLoading, setUsageLoading] = useState(false);
 
   // Edit form
   const [editDiscountType, setEditDiscountType] = useState<"percent" | "amount">("percent");
@@ -296,6 +318,54 @@ export default function Discounts() {
   const formatDate = (dateStr: string) => {
     try { return new Date(dateStr).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); }
     catch { return dateStr; }
+  };
+
+  const formatDateTime = (dateStr: string) => {
+    if (!dateStr) return "";
+    const d = new Date(dateStr + (dateStr.includes("Z") || dateStr.includes("+") ? "" : "Z"));
+    return d.toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", hour12: true });
+  };
+
+  const formatPrice = (cents: number) => {
+    if (!cents) return "$0.00";
+    return "$" + (cents / 100).toFixed(2);
+  };
+
+  const loadUsageHistory = async (code: string) => {
+    setUsageCode(code);
+    setUsageLoading(true);
+    try {
+      const res = await getDiscountUsage(code);
+      setUsageRecords(res.data.usage || []);
+    } catch {
+      setUsageRecords([]);
+    } finally {
+      setUsageLoading(false);
+    }
+  };
+
+  const exportUsageCsv = () => {
+    if (!usageRecords.length) return;
+    const headers = ["Date/Time", "Customer Email", "Customer Name", "Order #", "Location", "Employee", "Order Total", "Discount Applied", "Fulfillment"];
+    const rows = usageRecords.map(r => [
+      formatDateTime(r.usage_timestamp),
+      r.customer_email || "",
+      r.customer_name || "",
+      r.order_number || "",
+      r.location_name || "",
+      r.employee_name || "",
+      formatPrice(r.order_total),
+      formatPrice(r.discount_amount_applied),
+      r.fulfillment_type || "",
+    ]);
+    const csv = [headers.join(","), ...rows.map(r => r.map(c => `"${c}"`).join(","))].join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `discount-usage-${usageCode}-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   const filteredProducts = products.filter((p) => p.name.toLowerCase().includes(productSearch.toLowerCase()));
@@ -660,7 +730,12 @@ export default function Discounts() {
                     </div>
                   </div>
                   <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-2 text-xs text-gray-500">
-                    {!promo.is_direct_discount && <span>Uses: {promo.times_used}{promo.max_uses > 0 ? " / " + promo.max_uses : ""}</span>}
+                    {!promo.is_direct_discount && (
+                      <button onClick={() => loadUsageHistory(promo.code)}
+                        className="inline-flex items-center gap-1 text-indigo-600 hover:text-indigo-800 hover:underline cursor-pointer">
+                        <Eye className="w-3 h-3" /> Uses: {promo.times_used}{promo.max_uses > 0 ? " / " + promo.max_uses : ""}
+                      </button>
+                    )}
                     {promo.single_use && !promo.is_direct_discount && <span className="text-orange-600">Single use per email</span>}
                     {promo.starts_at && <span><Calendar className="w-3 h-3 inline" /> Starts: {formatDate(promo.starts_at)}</span>}
                     {promo.expires_at && <span><Calendar className="w-3 h-3 inline" /> Expires: {formatDate(promo.expires_at)}</span>}
@@ -810,6 +885,90 @@ export default function Discounts() {
               )}
             </div>
           ))}
+        </div>
+      )}
+      {/* Usage History Modal */}
+      {usageCode && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setUsageCode(null)}>
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
+              <div>
+                <h3 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+                  <Eye className="w-5 h-5 text-indigo-600" /> Usage History
+                </h3>
+                <p className="text-sm text-gray-500 mt-0.5">Discount code: <span className="font-mono font-bold text-green-700">{usageCode}</span> — {usageRecords.length} use{usageRecords.length !== 1 ? "s" : ""}</p>
+              </div>
+              <div className="flex items-center gap-2">
+                {usageRecords.length > 0 && (
+                  <button onClick={exportUsageCsv}
+                    className="flex items-center gap-1 px-3 py-1.5 bg-green-50 text-green-700 rounded-lg text-sm hover:bg-green-100 transition-colors">
+                    <Download className="w-3.5 h-3.5" /> Export CSV
+                  </button>
+                )}
+                <button onClick={() => setUsageCode(null)} className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+            <div className="overflow-y-auto flex-1 px-6 py-4">
+              {usageLoading ? (
+                <div className="text-center py-12 text-gray-500">Loading usage history...</div>
+              ) : usageRecords.length === 0 ? (
+                <div className="text-center py-12">
+                  <Clock className="w-12 h-12 text-gray-300 mx-auto mb-3" />
+                  <p className="text-gray-500">No usage recorded yet</p>
+                  <p className="text-sm text-gray-400 mt-1">Usage will be logged when customers use this code at checkout</p>
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-gray-200">
+                        <th className="text-left py-2.5 px-3 text-gray-600 font-medium">Date / Time</th>
+                        <th className="text-left py-2.5 px-3 text-gray-600 font-medium">Customer</th>
+                        <th className="text-left py-2.5 px-3 text-gray-600 font-medium">Order #</th>
+                        <th className="text-left py-2.5 px-3 text-gray-600 font-medium">Location</th>
+                        <th className="text-left py-2.5 px-3 text-gray-600 font-medium">Employee</th>
+                        <th className="text-right py-2.5 px-3 text-gray-600 font-medium">Order Total</th>
+                        <th className="text-right py-2.5 px-3 text-gray-600 font-medium">Discount</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {usageRecords.map((rec) => (
+                        <tr key={rec.id} className="border-b border-gray-100 hover:bg-gray-50">
+                          <td className="py-2.5 px-3">
+                            <div className="flex items-center gap-1.5 text-gray-700">
+                              <Clock className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />
+                              {formatDateTime(rec.usage_timestamp)}
+                            </div>
+                          </td>
+                          <td className="py-2.5 px-3">
+                            <div className="flex items-center gap-1.5">
+                              <User className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />
+                              <div>
+                                {rec.customer_name && <div className="text-gray-900 font-medium">{rec.customer_name}</div>}
+                                {rec.customer_email && <div className="text-gray-500 text-xs">{rec.customer_email}</div>}
+                              </div>
+                            </div>
+                          </td>
+                          <td className="py-2.5 px-3 font-mono text-xs text-gray-700">{rec.order_number}</td>
+                          <td className="py-2.5 px-3">
+                            <div className="flex items-center gap-1.5 text-gray-700">
+                              <MapPin className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />
+                              {rec.location_name || "—"}
+                            </div>
+                          </td>
+                          <td className="py-2.5 px-3 text-gray-700">{rec.employee_name || "—"}</td>
+                          <td className="py-2.5 px-3 text-right font-medium text-gray-900">{formatPrice(rec.order_total)}</td>
+                          <td className="py-2.5 px-3 text-right font-medium text-red-600">-{formatPrice(rec.discount_amount_applied)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
       )}
     </div>

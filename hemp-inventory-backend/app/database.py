@@ -571,6 +571,26 @@ async def init_db():
             )
         """)
 
+        # Discount usage tracking table (logs every use of a discount code)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS discount_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                discount_code TEXT NOT NULL,
+                usage_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                customer_email TEXT,
+                customer_name TEXT,
+                order_id INTEGER,
+                order_number TEXT,
+                location_name TEXT,
+                employee_id INTEGER,
+                employee_name TEXT,
+                order_total INTEGER DEFAULT 0,
+                discount_amount_applied INTEGER DEFAULT 0,
+                fulfillment_type TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Seed FIRST10 if promo_codes table is empty
         cursor = await db.execute("SELECT COUNT(*) FROM promo_codes")
         count = (await cursor.fetchone())[0]
