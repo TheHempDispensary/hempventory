@@ -730,12 +730,10 @@ export default function Discounts() {
                     </div>
                   </div>
                   <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-2 text-xs text-gray-500">
-                    {!promo.is_direct_discount && (
-                      <button onClick={() => loadUsageHistory(promo.code)}
-                        className="inline-flex items-center gap-1 text-indigo-600 hover:text-indigo-800 hover:underline cursor-pointer">
-                        <Eye className="w-3 h-3" /> Uses: {promo.times_used}{promo.max_uses > 0 ? " / " + promo.max_uses : ""}
-                      </button>
-                    )}
+                    <button onClick={() => loadUsageHistory(promo.code)}
+                      className="inline-flex items-center gap-1 text-indigo-600 hover:text-indigo-800 hover:underline cursor-pointer">
+                      <Eye className="w-3 h-3" /> Uses: {promo.times_used}{promo.max_uses > 0 ? " / " + promo.max_uses : ""}
+                    </button>
                     {promo.single_use && !promo.is_direct_discount && <span className="text-orange-600">Single use per email</span>}
                     {promo.starts_at && <span><Calendar className="w-3 h-3 inline" /> Starts: {formatDate(promo.starts_at)}</span>}
                     {promo.expires_at && <span><Calendar className="w-3 h-3 inline" /> Expires: {formatDate(promo.expires_at)}</span>}
