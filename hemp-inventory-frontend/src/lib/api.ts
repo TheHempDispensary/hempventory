@@ -548,6 +548,13 @@ export const updatePromo = (promoId: number, data: {
 export const deletePromo = (promoId: number) =>
   api.delete(`/api/ecommerce/promos/${promoId}`);
 
+// Discount Usage Tracking
+export const getDiscountUsage = (code: string) =>
+  api.get(`/api/ecommerce/discount-usage/${encodeURIComponent(code)}`);
+
+export const getAllDiscountUsage = () =>
+  api.get("/api/ecommerce/discount-usage");
+
 // Volume Discounts
 export const getVolumeDiscounts = () => api.get("/api/ecommerce/volume-discounts");
 
