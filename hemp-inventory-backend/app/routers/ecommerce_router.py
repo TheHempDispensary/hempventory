@@ -18,6 +18,7 @@ from app.database import get_db
 from app.clover_client import CloverClient
 
 STORE_EMAIL = "Support@TheHempDispensary.com"
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 # SMTP env-var fallbacks (so emails work even if DB settings are empty)
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
@@ -271,11 +272,16 @@ async def _fetch_and_cache_products() -> dict:
         # Load product attributes (effect & strength) from local DB
         attr_db = await aiosqlite.connect(DB_PATH)
         try:
-            attr_cursor = await attr_db.execute("SELECT sku, effect, strength, product_type FROM product_attributes")
+            attr_cursor = await attr_db.execute("SELECT sku, effect, strength, product_type, product_name FROM product_attributes")
             attr_rows = await attr_cursor.fetchall()
         finally:
             await attr_db.close()
         attrs_by_sku: dict[str, dict] = {row[0]: {"effect": row[1], "strength": row[2], "product_type": row[3]} for row in attr_rows}
+        # Name-based lookup for products sharing a SKU
+        attrs_by_name: dict[str, dict] = {}
+        for row in attr_rows:
+            if row[4]:  # product_name
+                attrs_by_name[row[4].upper()] = {"effect": row[1], "strength": row[2], "product_type": row[3]}
 
         products = []
         categories_set: set = set()
@@ -335,8 +341,8 @@ async def _fetch_and_cache_products() -> dict:
 
             total_stock = max(hq_stock, w_stock, e_stock)
 
-            # Look up stored effect/strength attributes
-            sku_attrs = attrs_by_sku.get(sku, {})
+            # Look up stored effect/strength attributes (by name first for shared-SKU items, then SKU)
+            sku_attrs = attrs_by_name.get(name.upper(), {}) or attrs_by_sku.get(sku, {})
 
             products.append({
                 "id": item.get("id", ""),
@@ -381,6 +387,9 @@ async def _fetch_and_cache_products() -> dict:
         # Save to disk for fast recovery after restart
         _save_disk_cache(result)
 
+        # Auto-tag new products that have no attributes or descriptions (background)
+        asyncio.create_task(_auto_tag_new_products(products, attrs_by_sku, attrs_by_name, desc_by_sku, desc_by_name))
+
         return result
     except Exception as e:
         print(f"[cache] Refresh failed: {e}")
@@ -391,6 +400,200 @@ async def _fetch_and_cache_products() -> dict:
         _refresh_in_progress = False
         if _fetch_event:
             _fetch_event.set()
+
+
+_AUTOTAG_SYSTEM_PROMPT = """You are an expert cannabis sommelier and budtender with 15+ years of experience. You have encyclopedic knowledge of hemp and cannabis strains, their genetics, terpene profiles, and effects.
+
+For the given product, determine:
+1. STRAIN_TYPE: Must be exactly one of: Sativa, Indica, Hybrid, or N/A (for products with no strain like tinctures, topicals, edibles with no strain name)
+2. EFFECT_TAG: Must be exactly one of: Energy, Sleep, Relax, Focus
+
+Guidelines for STRAIN_TYPE:
+- If the product name contains a known strain name, identify it accurately
+- Sativas: Blue Dream, Maui Wowie, Jack Herer, Sour Diesel, Green Crack, Durban Poison, Super Lemon Haze, Tropicana Cookies, Pineapple Express, Strawberry Cough, and similar uplifting strains
+- Indicas: OG Kush, Tahoe OG, King Louis, Purple Punch, Granddaddy Purple, Bubba Kush, Gorilla Glue, Northern Lights, Blueberry, and similar relaxing strains
+- Hybrids: Gelato, Wedding Cake, Runtz, Cereal Milk, Biscotti, Mimosa, Girl Scout Cookies, Banana Runtz, Watermelon, and similar balanced strains
+- If the product explicitly says Sativa, Indica, or Hybrid in the name, use that
+- For edibles, tinctures, distillates with no strain name: use N/A
+
+Guidelines for EFFECT_TAG:
+- Energy: Sativas and uplifting hybrids — daytime use, creative, focused, social
+- Sleep: Heavy indicas, CBN products, products explicitly for sleep or nighttime
+- Relax: Mid indicas, balanced hybrids, CBD-dominant products, topicals, muscle relief products
+- Focus: CBG products, nootropic blends, microdose products, clarity-focused products
+- For multi-cannabinoid products (CBD/CBG/CBN blends): use the dominant intended effect
+- Delta-8 products: generally Relax unless strain suggests otherwise
+- Delta-9 edibles with no strain: Relax
+- THCA flower: follow the strain
+
+3. DESCRIPTION: Write a 2-3 sentence SEO-optimized product description for The Hemp Dispensary, a licensed hemp retailer in Spring Hill, Florida.
+Description rules:
+- Be factual and specific — use the product name, category, and any attributes provided
+- Do not make medical claims or say the product treats, cures, or prevents anything
+- Do not use the words "marijuana", "cannabis", "medicate", "medication", "dose", or "dosing" — use "hemp", "enjoy", "experience", or "use" instead
+- Mention that products are lab-tested and compliant with federal hemp regulations where natural
+- Write in a friendly, knowledgeable tone — like a budtender talking to a customer
+- 2-3 sentences maximum, no bullet points, plain text only
+
+Respond ONLY with valid JSON in this exact format, nothing else:
+{"strain_type": "Sativa|Indica|Hybrid|N/A", "effect_tag": "Energy|Sleep|Relax|Focus", "confidence": "high|medium|low", "description": "2-3 sentence SEO description"}"""
+
+# Categories that are non-consumable and should not be tagged
+_SKIP_CATEGORIES = {"Accessories", "Packaging", "Apparel"}
+
+
+async def _auto_tag_new_products(
+    products: list,
+    attrs_by_sku: dict,
+    attrs_by_name: dict,
+    desc_by_sku: dict,
+    desc_by_name: dict,
+) -> None:
+    """Background task: find products missing attributes or descriptions, call Anthropic API to tag them."""
+    if not ANTHROPIC_API_KEY:
+        return
+
+    # Collect products that need tagging (no attributes) or descriptions
+    needs_tagging: list[dict] = []
+    for p in products:
+        sku = p.get("sku", "")
+        name = p.get("name", "")
+        cats = p.get("categories", [])
+
+        # Skip non-consumable categories
+        if any(c in _SKIP_CATEGORIES for c in cats):
+            continue
+        # Skip pet products
+        if "pet" in name.lower() or "Pets" in cats:
+            continue
+
+        has_attrs = bool(
+            attrs_by_name.get(name.upper(), {}).get("effect")
+            or attrs_by_sku.get(sku, {}).get("effect")
+        )
+        has_desc = bool(
+            desc_by_name.get(name.upper())
+            or desc_by_sku.get(sku)
+            or p.get("description")
+        )
+
+        if not has_attrs or not has_desc:
+            needs_tagging.append({
+                "sku": sku,
+                "name": name,
+                "categories": cats,
+                "description": p.get("description", ""),
+                "needs_attrs": not has_attrs,
+                "needs_desc": not has_desc,
+            })
+
+    if not needs_tagging:
+        return
+
+    print(f"[auto-tag] {len(needs_tagging)} products need tagging/description")
+
+    from app.database import DB_PATH
+
+    tagged = 0
+    # Process in batches of 10
+    for i in range(0, len(needs_tagging), 10):
+        batch = needs_tagging[i : i + 10]
+        for product in batch:
+            try:
+                result = await _call_anthropic_for_tag(product)
+                if not result:
+                    continue
+
+                db = await aiosqlite.connect(DB_PATH)
+                try:
+                    # Save attributes if needed
+                    if product["needs_attrs"] and result.get("effect_tag"):
+                        strain = result.get("strain_type", "N/A")
+                        effect = result.get("effect_tag", "Relax")
+                        confidence = result.get("confidence", "low")
+                        if confidence != "low":
+                            await db.execute(
+                                """INSERT INTO product_attributes (sku, product_name, effect, strength, product_type)
+                                   VALUES (?, ?, ?, ?, ?)
+                                   ON CONFLICT(sku) DO UPDATE SET
+                                       product_name = excluded.product_name,
+                                       effect = excluded.effect,
+                                       product_type = excluded.product_type,
+                                       updated_at = CURRENT_TIMESTAMP""",
+                                (product["sku"], product["name"], effect, "", strain if strain != "N/A" else ""),
+                            )
+
+                    # Save description if needed
+                    if product["needs_desc"] and result.get("description"):
+                        await db.execute(
+                            """INSERT INTO product_descriptions (sku, product_name, description)
+                               VALUES (?, ?, ?)
+                               ON CONFLICT(sku, product_name) DO UPDATE SET
+                                   description = excluded.description,
+                                   updated_at = CURRENT_TIMESTAMP""",
+                            (product["sku"], product["name"], result["description"]),
+                        )
+
+                    await db.commit()
+                    tagged += 1
+                    print(f"[auto-tag] Tagged: {product['name']} -> {result.get('strain_type')}/{result.get('effect_tag')}")
+                finally:
+                    await db.close()
+
+            except Exception as e:
+                print(f"[auto-tag] Error tagging {product['name']}: {e}")
+
+        # Brief pause between batches to avoid rate limits
+        if i + 10 < len(needs_tagging):
+            await asyncio.sleep(1)
+
+    if tagged > 0:
+        print(f"[auto-tag] Successfully tagged {tagged}/{len(needs_tagging)} products")
+        # Invalidate cache so next request picks up new attributes
+        invalidate_product_cache()
+
+
+async def _call_anthropic_for_tag(product: dict) -> dict:
+    """Call Anthropic API to get strain type, effect tag, and description for a product."""
+    name = product["name"]
+    cats = ", ".join(product["categories"]) if product["categories"] else "Unknown"
+    desc = product.get("description", "") or ""
+
+    user_msg = f"Product name: {name}\nCategory: {cats}"
+    if desc:
+        user_msg += f"\nDescription: {desc}"
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-sonnet-4-20250514",
+                    "max_tokens": 512,
+                    "system": _AUTOTAG_SYSTEM_PROMPT,
+                    "messages": [{"role": "user", "content": user_msg}],
+                },
+            )
+            if resp.status_code != 200:
+                print(f"[auto-tag] Anthropic API error {resp.status_code} for {name}: {resp.text[:200]}")
+                return {}
+
+            data = resp.json()
+            text = data.get("content", [{}])[0].get("text", "")
+            # Parse JSON from response
+            result = json.loads(text)
+            return result
+    except json.JSONDecodeError:
+        print(f"[auto-tag] Failed to parse JSON for {name}: {text[:200]}")
+        return {}
+    except Exception as e:
+        print(f"[auto-tag] API call failed for {name}: {e}")
+        return {}
 
 
 async def _get_cached_products() -> dict:

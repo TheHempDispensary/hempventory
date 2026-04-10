@@ -242,6 +242,25 @@ async def _do_sync(db: aiosqlite.Connection) -> dict:
             }
             inventory[merge_key]["clover_ids"][loc_name] = clover_id
 
+    # Ensure LeafLife / HQ-only products appear at ALL locations with 0 stock
+    # (LeafLife items only exist on HQ Clover, so East/West show "—" without this)
+    all_loc_names = [loc[1] for loc in locations]
+    for _key, item_data in inventory.items():
+        sku = item_data.get("sku", "")
+        # LeafLife products (SKU starts with LF-) should show at every location
+        if isinstance(sku, str) and sku.startswith("LF-"):
+            for loc in locations:
+                loc_name = loc[1]
+                loc_id = loc[0]
+                if loc_name not in item_data["locations"]:
+                    item_data["locations"][loc_name] = {
+                        "location_id": loc_id,
+                        "stock": 0,
+                        "par_level": None,
+                        "status": "out_of_stock",
+                        "clover_item_id": "",
+                    }
+
     # Attach stored product images (only fetch SKU, not the heavy image_data blob)
     cursor = await db.execute("SELECT sku FROM product_images")
     image_rows = await cursor.fetchall()
