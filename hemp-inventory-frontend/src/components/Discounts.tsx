@@ -56,6 +56,7 @@ interface VolumeDiscount {
   is_active: boolean;
   sync_to_clover: boolean;
   clover_discount_id: string;
+  times_used: number;
   created_at: string;
   updated_at: string;
 }
@@ -103,6 +104,7 @@ export default function Discounts() {
   const [usageCode, setUsageCode] = useState<string | null>(null);
   const [usageRecords, setUsageRecords] = useState<DiscountUsageRecord[]>([]);
   const [usageLoading, setUsageLoading] = useState(false);
+  const [usageTotalFromPromo, setUsageTotalFromPromo] = useState<number>(0);
 
   // Edit form
   const [editDiscountType, setEditDiscountType] = useState<"percent" | "amount">("percent");
@@ -331,9 +333,10 @@ export default function Discounts() {
     return "$" + (cents / 100).toFixed(2);
   };
 
-  const loadUsageHistory = async (code: string) => {
+  const loadUsageHistory = async (code: string, timesUsedFromPromo?: number) => {
     setUsageCode(code);
     setUsageLoading(true);
+    setUsageTotalFromPromo(timesUsedFromPromo || 0);
     try {
       const res = await getDiscountUsage(code);
       setUsageRecords(res.data.usage || []);
@@ -730,7 +733,7 @@ export default function Discounts() {
                     </div>
                   </div>
                   <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-2 text-xs text-gray-500">
-                    <button onClick={() => loadUsageHistory(promo.code)}
+                    <button onClick={() => loadUsageHistory(promo.code, promo.times_used)}
                       className="inline-flex items-center gap-1 text-indigo-600 hover:text-indigo-800 hover:underline cursor-pointer">
                       <Eye className="w-3 h-3" /> Uses: {promo.times_used}{promo.max_uses > 0 ? " / " + promo.max_uses : ""}
                     </button>
@@ -874,6 +877,10 @@ export default function Discounts() {
                     </div>
                   </div>
                   <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-2 text-xs text-gray-500">
+                    <button onClick={() => loadUsageHistory(`VD-${vd.id}`)}
+                      className="inline-flex items-center gap-1 text-indigo-600 hover:text-indigo-800 hover:underline cursor-pointer">
+                      <Eye className="w-3 h-3" /> Uses: {vd.times_used || 0}
+                    </button>
                     <span className="text-amber-600"><ShoppingBag className="w-3 h-3 inline" /> {vd.product_name}</span>
                     {vd.customer_label && <span className="text-gray-700 font-medium">{vd.customer_label}</span>}
                     {vd.clover_discount_id && <span className="text-blue-600"><Cloud className="w-3 h-3 inline" /> Clover synced</span>}
@@ -894,7 +901,7 @@ export default function Discounts() {
                 <h3 className="text-lg font-bold text-gray-900 flex items-center gap-2">
                   <Eye className="w-5 h-5 text-indigo-600" /> Usage History
                 </h3>
-                <p className="text-sm text-gray-500 mt-0.5">Discount code: <span className="font-mono font-bold text-green-700">{usageCode}</span> — {usageRecords.length} use{usageRecords.length !== 1 ? "s" : ""}</p>
+                <p className="text-sm text-gray-500 mt-0.5">Discount code: <span className="font-mono font-bold text-green-700">{usageCode}</span> — {usageTotalFromPromo > usageRecords.length ? `${usageTotalFromPromo} total uses (${usageRecords.length} tracked)` : `${usageRecords.length} use${usageRecords.length !== 1 ? "s" : ""}`}</p>
               </div>
               <div className="flex items-center gap-2">
                 {usageRecords.length > 0 && (
