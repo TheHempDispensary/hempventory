@@ -1,0 +1,37 @@
+User-agent: *
+
+# Block URL parameters that create duplicate/filter pages
+Disallow: /*?store-page=
+Disallow: /*?cs=
+Disallow: /*?cst=
+Disallow: /*?cp=
+Disallow: /*?sa=
+Disallow: /*?sbp=
+Disallow: /*?q=
+Disallow: /*?ref=
+Disallow: /*#!/
+Disallow: /*#~/
+
+# Block old Ecwid/Wix product ID URL patterns
+Disallow: /product/
+Disallow: /store/
+
+# Block old category aliases (these redirect but should not be crawled)
+Disallow: /edibles
+Disallow: /flower
+Disallow: /concentrates
+Disallow: /tinctures
+Disallow: /topicals
+Disallow: /vapor
+Disallow: /misc
+Disallow: /cbd
+Disallow: /isolate
+Disallow: /scales
+Disallow: /energy
+Disallow: /home
+Disallow: /es/
+
+# Block utility/non-indexable paths
+Disallow: /products/pages/
+
+Sitemap: https://www.thehempdispensary.com/sitemap.xml
