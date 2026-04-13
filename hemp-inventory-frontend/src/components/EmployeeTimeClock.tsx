@@ -351,6 +351,44 @@ export default function EmployeeTimeClock() {
   const totalHoursRaw = entries.reduce((sum, e) => sum + (e.hours || 0), 0);
   const totalHours = Math.floor(totalHoursRaw * 100) / 100;
 
+  // Group entries by week (Sunday–Saturday) for weekly subtotals
+  const getWeekStart = (iso: string) => {
+    const d = new Date(iso);
+    // Convert to EST for consistent week boundaries
+    const est = new Date(d.toLocaleString("en-US", { timeZone: "America/New_York" }));
+    const day = est.getDay(); // 0=Sun
+    est.setDate(est.getDate() - day);
+    est.setHours(0, 0, 0, 0);
+    return est.toISOString().split("T")[0];
+  };
+
+  const weeklyGroups: { weekStart: string; weekLabel: string; entries: TimeEntry[]; totalHours: number }[] = [];
+  const weekMap = new Map<string, { entries: TimeEntry[]; totalHours: number }>();
+
+  entries.forEach((entry) => {
+    const ws = getWeekStart(entry.clock_in);
+    if (!weekMap.has(ws)) {
+      weekMap.set(ws, { entries: [], totalHours: 0 });
+    }
+    const group = weekMap.get(ws)!;
+    group.entries.push(entry);
+    group.totalHours += entry.hours || 0;
+  });
+
+  weekMap.forEach((value, weekStart) => {
+    const wsDate = new Date(weekStart + "T12:00:00");
+    const weEnd = new Date(wsDate);
+    weEnd.setDate(weEnd.getDate() + 6);
+    const fmt = (d: Date) =>
+      d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+    weeklyGroups.push({
+      weekStart,
+      weekLabel: `${fmt(wsDate)} – ${fmt(weEnd)}`,
+      entries: value.entries,
+      totalHours: Math.floor(value.totalHours * 100) / 100,
+    });
+  });
+
   // Calendar helpers
   const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
   const dayNamesShort = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -494,20 +532,34 @@ export default function EmployeeTimeClock() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {entries.map((entry) => (
-                    <tr key={entry.id} className="hover:bg-gray-50">
-                      <td className="px-4 py-3 text-sm">{formatTime(entry.clock_in)}</td>
-                      <td className="px-4 py-3 text-sm">
-                        {entry.clock_out ? formatTime(entry.clock_out) : (
-                          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700">
-                            Active
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-4 py-3 text-sm text-right font-medium">
-                        {entry.hours != null ? `${entry.hours.toFixed(2)}` : "—"}
-                      </td>
-                    </tr>
+                  {weeklyGroups.map((week) => (
+                    <>
+                      {/* Week header */}
+                      <tr key={`week-header-${week.weekStart}`} className="bg-gray-50">
+                        <td colSpan={2} className="px-4 py-2 text-xs font-semibold text-gray-700">
+                          Week of {week.weekLabel}
+                        </td>
+                        <td className="px-4 py-2 text-xs font-semibold text-green-600 text-right">
+                          {week.totalHours.toFixed(2)} hrs
+                        </td>
+                      </tr>
+                      {/* Entries for this week */}
+                      {week.entries.map((entry) => (
+                        <tr key={entry.id} className="hover:bg-gray-50">
+                          <td className="px-4 py-3 text-sm">{formatTime(entry.clock_in)}</td>
+                          <td className="px-4 py-3 text-sm">
+                            {entry.clock_out ? formatTime(entry.clock_out) : (
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700">
+                                Active
+                              </span>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 text-sm text-right font-medium">
+                            {entry.hours != null ? `${entry.hours.toFixed(2)}` : "—"}
+                          </td>
+                        </tr>
+                      ))}
+                    </>
                   ))}
                 </tbody>
               </table>
