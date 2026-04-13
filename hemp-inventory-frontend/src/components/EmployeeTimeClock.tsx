@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, Fragment } from "react";
 import { getMyClockStatus, myClockIn, myClockOut, getMyEntries, getMySchedule, getMyTimeOff, submitMyTimeOff, cancelMyTimeOff, getMyScheduleNotes, getMyProfile, getShiftRequests, createShiftPickupRequest, createShiftTradeRequest, deleteShiftRequest, getSchedules } from "../lib/api";
 import { ChevronLeft, ChevronRight, CalendarOff, MessageSquare, Plus, Trash2, RefreshCw } from "lucide-react";
 
@@ -533,9 +533,9 @@ export default function EmployeeTimeClock() {
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {weeklyGroups.map((week) => (
-                    <>
+                    <Fragment key={week.weekStart}>
                       {/* Week header */}
-                      <tr key={`week-header-${week.weekStart}`} className="bg-gray-50">
+                      <tr className="bg-gray-50">
                         <td colSpan={2} className="px-4 py-2 text-xs font-semibold text-gray-700">
                           Week of {week.weekLabel}
                         </td>
@@ -559,7 +559,7 @@ export default function EmployeeTimeClock() {
                           </td>
                         </tr>
                       ))}
-                    </>
+                    </Fragment>
                   ))}
                 </tbody>
               </table>
