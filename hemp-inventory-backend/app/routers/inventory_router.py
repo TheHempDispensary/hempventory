@@ -11,6 +11,7 @@ import io
 import itertools
 import time
 import re
+import uuid
 import httpx
 from PIL import Image as PILImage
 
@@ -1942,6 +1943,7 @@ class StockTransferRequest(BaseModel):
     from_location_id: int
     to_location_id: int
     quantity: float
+    transfer_group_id: Optional[str] = None
 
 
 @router.post("/transfer-stock")
@@ -1951,7 +1953,11 @@ async def transfer_stock(
     db: aiosqlite.Connection = Depends(get_db),
 ):
     """Transfer stock of an item from one location to another.
-    Deducts from source and adds to destination via Clover API."""
+    Deducts from source and adds to destination via Clover API.
+    Logs every attempt (success or failure) to transfer_history."""
+    transfer_group_id = req.transfer_group_id or str(uuid.uuid4())
+    transferred_by = user.get("username", "unknown")
+
     if req.quantity <= 0:
         raise HTTPException(status_code=400, detail="Quantity must be positive")
 
@@ -1979,10 +1985,33 @@ async def transfer_stock(
             break
 
     if not source_item:
+        # Log failed lookup
+        await db.execute(
+            """INSERT INTO transfer_history
+               (transfer_group_id, sku, item_name, quantity, from_location_id, from_location_name,
+                to_location_id, to_location_name, status, error_message, transferred_by)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'failed', ?, ?)""",
+            (transfer_group_id, req.sku, req.sku, req.quantity,
+             req.from_location_id, from_name, req.to_location_id, to_name,
+             f"Item not found at {from_name}", transferred_by),
+        )
+        await db.commit()
         raise HTTPException(status_code=404, detail=f"Item with SKU '{req.sku}' not found at {from_name}")
 
+    item_name = source_item.get("name", req.sku)
     current_stock = (source_item.get("itemStock") or {}).get("quantity", 0)
     if current_stock < req.quantity:
+        await db.execute(
+            """INSERT INTO transfer_history
+               (transfer_group_id, sku, item_name, quantity, from_location_id, from_location_name,
+                to_location_id, to_location_name, status, error_message, from_stock_before, transferred_by)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'failed', ?, ?, ?)""",
+            (transfer_group_id, req.sku, item_name, req.quantity,
+             req.from_location_id, from_name, req.to_location_id, to_name,
+             f"Insufficient stock: {current_stock} available, {req.quantity} requested",
+             current_stock, transferred_by),
+        )
+        await db.commit()
         raise HTTPException(
             status_code=400,
             detail=f"Insufficient stock at {from_name}: {current_stock} available, {req.quantity} requested"
@@ -1999,6 +2028,16 @@ async def transfer_stock(
             break
 
     if not dest_item:
+        await db.execute(
+            """INSERT INTO transfer_history
+               (transfer_group_id, sku, item_name, quantity, from_location_id, from_location_name,
+                to_location_id, to_location_name, status, error_message, from_stock_before, transferred_by)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'failed', ?, ?, ?)""",
+            (transfer_group_id, req.sku, item_name, req.quantity,
+             req.from_location_id, from_name, req.to_location_id, to_name,
+             f"Item not found at {to_name}", current_stock, transferred_by),
+        )
+        await db.commit()
         raise HTTPException(
             status_code=404,
             detail=f"Item with SKU '{req.sku}' not found at {to_name}. Push the item to that location first."
@@ -2014,12 +2053,37 @@ async def transfer_stock(
         await from_client.update_item_stock(source_item["id"], new_from_stock)
         await to_client.update_item_stock(dest_item["id"], new_to_stock)
     except Exception as e:
+        # Log the Clover API failure
+        await db.execute(
+            """INSERT INTO transfer_history
+               (transfer_group_id, sku, item_name, quantity, from_location_id, from_location_name,
+                to_location_id, to_location_name, status, error_message,
+                from_stock_before, to_stock_before, transferred_by)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'failed', ?, ?, ?, ?)""",
+            (transfer_group_id, req.sku, item_name, req.quantity,
+             req.from_location_id, from_name, req.to_location_id, to_name,
+             str(e), current_stock, dest_stock, transferred_by),
+        )
+        await db.commit()
         raise HTTPException(status_code=500, detail=f"Transfer failed: {str(e)}")
 
-    return {
+    # Log successful transfer
+    await db.execute(
+        """INSERT INTO transfer_history
+           (transfer_group_id, sku, item_name, quantity, from_location_id, from_location_name,
+            to_location_id, to_location_name, status,
+            from_stock_before, from_stock_after, to_stock_before, to_stock_after, transferred_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'success', ?, ?, ?, ?, ?)""",
+        (transfer_group_id, req.sku, item_name, req.quantity,
+         req.from_location_id, from_name, req.to_location_id, to_name,
+         current_stock, new_from_stock, dest_stock, new_to_stock, transferred_by),
+    )
+    await db.commit()
+
+    result = {
         "status": "transferred",
         "sku": req.sku,
-        "item_name": source_item.get("name", ""),
+        "item_name": item_name,
         "quantity": req.quantity,
         "from_location": from_name,
         "to_location": to_name,
@@ -2027,9 +2091,82 @@ async def transfer_stock(
         "from_stock_after": new_from_stock,
         "to_stock_before": dest_stock,
         "to_stock_after": new_to_stock,
+        "transfer_group_id": transfer_group_id,
     }
     await _invalidate_cache()
     return result
+
+
+@router.get("/transfer-history")
+async def get_transfer_history(
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+    limit: int = 50,
+    offset: int = 0,
+):
+    """Return transfer history grouped by transfer_group_id, newest first."""
+    # Get distinct transfer groups
+    cursor = await db.execute(
+        """SELECT DISTINCT transfer_group_id,
+                  MIN(created_at) as started_at,
+                  MIN(from_location_name) as from_location,
+                  MIN(to_location_name) as to_location,
+                  MIN(transferred_by) as transferred_by,
+                  COUNT(*) as item_count,
+                  SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success_count,
+                  SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_count
+           FROM transfer_history
+           GROUP BY transfer_group_id
+           ORDER BY started_at DESC
+           LIMIT ? OFFSET ?""",
+        (limit, offset),
+    )
+    groups = await cursor.fetchall()
+
+    # Get total count
+    count_cursor = await db.execute(
+        "SELECT COUNT(DISTINCT transfer_group_id) FROM transfer_history"
+    )
+    total = (await count_cursor.fetchone())[0]
+
+    result = []
+    for g in groups:
+        group_id = g[0]
+        # Get individual items for this transfer group
+        items_cursor = await db.execute(
+            """SELECT sku, item_name, quantity, status, error_message,
+                      from_stock_before, from_stock_after, to_stock_before, to_stock_after,
+                      created_at
+               FROM transfer_history
+               WHERE transfer_group_id = ?
+               ORDER BY created_at ASC""",
+            (group_id,),
+        )
+        items = await items_cursor.fetchall()
+        result.append({
+            "transfer_group_id": group_id,
+            "created_at": g[1],
+            "from_location": g[2],
+            "to_location": g[3],
+            "transferred_by": g[4],
+            "item_count": g[5],
+            "success_count": g[6],
+            "failed_count": g[7],
+            "items": [{
+                "sku": item[0],
+                "item_name": item[1],
+                "quantity": item[2],
+                "status": item[3],
+                "error_message": item[4],
+                "from_stock_before": item[5],
+                "from_stock_after": item[6],
+                "to_stock_before": item[7],
+                "to_stock_after": item[8],
+                "created_at": item[9],
+            } for item in items],
+        })
+
+    return {"transfers": result, "total": total}
 
 
 def _remove_white_background(image_bytes: bytes, threshold: int = 240, edge_softness: int = 20) -> tuple[bytes, str]:

@@ -1,6 +1,10 @@
 import axios from "axios";
 
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const API_URL = import.meta.env.VITE_API_URL || (
+  typeof window !== "undefined" && !["localhost", "127.0.0.1"].includes(window.location.hostname)
+    ? "https://thd-inventory-api.fly.dev"
+    : "http://localhost:8000"
+);
 
 const api = axios.create({
   baseURL: API_URL,
@@ -102,8 +106,11 @@ export const pushItemToLocation = (sku: string, locationId: number, initialStock
 
 export const fixPosScanning = () => api.post("/api/inventory/fix-pos");
 
-export const transferStock = (sku: string, fromLocationId: number, toLocationId: number, quantity: number) =>
-  api.post("/api/inventory/transfer-stock", { sku, from_location_id: fromLocationId, to_location_id: toLocationId, quantity });
+export const transferStock = (sku: string, fromLocationId: number, toLocationId: number, quantity: number, transferGroupId?: string) =>
+  api.post("/api/inventory/transfer-stock", { sku, from_location_id: fromLocationId, to_location_id: toLocationId, quantity, transfer_group_id: transferGroupId });
+
+export const getTransferHistory = (limit = 50, offset = 0) =>
+  api.get("/api/inventory/transfer-history", { params: { limit, offset } });
 
 export const bulkAssignCategory = (skus: string[], categoryName: string) =>
   api.post("/api/inventory/bulk-assign-category", { skus, category_name: categoryName });

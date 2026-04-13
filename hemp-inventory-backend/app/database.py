@@ -591,6 +591,29 @@ async def init_db():
             )
         """)
 
+        # Transfer history table (logs every transfer attempt with per-item status)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS transfer_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                transfer_group_id TEXT NOT NULL,
+                sku TEXT NOT NULL,
+                item_name TEXT NOT NULL,
+                quantity REAL NOT NULL,
+                from_location_id INTEGER NOT NULL,
+                from_location_name TEXT NOT NULL,
+                to_location_id INTEGER NOT NULL,
+                to_location_name TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'success',
+                error_message TEXT,
+                from_stock_before REAL,
+                from_stock_after REAL,
+                to_stock_before REAL,
+                to_stock_after REAL,
+                transferred_by TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Seed FIRST10 if promo_codes table is empty
         cursor = await db.execute("SELECT COUNT(*) FROM promo_codes")
         count = (await cursor.fetchone())[0]
