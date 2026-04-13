@@ -4,7 +4,7 @@
  * Generates public/sitemap.xml by fetching product slugs from the backend API
  * and combining them with static page URLs.
  *
- * Usage:  node scripts/generate-sitemap.js
+ * Usage:  node scripts/generate-sitemap.cjs
  */
 
 const https = require("https");
@@ -33,10 +33,15 @@ const STATIC_PAGES = [
   { loc: "/exotic_thca_flower", changefreq: "weekly", priority: "0.9" },
 ];
 
-function fetchJSON(url) {
+function fetchJSON(url, timeoutMs = 30000) {
   return new Promise((resolve, reject) => {
-    https
+    const req = https
       .get(url, (res) => {
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          reject(new Error(`API returned HTTP ${res.statusCode}`));
+          res.resume();
+          return;
+        }
         let data = "";
         res.on("data", (chunk) => (data += chunk));
         res.on("end", () => {
@@ -48,6 +53,10 @@ function fetchJSON(url) {
         });
       })
       .on("error", reject);
+    req.setTimeout(timeoutMs, () => {
+      req.destroy();
+      reject(new Error(`Request timed out after ${timeoutMs}ms`));
+    });
   });
 }
 
@@ -71,9 +80,15 @@ function buildUrlEntry({ loc, lastmod, changefreq, priority }) {
 
 async function main() {
   console.log("Fetching products from API...");
-  const data = await fetchJSON(API_URL);
-  const products = data.products || [];
-  console.log(`Fetched ${products.length} products.`);
+  let products = [];
+  try {
+    const data = await fetchJSON(API_URL);
+    products = data.products || [];
+    console.log(`Fetched ${products.length} products.`);
+  } catch (err) {
+    console.warn(`WARNING: Could not fetch products: ${err.message}`);
+    console.warn("Generating sitemap with static pages only.");
+  }
 
   const entries = [];
 
