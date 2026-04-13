@@ -350,7 +350,7 @@ export default function OnlineOrders() {
     try {
       const res = await createShipment({
         order_id: orderId,
-        parcel_weight: Math.round((weightUnit === "oz" ? (parseFloat(parcelWeight) || 0.375) / 16 : parseFloat(parcelWeight) || 0.375) * 10000) / 10000,
+        parcel_weight: Math.round((weightUnit === "oz" ? (parseFloat(parcelWeight) || 6) / 16 : parseFloat(parcelWeight) || 0.375) * 10000) / 10000,
         parcel_length: parseFloat(parcelLength) || 10,
         parcel_width: parseFloat(parcelWidth) || 8,
         parcel_height: parseFloat(parcelHeight) || 2,
