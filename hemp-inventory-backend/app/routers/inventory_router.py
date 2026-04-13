@@ -87,7 +87,7 @@ class ItemCreate(BaseModel):
     age_restriction_min_age: Optional[int] = None  # e.g. 21
     available: Optional[bool] = True
     hidden: Optional[bool] = False  # hidden from POS
-    auto_manage: Optional[bool] = True  # auto manage stock
+    auto_manage: Optional[bool] = False  # disabled by default – Clover auto-hides items at 0 stock, blocking POS scanning
     default_tax_rates: Optional[bool] = True
 
 
@@ -2208,7 +2208,7 @@ class ItemGroupCreate(BaseModel):
     age_restriction_min_age: Optional[int] = None
     available: Optional[bool] = True
     hidden: Optional[bool] = False
-    auto_manage: Optional[bool] = True
+    auto_manage: Optional[bool] = False  # disabled by default – Clover auto-hides items at 0 stock, blocking POS scanning
     default_tax_rates: Optional[bool] = True
 
 
@@ -2514,6 +2514,10 @@ async def add_variants_to_existing_item(
                 if req.sku_prefix:
                     option_suffix = "-".join(o["name"][:3].upper() for o in combo)
                     item_data["sku"] = f"{req.sku_prefix}-{option_suffix}"
+                # Ensure variant items are always scannable at POS
+                item_data["autoManage"] = False
+                item_data["available"] = True
+                item_data["hidden"] = False
 
                 created_item = await client.create_item(item_data)
                 item_id = created_item.get("id", "")
