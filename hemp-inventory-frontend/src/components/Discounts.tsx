@@ -105,7 +105,6 @@ export default function Discounts() {
   const [usageRecords, setUsageRecords] = useState<DiscountUsageRecord[]>([]);
   const [usageLoading, setUsageLoading] = useState(false);
   const [usageTotalFromPromo, setUsageTotalFromPromo] = useState<number>(0);
-
   // Edit form
   const [editDiscountType, setEditDiscountType] = useState<"percent" | "amount">("percent");
   const [editDiscountValue, setEditDiscountValue] = useState("");
