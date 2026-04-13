@@ -3580,7 +3580,7 @@ export default function Inventory() {
                           </thead>
                           <tbody>
                             {group.items.map((item, idx) => (
-                              <tr key={idx} className={`border-t border-gray-100 ${item.status === "failed" ? "bg-red-50/50" : ""}`}>
+                              <tr key={idx} className={`border-t border-gray-100 ${item.status === "failed" ? "bg-red-50/50" : item.status === "partial" ? "bg-amber-50/50" : ""}`}>
                                 <td className="px-4 py-2 text-gray-900 max-w-[200px] truncate" title={item.item_name}>{item.item_name}</td>
                                 <td className="px-4 py-2 text-gray-500 font-mono text-xs">{item.sku}</td>
                                 <td className="px-4 py-2 text-right text-gray-700">{item.quantity}</td>
@@ -3598,6 +3598,10 @@ export default function Inventory() {
                                   {item.status === "success" ? (
                                     <span className="inline-flex items-center gap-1 text-xs text-green-700 bg-green-100 px-2 py-0.5 rounded-full">
                                       <CheckCircle2 className="w-3 h-3" /> Success
+                                    </span>
+                                  ) : item.status === "partial" ? (
+                                    <span className="inline-flex items-center gap-1 text-xs text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full" title={item.error_message || "Partial failure"}>
+                                      <AlertCircle className="w-3 h-3" /> Partial
                                     </span>
                                   ) : (
                                     <span className="inline-flex items-center gap-1 text-xs text-red-700 bg-red-100 px-2 py-0.5 rounded-full" title={item.error_message || "Failed"}>

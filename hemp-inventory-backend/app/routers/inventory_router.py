@@ -1986,32 +1986,38 @@ async def transfer_stock(
 
     if not source_item:
         # Log failed lookup
-        await db.execute(
-            """INSERT INTO transfer_history
-               (transfer_group_id, sku, item_name, quantity, from_location_id, from_location_name,
-                to_location_id, to_location_name, status, error_message, transferred_by)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'failed', ?, ?)""",
-            (transfer_group_id, req.sku, req.sku, req.quantity,
-             req.from_location_id, from_name, req.to_location_id, to_name,
-             f"Item not found at {from_name}", transferred_by),
-        )
-        await db.commit()
+        try:
+            await db.execute(
+                """INSERT INTO transfer_history
+                   (transfer_group_id, sku, item_name, quantity, from_location_id, from_location_name,
+                    to_location_id, to_location_name, status, error_message, transferred_by)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'failed', ?, ?)""",
+                (transfer_group_id, req.sku, req.sku, req.quantity,
+                 req.from_location_id, from_name, req.to_location_id, to_name,
+                 f"Item not found at {from_name}", transferred_by),
+            )
+            await db.commit()
+        except Exception as log_err:
+            print(f"[transfer] Failed to log transfer history: {log_err}")
         raise HTTPException(status_code=404, detail=f"Item with SKU '{req.sku}' not found at {from_name}")
 
     item_name = source_item.get("name", req.sku)
     current_stock = (source_item.get("itemStock") or {}).get("quantity", 0)
     if current_stock < req.quantity:
-        await db.execute(
-            """INSERT INTO transfer_history
-               (transfer_group_id, sku, item_name, quantity, from_location_id, from_location_name,
-                to_location_id, to_location_name, status, error_message, from_stock_before, transferred_by)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'failed', ?, ?, ?)""",
-            (transfer_group_id, req.sku, item_name, req.quantity,
-             req.from_location_id, from_name, req.to_location_id, to_name,
-             f"Insufficient stock: {current_stock} available, {req.quantity} requested",
-             current_stock, transferred_by),
-        )
-        await db.commit()
+        try:
+            await db.execute(
+                """INSERT INTO transfer_history
+                   (transfer_group_id, sku, item_name, quantity, from_location_id, from_location_name,
+                    to_location_id, to_location_name, status, error_message, from_stock_before, transferred_by)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'failed', ?, ?, ?)""",
+                (transfer_group_id, req.sku, item_name, req.quantity,
+                 req.from_location_id, from_name, req.to_location_id, to_name,
+                 f"Insufficient stock: {current_stock} available, {req.quantity} requested",
+                 current_stock, transferred_by),
+            )
+            await db.commit()
+        except Exception as log_err:
+            print(f"[transfer] Failed to log transfer history: {log_err}")
         raise HTTPException(
             status_code=400,
             detail=f"Insufficient stock at {from_name}: {current_stock} available, {req.quantity} requested"
@@ -2028,16 +2034,19 @@ async def transfer_stock(
             break
 
     if not dest_item:
-        await db.execute(
-            """INSERT INTO transfer_history
-               (transfer_group_id, sku, item_name, quantity, from_location_id, from_location_name,
-                to_location_id, to_location_name, status, error_message, from_stock_before, transferred_by)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'failed', ?, ?, ?)""",
-            (transfer_group_id, req.sku, item_name, req.quantity,
-             req.from_location_id, from_name, req.to_location_id, to_name,
-             f"Item not found at {to_name}", current_stock, transferred_by),
-        )
-        await db.commit()
+        try:
+            await db.execute(
+                """INSERT INTO transfer_history
+                   (transfer_group_id, sku, item_name, quantity, from_location_id, from_location_name,
+                    to_location_id, to_location_name, status, error_message, from_stock_before, transferred_by)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'failed', ?, ?, ?)""",
+                (transfer_group_id, req.sku, item_name, req.quantity,
+                 req.from_location_id, from_name, req.to_location_id, to_name,
+                 f"Item not found at {to_name}", current_stock, transferred_by),
+            )
+            await db.commit()
+        except Exception as log_err:
+            print(f"[transfer] Failed to log transfer history: {log_err}")
         raise HTTPException(
             status_code=404,
             detail=f"Item with SKU '{req.sku}' not found at {to_name}. Push the item to that location first."
@@ -2045,40 +2054,81 @@ async def transfer_stock(
 
     dest_stock = (dest_item.get("itemStock") or {}).get("quantity", 0)
 
-    # Execute transfer: deduct from source, add to destination
+    # Execute transfer: deduct from source, then add to destination
     new_from_stock = current_stock - req.quantity
     new_to_stock = dest_stock + req.quantity
+    source_deducted = False
 
+    # Step 1: Deduct from source
     try:
         await from_client.update_item_stock(source_item["id"], new_from_stock)
+        source_deducted = True
+    except Exception as e:
+        # Source deduction failed — nothing changed
+        try:
+            await db.execute(
+                """INSERT INTO transfer_history
+                   (transfer_group_id, sku, item_name, quantity, from_location_id, from_location_name,
+                    to_location_id, to_location_name, status, error_message,
+                    from_stock_before, to_stock_before, transferred_by)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'failed', ?, ?, ?, ?)""",
+                (transfer_group_id, req.sku, item_name, req.quantity,
+                 req.from_location_id, from_name, req.to_location_id, to_name,
+                 f"Source deduction failed: {e}", current_stock, dest_stock, transferred_by),
+            )
+            await db.commit()
+        except Exception as log_err:
+            print(f"[transfer] Failed to log transfer history: {log_err}")
+        raise HTTPException(status_code=500, detail=f"Transfer failed (source deduction): {str(e)}")
+
+    # Step 2: Add to destination
+    try:
         await to_client.update_item_stock(dest_item["id"], new_to_stock)
     except Exception as e:
-        # Log the Clover API failure
+        # Source was deducted but destination failed — partial transfer / stock loss
+        # Attempt to roll back the source deduction
+        rollback_msg = ""
+        try:
+            await from_client.update_item_stock(source_item["id"], current_stock)
+            rollback_msg = " (source rollback succeeded)"
+        except Exception as rb_err:
+            rollback_msg = f" (source rollback also failed: {rb_err})"
+
+        try:
+            await db.execute(
+                """INSERT INTO transfer_history
+                   (transfer_group_id, sku, item_name, quantity, from_location_id, from_location_name,
+                    to_location_id, to_location_name, status, error_message,
+                    from_stock_before, from_stock_after, to_stock_before, transferred_by)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'partial', ?, ?, ?, ?, ?)""",
+                (transfer_group_id, req.sku, item_name, req.quantity,
+                 req.from_location_id, from_name, req.to_location_id, to_name,
+                 f"Destination add failed: {e}{rollback_msg}",
+                 current_stock, new_from_stock, dest_stock, transferred_by),
+            )
+            await db.commit()
+        except Exception as log_err:
+            print(f"[transfer] Failed to log transfer history: {log_err}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Transfer partially failed: source deducted but destination add failed: {str(e)}{rollback_msg}"
+        )
+
+    # Both calls succeeded — log full success
+    try:
         await db.execute(
             """INSERT INTO transfer_history
                (transfer_group_id, sku, item_name, quantity, from_location_id, from_location_name,
-                to_location_id, to_location_name, status, error_message,
-                from_stock_before, to_stock_before, transferred_by)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'failed', ?, ?, ?, ?)""",
+                to_location_id, to_location_name, status,
+                from_stock_before, from_stock_after, to_stock_before, to_stock_after, transferred_by)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'success', ?, ?, ?, ?, ?)""",
             (transfer_group_id, req.sku, item_name, req.quantity,
              req.from_location_id, from_name, req.to_location_id, to_name,
-             str(e), current_stock, dest_stock, transferred_by),
+             current_stock, new_from_stock, dest_stock, new_to_stock, transferred_by),
         )
         await db.commit()
-        raise HTTPException(status_code=500, detail=f"Transfer failed: {str(e)}")
-
-    # Log successful transfer
-    await db.execute(
-        """INSERT INTO transfer_history
-           (transfer_group_id, sku, item_name, quantity, from_location_id, from_location_name,
-            to_location_id, to_location_name, status,
-            from_stock_before, from_stock_after, to_stock_before, to_stock_after, transferred_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'success', ?, ?, ?, ?, ?)""",
-        (transfer_group_id, req.sku, item_name, req.quantity,
-         req.from_location_id, from_name, req.to_location_id, to_name,
-         current_stock, new_from_stock, dest_stock, new_to_stock, transferred_by),
-    )
-    await db.commit()
+    except Exception as log_err:
+        print(f"[transfer] Failed to log transfer history: {log_err}")
 
     result = {
         "status": "transferred",
