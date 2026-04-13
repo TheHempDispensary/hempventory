@@ -977,7 +977,18 @@ async def list_volume_discounts(db: aiosqlite.Connection = Depends(get_db)):
     """Admin: List all volume discounts."""
     cursor = await db.execute("SELECT * FROM volume_discounts ORDER BY created_at DESC")
     rows = await cursor.fetchall()
-    return [dict(r) for r in rows]
+    results = []
+    for r in rows:
+        d = dict(r)
+        # Count usage from discount_usage table
+        uc = await db.execute(
+            "SELECT COUNT(*) FROM discount_usage WHERE discount_code = ?",
+            (f"VD-{d['id']}",),
+        )
+        count_row = await uc.fetchone()
+        d["times_used"] = count_row[0] if count_row else 0
+        results.append(d)
+    return results
 
 
 @router.get("/volume-discounts/active")
