@@ -82,9 +82,9 @@ class CreateShipmentRequest(BaseModel):
     order_id: int
     parcel_length: float = 10.0
     parcel_width: float = 8.0
-    parcel_height: float = 4.0
+    parcel_height: float = 2.0
     parcel_distance_unit: str = "in"
-    parcel_weight: float = 1.0
+    parcel_weight: float = 0.375
     parcel_mass_unit: str = "lb"
     is_hazmat: bool = False
 
@@ -334,13 +334,13 @@ async def get_public_shipping_rates(body: PublicRatesRequest):
         "country": "US",
     }
 
-    # Default parcel dimensions for e-commerce orders
+    # Default parcel dimensions for e-commerce orders (envelope: 10x8x2, ~6oz)
     parcel = {
         "length": "10",
         "width": "8",
-        "height": "4",
+        "height": "2",
         "distance_unit": "in",
-        "weight": "1",
+        "weight": "0.375",
         "mass_unit": "lb",
     }
 
