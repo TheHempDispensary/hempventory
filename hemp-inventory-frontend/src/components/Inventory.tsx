@@ -1,6 +1,6 @@
-import { useEffect, useState, useMemo } from "react";
-import { syncInventory, getCachedInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, bulkAssignCategory, bulkAssignImages, syncRefunds, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup, bulkStockUpdate, addVariantsToItem, getInventoryChanges, getProductAttributes, updateProductAttributes, getImageGallery, uploadGalleryImage, getGalleryImageUrl, deleteGalleryImage } from "../lib/api";
-import { RefreshCw, Search, Plus, ChevronDown, ChevronUp, X, Save, Package, Trash2, CheckSquare, Square, Minus, Image, Download, Upload, Settings, ArrowRightLeft, Images, Layers, Tag, ChevronsLeft, ChevronsRight, ChevronLeft, ChevronRight } from "lucide-react";
+import { useEffect, useState, useMemo, useCallback } from "react";
+import { syncInventory, getCachedInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, getTransferHistory, bulkAssignCategory, bulkAssignImages, syncRefunds, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup, bulkStockUpdate, addVariantsToItem, getInventoryChanges, getProductAttributes, updateProductAttributes, getImageGallery, uploadGalleryImage, getGalleryImageUrl, deleteGalleryImage } from "../lib/api";
+import { RefreshCw, Search, Plus, ChevronDown, ChevronUp, X, Save, Package, Trash2, CheckSquare, Square, Minus, Image, Download, Upload, Settings, ArrowRightLeft, Images, Layers, Tag, ChevronsLeft, ChevronsRight, ChevronLeft, ChevronRight, History, AlertCircle, CheckCircle2 } from "lucide-react";
 
 interface LocationStock {
   location_id: number;
@@ -995,6 +995,7 @@ export default function Inventory() {
     }
     setTransferring(true);
     setTransferResults([]);
+    const groupId = crypto.randomUUID();
     const results: { name: string; status: string }[] = [];
     for (const [, { item, quantity }] of transferItems) {
       const qty = parseFloat(quantity);
@@ -1003,7 +1004,7 @@ export default function Inventory() {
         continue;
       }
       try {
-        const resp = await transferStock(item.sku, transferFromId, transferToId, qty);
+        const resp = await transferStock(item.sku, transferFromId, transferToId, qty, groupId);
         const d = resp.data;
         results.push({ name: d.item_name, status: `Transferred ${d.quantity}` });
       } catch (err) {
@@ -1157,6 +1158,47 @@ export default function Inventory() {
     }
   };
 
+  // Transfer history state
+  interface TransferHistoryItem {
+    sku: string;
+    item_name: string;
+    quantity: number;
+    status: string;
+    error_message: string | null;
+    from_stock_before: number | null;
+    from_stock_after: number | null;
+    to_stock_before: number | null;
+    to_stock_after: number | null;
+    created_at: string;
+  }
+  interface TransferGroup {
+    transfer_group_id: string;
+    created_at: string;
+    from_location: string;
+    to_location: string;
+    transferred_by: string;
+    item_count: number;
+    success_count: number;
+    failed_count: number;
+    items: TransferHistoryItem[];
+  }
+  const [showTransferHistory, setShowTransferHistory] = useState(false);
+  const [transferHistory, setTransferHistory] = useState<TransferGroup[]>([]);
+  const [transferHistoryLoading, setTransferHistoryLoading] = useState(false);
+  const [expandedTransferGroup, setExpandedTransferGroup] = useState<string | null>(null);
+
+  const loadTransferHistory = useCallback(async () => {
+    setTransferHistoryLoading(true);
+    try {
+      const resp = await getTransferHistory(100, 0);
+      setTransferHistory(resp.data.transfers);
+    } catch (err) {
+      console.error("Failed to load transfer history:", err);
+    } finally {
+      setTransferHistoryLoading(false);
+    }
+  }, []);
+
   const handleSyncRefunds = async () => {
     setSyncingRefunds(true);
     try {
@@ -1268,6 +1310,14 @@ export default function Inventory() {
           >
             <ArrowRightLeft className="w-4 h-4" />
             Transfer
+          </button>
+          <button
+            onClick={() => { setShowTransferHistory(true); loadTransferHistory(); }}
+            className="flex items-center gap-2 px-4 py-2 border border-indigo-300 bg-indigo-50 text-indigo-700 rounded-lg hover:bg-indigo-100 text-sm transition-colors"
+            title="View transfer history"
+          >
+            <History className="w-4 h-4" />
+            Transfers
           </button>
           <button
             onClick={() => { setShowBulkImage(true); setBulkImageResult(null); }}
@@ -3440,6 +3490,142 @@ export default function Inventory() {
                 className="flex-1 px-4 py-2 bg-pink-600 text-white rounded-lg text-sm hover:bg-pink-700 disabled:opacity-50"
               >
                 {assigningImages ? "Assigning..." : `Assign to ${bulkImageSelected.size} Product${bulkImageSelected.size !== 1 ? "s" : ""}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Transfer History Modal */}
+      {showTransferHistory && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-4xl w-full p-6 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-3">
+                <History className="w-5 h-5 text-indigo-600" />
+                <h3 className="text-lg font-bold text-gray-900">Transfer History</h3>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={loadTransferHistory}
+                  disabled={transferHistoryLoading}
+                  className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+                  title="Refresh"
+                >
+                  <RefreshCw className={`w-4 h-4 text-gray-500 ${transferHistoryLoading ? "animate-spin" : ""}`} />
+                </button>
+                <button onClick={() => setShowTransferHistory(false)} className="p-2 hover:bg-gray-100 rounded-lg"><X className="w-5 h-5" /></button>
+              </div>
+            </div>
+
+            {transferHistoryLoading && transferHistory.length === 0 ? (
+              <div className="flex items-center justify-center py-12">
+                <RefreshCw className="w-6 h-6 text-indigo-500 animate-spin" />
+                <span className="ml-2 text-gray-500">Loading transfers...</span>
+              </div>
+            ) : transferHistory.length === 0 ? (
+              <div className="text-center py-12 text-gray-500">
+                <ArrowRightLeft className="w-10 h-10 mx-auto mb-3 text-gray-300" />
+                <p>No transfers recorded yet.</p>
+                <p className="text-sm mt-1">Transfers will appear here after you move stock between locations.</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {transferHistory.map((group) => (
+                  <div key={group.transfer_group_id} className="border border-gray-200 rounded-lg overflow-hidden">
+                    <button
+                      onClick={() => setExpandedTransferGroup(expandedTransferGroup === group.transfer_group_id ? null : group.transfer_group_id)}
+                      className="w-full flex items-center justify-between p-4 hover:bg-gray-50 transition-colors text-left"
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${group.failed_count > 0 ? (group.success_count > 0 ? "bg-amber-400" : "bg-red-400") : "bg-green-400"}`} />
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-gray-900 truncate">
+                            {group.from_location} <span className="text-gray-400 mx-1">&rarr;</span> {group.to_location}
+                          </p>
+                          <p className="text-xs text-gray-500">
+                            {new Date(group.created_at + "Z").toLocaleString()} &middot; by {group.transferred_by}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-3 flex-shrink-0">
+                        <div className="flex items-center gap-1.5 text-xs">
+                          {group.success_count > 0 && (
+                            <span className="flex items-center gap-1 text-green-600">
+                              <CheckCircle2 className="w-3.5 h-3.5" /> {group.success_count}
+                            </span>
+                          )}
+                          {group.failed_count > 0 && (
+                            <span className="flex items-center gap-1 text-red-600">
+                              <AlertCircle className="w-3.5 h-3.5" /> {group.failed_count}
+                            </span>
+                          )}
+                          <span className="text-gray-400 ml-1">{group.item_count} item{group.item_count !== 1 ? "s" : ""}</span>
+                        </div>
+                        {expandedTransferGroup === group.transfer_group_id ? <ChevronUp className="w-4 h-4 text-gray-400" /> : <ChevronDown className="w-4 h-4 text-gray-400" />}
+                      </div>
+                    </button>
+                    {expandedTransferGroup === group.transfer_group_id && (
+                      <div className="border-t border-gray-200 bg-gray-50">
+                        <table className="w-full text-sm">
+                          <thead>
+                            <tr className="text-xs text-gray-500 uppercase">
+                              <th className="text-left px-4 py-2">Item</th>
+                              <th className="text-left px-4 py-2">SKU</th>
+                              <th className="text-right px-4 py-2">Qty</th>
+                              <th className="text-right px-4 py-2">From Stock</th>
+                              <th className="text-right px-4 py-2">To Stock</th>
+                              <th className="text-center px-4 py-2">Status</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {group.items.map((item, idx) => (
+                              <tr key={idx} className={`border-t border-gray-100 ${item.status === "failed" ? "bg-red-50/50" : item.status === "partial" ? "bg-amber-50/50" : ""}`}>
+                                <td className="px-4 py-2 text-gray-900 max-w-[200px] truncate" title={item.item_name}>{item.item_name}</td>
+                                <td className="px-4 py-2 text-gray-500 font-mono text-xs">{item.sku}</td>
+                                <td className="px-4 py-2 text-right text-gray-700">{item.quantity}</td>
+                                <td className="px-4 py-2 text-right text-gray-500 text-xs">
+                                  {item.from_stock_before != null ? (
+                                    <>{item.from_stock_before}{item.from_stock_after != null && <span className="text-gray-400"> &rarr; {item.from_stock_after}</span>}</>
+                                  ) : "—"}
+                                </td>
+                                <td className="px-4 py-2 text-right text-gray-500 text-xs">
+                                  {item.to_stock_before != null ? (
+                                    <>{item.to_stock_before}{item.to_stock_after != null && <span className="text-gray-400"> &rarr; {item.to_stock_after}</span>}</>
+                                  ) : "—"}
+                                </td>
+                                <td className="px-4 py-2 text-center">
+                                  {item.status === "success" ? (
+                                    <span className="inline-flex items-center gap-1 text-xs text-green-700 bg-green-100 px-2 py-0.5 rounded-full">
+                                      <CheckCircle2 className="w-3 h-3" /> Success
+                                    </span>
+                                  ) : item.status === "partial" ? (
+                                    <span className="inline-flex items-center gap-1 text-xs text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full" title={item.error_message || "Partial failure"}>
+                                      <AlertCircle className="w-3 h-3" /> Partial
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex items-center gap-1 text-xs text-red-700 bg-red-100 px-2 py-0.5 rounded-full" title={item.error_message || "Failed"}>
+                                      <AlertCircle className="w-3 h-3" /> Failed
+                                    </span>
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="mt-4 flex justify-end">
+              <button
+                onClick={() => setShowTransferHistory(false)}
+                className="px-4 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50"
+              >
+                Close
               </button>
             </div>
           </div>
