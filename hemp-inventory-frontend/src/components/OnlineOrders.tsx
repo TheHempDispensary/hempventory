@@ -256,11 +256,11 @@ export default function OnlineOrders() {
   const [loadingRates, setLoadingRates] = useState(false);
   const [purchasingLabel, setPurchasingLabel] = useState(false);
   const [shippingError, setShippingError] = useState("");
-  const [parcelWeight, setParcelWeight] = useState("1.0");
+  const [parcelWeight, setParcelWeight] = useState("0.375");
   const [weightUnit, setWeightUnit] = useState<"lb" | "oz">("lb");
   const [parcelLength, setParcelLength] = useState("10");
   const [parcelWidth, setParcelWidth] = useState("8");
-  const [parcelHeight, setParcelHeight] = useState("4");
+  const [parcelHeight, setParcelHeight] = useState("2");
   const [isHazmat, setIsHazmat] = useState(false);
 
   // Staff notes state
@@ -350,10 +350,10 @@ export default function OnlineOrders() {
     try {
       const res = await createShipment({
         order_id: orderId,
-        parcel_weight: Math.round((weightUnit === "oz" ? (parseFloat(parcelWeight) || 1.0) / 16 : parseFloat(parcelWeight) || 1.0) * 10000) / 10000,
+        parcel_weight: Math.round((weightUnit === "oz" ? (parseFloat(parcelWeight) || 0.375) / 16 : parseFloat(parcelWeight) || 0.375) * 10000) / 10000,
         parcel_length: parseFloat(parcelLength) || 10,
         parcel_width: parseFloat(parcelWidth) || 8,
-        parcel_height: parseFloat(parcelHeight) || 4,
+        parcel_height: parseFloat(parcelHeight) || 2,
         is_hazmat: isHazmat,
       });
       const fetchedRates = res.data.rates || [];
