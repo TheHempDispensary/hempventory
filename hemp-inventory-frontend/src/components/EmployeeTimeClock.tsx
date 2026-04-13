@@ -359,7 +359,7 @@ export default function EmployeeTimeClock() {
     const day = est.getDay(); // 0=Sun
     est.setDate(est.getDate() - day);
     est.setHours(0, 0, 0, 0);
-    return est.toISOString().split("T")[0];
+    return `${est.getFullYear()}-${String(est.getMonth() + 1).padStart(2, "0")}-${String(est.getDate()).padStart(2, "0")}`;
   };
 
   const weeklyGroups: { weekStart: string; weekLabel: string; entries: TimeEntry[]; totalHours: number }[] = [];
