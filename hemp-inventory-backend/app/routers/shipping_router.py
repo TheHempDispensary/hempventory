@@ -127,11 +127,13 @@ async def create_shipment(
 
     # Check if this order contains LeafLife products (ship from WI supplier)
     items_cursor = await db.execute(
-        "SELECT sku FROM ecommerce_order_items WHERE order_id = ?", (body.order_id,)
+        "SELECT sku, product_name FROM ecommerce_order_items WHERE order_id = ?", (body.order_id,)
     )
     item_rows = await items_cursor.fetchall()
     order_skus = [r[0] for r in item_rows if r[0]]
-    from_address = LEAFLIFE_FROM_ADDRESS if _has_leaflife_products_skus(order_skus) else DEFAULT_FROM_ADDRESS
+    order_names = [r[1] for r in item_rows if r[1]]
+    is_leaflife = _has_leaflife_products_skus(order_skus) or _has_leaflife_products_names(order_names)
+    from_address = LEAFLIFE_FROM_ADDRESS if is_leaflife else DEFAULT_FROM_ADDRESS
 
     # Build the destination address
     to_address = {
