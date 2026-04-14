@@ -25,6 +25,8 @@ interface Order {
   shipping_zip: string;
   subtotal: number;
   discount: number;
+  volume_discount: number;
+  loyalty_discount: number;
   promo_code: string;
   shipping_cost: number;
   tax: number;
@@ -921,6 +923,12 @@ export default function OnlineOrders() {
                         <p className="text-gray-600">Subtotal: {formatPrice(order.subtotal)}</p>
                         {order.discount > 0 && (
                           <p className="text-green-600">Discount ({order.promo_code || 'Promo'}): -{formatPrice(order.discount)}</p>
+                        )}
+                        {(order.volume_discount || 0) > 0 && (
+                          <p className="text-green-600">Volume Discount: -{formatPrice(order.volume_discount)}</p>
+                        )}
+                        {(order.loyalty_discount || 0) > 0 && (
+                          <p className="text-green-600">Loyalty Reward: -{formatPrice(order.loyalty_discount)}</p>
                         )}
                         <p className="text-gray-600">Shipping: {order.shipping_cost === 0 ? "Free" : formatPrice(order.shipping_cost)}</p>
                         <p className="text-gray-600">Tax: {formatPrice(order.tax)}</p>

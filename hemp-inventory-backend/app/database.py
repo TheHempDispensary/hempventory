@@ -190,6 +190,8 @@ async def init_db():
             ("promo_code", "TEXT"),
             ("fulfillment_type", "TEXT DEFAULT 'shipping'"),
             ("shipping_service", "TEXT"),
+            ("volume_discount", "INTEGER DEFAULT 0"),
+            ("loyalty_discount", "INTEGER DEFAULT 0"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE ecommerce_orders ADD COLUMN {col} {coldef}")
