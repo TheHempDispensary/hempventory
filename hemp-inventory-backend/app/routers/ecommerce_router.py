@@ -56,6 +56,8 @@ class CreateOrderRequest(BaseModel):
     items: List[OrderItem]
     subtotal: int = 0
     discount: int = 0
+    volume_discount: int = 0
+    loyalty_discount: int = 0
     shipping_cost: int = 0
     tax: int = 0
     total: int = 0
@@ -1325,8 +1327,8 @@ async def create_order(
             """INSERT INTO ecommerce_orders
                (order_number, customer_first_name, customer_last_name, customer_email, customer_phone,
                 shipping_address, shipping_apartment, shipping_city, shipping_state, shipping_zip,
-                subtotal, discount, promo_code, shipping_cost, tax, total, notes, charge_id, payment_status, fulfillment_type, shipping_service)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                subtotal, discount, volume_discount, loyalty_discount, promo_code, shipping_cost, tax, total, notes, charge_id, payment_status, fulfillment_type, shipping_service)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 order_number,
                 order.customer.first_name,
@@ -1340,6 +1342,8 @@ async def create_order(
                 order.shipping_address.zip,
                 order.subtotal,
                 order.discount,
+                order.volume_discount,
+                order.loyalty_discount,
                 order.promo_code or "",
                 order.shipping_cost,
                 order.tax,
@@ -1372,25 +1376,35 @@ async def create_order(
         print(f"[ORDER LOST] customer={order.customer.first_name} {order.customer.last_name} email={order.customer.email} phone={order.customer.phone}")
         print(f"[ORDER LOST] items: {items_dump}")
         print(f"[ORDER LOST] DB error: {db_err}")
-        # Try a simplified insert as a last resort (fewer columns, in case a column is missing)
+        # Try a simplified insert using only columns from the original CREATE TABLE schema.
+        # Excludes migration-added columns (discount, promo_code, volume_discount,
+        # loyalty_discount, shipping_service, fulfillment_type) so this can still succeed
+        # if a migration hasn't run yet — which is the most likely reason the primary insert failed.
         try:
             cursor2 = await db.execute(
                 """INSERT INTO ecommerce_orders
                    (order_number, customer_first_name, customer_last_name, customer_email, customer_phone,
-                    subtotal, tax, total, charge_id, payment_status, fulfillment_type)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    shipping_address, shipping_apartment, shipping_city, shipping_state, shipping_zip,
+                    subtotal, shipping_cost, tax, total, notes, charge_id, payment_status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     order_number,
                     order.customer.first_name,
                     order.customer.last_name,
                     order.customer.email,
                     order.customer.phone,
+                    order.shipping_address.address,
+                    order.shipping_address.apartment,
+                    order.shipping_address.city,
+                    order.shipping_address.state,
+                    order.shipping_address.zip,
                     order.subtotal,
+                    order.shipping_cost,
                     order.tax,
                     order.total,
+                    order.notes,
                     charge_id,
                     payment_status,
-                    order.fulfillment_type,
                 ),
             )
             order_id = cursor2.lastrowid
@@ -1708,6 +1722,8 @@ async def _send_order_emails(
                         <td style="padding: 8px 12px; text-align: right;">{_format_price(order.subtotal)}</td>
                     </tr>
                     {f'<tr><td style="padding: 8px 12px; color: #059669;">Discount ({order.promo_code})</td><td style="padding: 8px 12px; text-align: right; color: #059669;">-{_format_price(order.discount)}</td></tr>' if order.discount else ''}
+                    {f'<tr><td style="padding: 8px 12px; color: #059669;">Volume Discount</td><td style="padding: 8px 12px; text-align: right; color: #059669;">-{_format_price(order.volume_discount)}</td></tr>' if order.volume_discount else ''}
+                    {f'<tr><td style="padding: 8px 12px; color: #059669;">Loyalty Reward</td><td style="padding: 8px 12px; text-align: right; color: #059669;">-{_format_price(order.loyalty_discount)}</td></tr>' if order.loyalty_discount else ''}
                     <tr>
                         <td style="padding: 8px 12px;">Shipping</td>
                         <td style="padding: 8px 12px; text-align: right;">{'Free' if order.shipping_cost == 0 else _format_price(order.shipping_cost)}</td>
@@ -1804,6 +1820,8 @@ async def _send_order_emails(
                         <td style="padding: 8px 12px; text-align: right;">{_format_price(order.subtotal)}</td>
                     </tr>
                     {f'<tr><td style="padding: 8px 12px; color: #059669;">Discount ({order.promo_code})</td><td style="padding: 8px 12px; text-align: right; color: #059669;">-{_format_price(order.discount)}</td></tr>' if order.discount else ''}
+                    {f'<tr><td style="padding: 8px 12px; color: #059669;">Volume Discount</td><td style="padding: 8px 12px; text-align: right; color: #059669;">-{_format_price(order.volume_discount)}</td></tr>' if order.volume_discount else ''}
+                    {f'<tr><td style="padding: 8px 12px; color: #059669;">Loyalty Reward</td><td style="padding: 8px 12px; text-align: right; color: #059669;">-{_format_price(order.loyalty_discount)}</td></tr>' if order.loyalty_discount else ''}
                     <tr>
                         <td style="padding: 8px 12px;">Shipping</td>
                         <td style="padding: 8px 12px; text-align: right;">{'Free' if order.shipping_cost == 0 else _format_price(order.shipping_cost)}</td>
@@ -2239,6 +2257,8 @@ async def resend_order_confirmation(
     first_name = order.get("customer_first_name", "Customer")
     subtotal = order.get("subtotal", 0)
     discount = order.get("discount", 0)
+    volume_discount = order.get("volume_discount", 0) or 0
+    loyalty_discount = order.get("loyalty_discount", 0) or 0
     promo_code = order.get("promo_code", "")
     shipping_cost = order.get("shipping_cost", 0)
     tax = order.get("tax", 0)
@@ -2290,6 +2310,8 @@ async def resend_order_confirmation(
                     <td style="padding: 8px 12px; text-align: right;">{_format_price(subtotal)}</td>
                 </tr>
                 {f'<tr><td style="padding: 8px 12px; color: #059669;">Discount ({promo_code})</td><td style="padding: 8px 12px; text-align: right; color: #059669;">-{_format_price(discount)}</td></tr>' if discount else ''}
+                {f'<tr><td style="padding: 8px 12px; color: #059669;">Volume Discount</td><td style="padding: 8px 12px; text-align: right; color: #059669;">-{_format_price(volume_discount)}</td></tr>' if volume_discount else ''}
+                {f'<tr><td style="padding: 8px 12px; color: #059669;">Loyalty Reward</td><td style="padding: 8px 12px; text-align: right; color: #059669;">-{_format_price(loyalty_discount)}</td></tr>' if loyalty_discount else ''}
                 <tr>
                     <td style="padding: 8px 12px;">Shipping</td>
                     <td style="padding: 8px 12px; text-align: right;">{'Free' if shipping_cost == 0 else _format_price(shipping_cost)}</td>
