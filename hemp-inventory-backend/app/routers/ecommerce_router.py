@@ -1376,15 +1376,17 @@ async def create_order(
         print(f"[ORDER LOST] customer={order.customer.first_name} {order.customer.last_name} email={order.customer.email} phone={order.customer.phone}")
         print(f"[ORDER LOST] items: {items_dump}")
         print(f"[ORDER LOST] DB error: {db_err}")
-        # Try a simplified insert as a last resort (fewer columns, in case a column is missing)
+        # Try a simplified insert using only columns from the original CREATE TABLE schema.
+        # Excludes migration-added columns (discount, promo_code, volume_discount,
+        # loyalty_discount, shipping_service, fulfillment_type) so this can still succeed
+        # if a migration hasn't run yet — which is the most likely reason the primary insert failed.
         try:
             cursor2 = await db.execute(
                 """INSERT INTO ecommerce_orders
                    (order_number, customer_first_name, customer_last_name, customer_email, customer_phone,
                     shipping_address, shipping_apartment, shipping_city, shipping_state, shipping_zip,
-                    subtotal, discount, volume_discount, loyalty_discount, promo_code, shipping_cost, tax, total, notes,
-                    charge_id, payment_status, fulfillment_type, shipping_service)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    subtotal, shipping_cost, tax, total, notes, charge_id, payment_status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     order_number,
                     order.customer.first_name,
@@ -1397,18 +1399,12 @@ async def create_order(
                     order.shipping_address.state,
                     order.shipping_address.zip,
                     order.subtotal,
-                    order.discount,
-                    order.volume_discount,
-                    order.loyalty_discount,
-                    order.promo_code or "",
                     order.shipping_cost,
                     order.tax,
                     order.total,
                     order.notes,
                     charge_id,
                     payment_status,
-                    order.fulfillment_type,
-                    order.shipping_service,
                 ),
             )
             order_id = cursor2.lastrowid
