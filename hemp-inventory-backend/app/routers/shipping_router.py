@@ -49,9 +49,22 @@ LEAFLIFE_FROM_ADDRESS = {
 }
 
 
+LEAFLIFE_NAME_KEYWORDS = ["everyday", "premium", "essential", "smalls", "snowcaps"]
+
+
 def _has_leaflife_products_skus(skus: list[str]) -> bool:
     """Check if any SKUs indicate LeafLife products (SKU starts with LF-)."""
     return any(s.upper().startswith("LF-") for s in skus if s)
+
+
+def _has_leaflife_products_names(names: list[str]) -> bool:
+    """Fallback: check if any product names contain LeafLife keywords."""
+    for name in names:
+        if name:
+            lower = name.lower()
+            if any(kw in lower for kw in LEAFLIFE_NAME_KEYWORDS):
+                return True
+    return False
 
 
 def _get_shippo_headers() -> dict:
@@ -344,8 +357,9 @@ async def get_public_shipping_rates(body: PublicRatesRequest):
         "mass_unit": "lb",
     }
 
-    # Use LeafLife origin address if any products are LeafLife (SKU starts with LF-)
-    from_address = LEAFLIFE_FROM_ADDRESS if _has_leaflife_products_skus(body.product_skus) else DEFAULT_FROM_ADDRESS
+    # Use LeafLife origin address if any products are LeafLife (check SKU first, fall back to name keywords)
+    is_leaflife = _has_leaflife_products_skus(body.product_skus) or _has_leaflife_products_names(body.product_names)
+    from_address = LEAFLIFE_FROM_ADDRESS if is_leaflife else DEFAULT_FROM_ADDRESS
 
     shipment_data = {
         "address_from": from_address,
