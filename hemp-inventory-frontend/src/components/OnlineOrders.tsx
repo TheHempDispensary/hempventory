@@ -151,6 +151,8 @@ function printMultipleOrders(orders: Order[]) {
         <div style="text-align:right;margin-top:12px">
           <p>Subtotal: $${(order.subtotal / 100).toFixed(2)}</p>
           ${order.discount ? `<p style="color:#059669">Discount (${order.promo_code || 'Promo'}): -$${(order.discount / 100).toFixed(2)}</p>` : ''}
+          ${order.volume_discount ? `<p style="color:#059669">Volume Discount: -$${(order.volume_discount / 100).toFixed(2)}</p>` : ''}
+          ${order.loyalty_discount ? `<p style="color:#059669">Loyalty Reward: -$${(order.loyalty_discount / 100).toFixed(2)}</p>` : ''}
           <p>Shipping: ${order.shipping_cost === 0 ? "Free" : "$" + (order.shipping_cost / 100).toFixed(2)}</p>
           <p>Tax: $${(order.tax / 100).toFixed(2)}</p>
           <p style="font-size:18px"><strong>Total: $${(order.total / 100).toFixed(2)}</strong></p>
@@ -230,6 +232,8 @@ function printOrder(order: Order) {
       <div style="text-align:right;margin-top:12px">
         <p>Subtotal: $${(order.subtotal / 100).toFixed(2)}</p>
         ${order.discount ? `<p style="color:#059669">Discount (${order.promo_code || 'Promo'}): -$${(order.discount / 100).toFixed(2)}</p>` : ''}
+        ${order.volume_discount ? `<p style="color:#059669">Volume Discount: -$${(order.volume_discount / 100).toFixed(2)}</p>` : ''}
+        ${order.loyalty_discount ? `<p style="color:#059669">Loyalty Reward: -$${(order.loyalty_discount / 100).toFixed(2)}</p>` : ''}
         <p>Shipping: ${order.shipping_cost === 0 ? "Free" : "$" + (order.shipping_cost / 100).toFixed(2)}</p>
         <p>Tax: $${(order.tax / 100).toFixed(2)}</p>
         <p style="font-size:18px"><strong>Total: $${(order.total / 100).toFixed(2)}</strong></p>
