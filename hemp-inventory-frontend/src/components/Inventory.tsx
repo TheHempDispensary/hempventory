@@ -50,7 +50,7 @@ export default function Inventory() {
   const [search, setSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [locationFilter, setLocationFilter] = useState("all");
-  const [sortField, setSortField] = useState<"name" | "sku" | "stock" | "price" | "category" | "par">("name");
+  const [sortField, setSortField] = useState<"name" | "sku" | "stock" | "price" | "category" | "par" | "date">("name");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [sortLocation, setSortLocation] = useState<string>("");
   const [currentPage, setCurrentPage] = useState(1);
@@ -338,6 +338,8 @@ export default function Inventory() {
         else if (!aHasLoc) { return 1; }
         else if (!bHasLoc) { return -1; }
         else { cmp = (a.locations[sortLocation].par_level ?? 0) - (b.locations[sortLocation].par_level ?? 0); }
+      } else if (sortField === "date") {
+        cmp = (a.modified_time || 0) - (b.modified_time || 0);
       }
       return sortDir === "asc" ? cmp : -cmp;
     });
@@ -808,7 +810,7 @@ export default function Inventory() {
     URL.revokeObjectURL(url);
   };
 
-  const toggleSort = (field: "name" | "sku" | "stock" | "price" | "category" | "par", locName?: string) => {
+  const toggleSort = (field: "name" | "sku" | "stock" | "price" | "category" | "par" | "date", locName?: string) => {
     if (sortField === field && sortLocation === (locName || "")) {
       setSortDir(sortDir === "asc" ? "desc" : "asc");
     } else {
@@ -1378,6 +1380,20 @@ export default function Inventory() {
           {locations.map((loc) => (
             <option key={loc.id} value={loc.name}>{loc.name}</option>
           ))}
+        </select>
+        <select
+          value={sortField === "date" ? (sortDir === "desc" ? "newest" : "oldest") : "default"}
+          onChange={(e) => {
+            const val = e.target.value;
+            if (val === "newest") { setSortField("date"); setSortDir("desc"); }
+            else if (val === "oldest") { setSortField("date"); setSortDir("asc"); }
+            else { setSortField("name"); setSortDir("asc"); }
+          }}
+          className="px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-green-500 outline-none"
+        >
+          <option value="default">Sort: A-Z</option>
+          <option value="newest">Sort: Newest First</option>
+          <option value="oldest">Sort: Oldest First</option>
         </select>
       </div>
 

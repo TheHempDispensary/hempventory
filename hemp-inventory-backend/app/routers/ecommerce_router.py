@@ -366,6 +366,7 @@ async def _fetch_and_cache_products() -> dict:
                 "effect": sku_attrs.get("effect"),
                 "strength": sku_attrs.get("strength"),
                 "product_type": sku_attrs.get("product_type"),
+                "modified_time": item.get("modifiedTime", 0),
             })
 
         products.sort(key=lambda p: p["name"])
@@ -1917,6 +1918,7 @@ async def get_product_detail(product_id: str):
         "image_url": image_url,
         "is_age_restricted": item.get("isAgeRestricted", False),
         "shipping_only": is_shipping_only,
+        "modified_time": item.get("modifiedTime", 0),
     }
 
 
