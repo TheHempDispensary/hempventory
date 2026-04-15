@@ -1628,19 +1628,37 @@ export default function Inventory() {
                         Add another attribute
                       </button>
 
-                      {/* Preview of combinations */}
+                      {/* Preview of combinations (with duplicate-attribute merging) */}
                       {(() => {
                         const validAttrs = variantAttributes.filter(v => v.attribute_name && v.attribute_name !== "Custom" && v.option_names.some(o => o.trim()));
                         if (validAttrs.length === 0) return null;
-                        const optionArrays = validAttrs.map(v => v.option_names.filter(o => o.trim()));
-                        const combos: string[][] = optionArrays.reduce<string[][]>(
+                        // Detect duplicate attribute names
+                        const attrNames = validAttrs.map(a => a.attribute_name.trim().toLowerCase());
+                        const hasDuplicates = attrNames.length !== new Set(attrNames).size;
+                        // Merge duplicates for accurate preview (mirrors backend logic — case-insensitive)
+                        const merged: Record<string, string[]> = {};
+                        for (const a of validAttrs) {
+                          const key = a.attribute_name.trim().toLowerCase();
+                          if (!merged[key]) merged[key] = [];
+                          for (const o of a.option_names) {
+                            const ot = o.trim();
+                            if (ot && !merged[key].includes(ot)) merged[key].push(ot);
+                          }
+                        }
+                        const mergedArrays = Object.values(merged);
+                        const combos: string[][] = mergedArrays.reduce<string[][]>(
                           (acc, opts) => acc.flatMap(combo => opts.map(opt => [...combo, opt])),
                           [[]]
                         );
                         return (
-                          <div className="bg-green-50 border border-green-200 rounded-lg p-3 mt-2">
+                          <div className={`border rounded-lg p-3 mt-2 ${hasDuplicates ? "bg-amber-50 border-amber-200" : "bg-green-50 border-green-200"}`}>
+                            {hasDuplicates && (
+                              <p className="text-xs font-semibold text-amber-700 mb-1">
+                                ⚠ Duplicate attribute names detected — options will be merged automatically.
+                              </p>
+                            )}
                             <p className="text-xs font-semibold text-green-700 mb-2">
-                              Preview: {combos.length} variant{combos.length !== 1 ? "s" : ""} will be created
+                              Preview: {combos.length} variant{combos.length !== 1 ? "s" : ""} will be created per location
                             </p>
                             <div className="space-y-1 max-h-32 overflow-y-auto">
                               {combos.slice(0, 20).map((combo, idx) => (
@@ -2654,6 +2672,56 @@ export default function Inventory() {
                     className="text-sm text-green-600 hover:text-green-700 font-medium flex items-center gap-1 mb-3">
                     <Plus className="w-4 h-4" /> Add attribute
                   </button>
+
+                  {/* Variant preview + duplicate attribute warning */}
+                  {(() => {
+                    const validAttrs = editVariantAttrs.filter(a => a.attribute_name.trim() && a.option_names.some(o => o.trim()));
+                    if (validAttrs.length === 0) return null;
+                    // Detect duplicate attribute names
+                    const attrNames = validAttrs.map(a => a.attribute_name.trim().toLowerCase());
+                    const hasDuplicates = attrNames.length !== new Set(attrNames).size;
+                    // Merge duplicates for accurate preview (mirrors backend logic — case-insensitive)
+                    const merged: Record<string, string[]> = {};
+                    for (const a of validAttrs) {
+                      const key = a.attribute_name.trim().toLowerCase();
+                      if (!merged[key]) merged[key] = [];
+                      for (const o of a.option_names) {
+                        const ot = o.trim();
+                        if (ot && !merged[key].includes(ot)) merged[key].push(ot);
+                      }
+                    }
+                    const mergedArrays = Object.values(merged);
+                    const comboCount = mergedArrays.reduce((n, opts) => n * opts.length, 1);
+                    // Strip option names from existing item name for preview
+                    const allOpts = mergedArrays.flat();
+                    let baseName = editItem?.name || "";
+                    for (const opt of [...allOpts].sort((a, b) => b.length - a.length)) {
+                      if (baseName.toLowerCase().endsWith(opt.toLowerCase())) {
+                        baseName = baseName.slice(0, baseName.length - opt.length).trim();
+                        break;
+                      }
+                    }
+                    if (!baseName) baseName = editItem?.name || "Item";
+                    return (
+                      <div className={`border rounded-lg p-3 mb-3 ${hasDuplicates ? "bg-amber-50 border-amber-200" : "bg-green-50 border-green-200"}`}>
+                        {hasDuplicates && (
+                          <p className="text-xs font-semibold text-amber-700 mb-1">
+                            ⚠ Duplicate attribute names detected — options will be merged automatically.
+                          </p>
+                        )}
+                        <p className="text-xs font-semibold text-green-700 mb-2">
+                          Preview: {comboCount} variant{comboCount !== 1 ? "s" : ""} will be created per location
+                        </p>
+                        <div className="space-y-1 max-h-24 overflow-y-auto">
+                          {mergedArrays.reduce<string[][]>((acc, opts) => acc.flatMap(c => opts.map(o => [...c, o])), [[]]).slice(0, 10).map((combo, idx) => (
+                            <p key={idx} className="text-xs text-green-600">{baseName} {combo.join(" / ")}</p>
+                          ))}
+                          {comboCount > 10 && <p className="text-xs text-green-500 italic">...and {comboCount - 10} more</p>}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   <label className="flex items-center gap-2 text-sm text-gray-600 mb-3">
                     <input type="checkbox" checked={keepOriginal} onChange={e => setKeepOriginal(e.target.checked)}
                       className="w-4 h-4 text-green-600 rounded focus:ring-green-500" />
