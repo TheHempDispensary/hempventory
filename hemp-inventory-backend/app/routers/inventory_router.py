@@ -2487,6 +2487,28 @@ async def create_item_group(
     if not locations:
         raise HTTPException(status_code=400, detail="No locations configured")
 
+    # Merge duplicate attribute names: combine options from attributes with the same name.
+    # This prevents accidental cartesian explosion (e.g. two "Size" attributes with 3 opts each → 9 combos).
+    merged_variants: dict[str, list[str]] = {}
+    for v in req.variants:
+        attr_name = v.attribute_name.strip()
+        if not attr_name:
+            continue
+        if attr_name not in merged_variants:
+            merged_variants[attr_name] = []
+        for o in v.option_names:
+            o_stripped = o.strip()
+            if o_stripped and o_stripped not in merged_variants[attr_name]:
+                merged_variants[attr_name].append(o_stripped)
+    merged_variant_list = [VariantOption(attribute_name=k, option_names=v) for k, v in merged_variants.items() if v]
+    if not merged_variant_list:
+        raise HTTPException(status_code=400, detail="At least one attribute with options is required for variants.")
+
+    total_combos = 1
+    for v in merged_variant_list:
+        total_combos *= len(v.option_names)
+    print(f"[create-item-group] name={req.name!r}, {len(merged_variant_list)} attribute(s), {total_combos} combo(s)")
+
     results = []
 
     for loc in locations:
@@ -2498,9 +2520,9 @@ async def create_item_group(
             group = await client.create_item_group(req.name)
             group_id = group["id"]
 
-            # Step 2 & 3: Create attributes and their options
+            # Step 2 & 3: Create attributes and their options (using merged/deduped variants)
             attribute_options: list[list[dict]] = []  # list of lists of option dicts
-            for variant in req.variants:
+            for variant in merged_variant_list:
                 attr = await client.create_attribute(variant.attribute_name, group_id)
                 attr_id = attr["id"]
 
@@ -2638,6 +2660,33 @@ async def add_variants_to_existing_item(
     if not req.variants or not any(v.attribute_name.strip() and any(o.strip() for o in v.option_names) for v in req.variants):
         raise HTTPException(status_code=400, detail="At least one attribute with options is required")
 
+    # Merge duplicate attribute names: combine options from attributes with the same name
+    merged_variants: dict[str, list[str]] = {}
+    for v in req.variants:
+        attr_name = v.attribute_name.strip()
+        if not attr_name:
+            continue
+        if attr_name not in merged_variants:
+            merged_variants[attr_name] = []
+        for o in v.option_names:
+            o_stripped = o.strip()
+            if o_stripped and o_stripped not in merged_variants[attr_name]:
+                merged_variants[attr_name].append(o_stripped)
+    # Replace req.variants with merged version for processing
+    merged_variant_list = [VariantOption(attribute_name=k, option_names=v) for k, v in merged_variants.items() if v]
+
+    # Derive a clean base name by stripping any option values from the end of item_name.
+    # e.g. "Lemon Cherry Gelato Smalls 28 Grams" with option "28 Grams" → "Lemon Cherry Gelato Smalls"
+    all_option_names = [o for opts in merged_variants.values() for o in opts]
+    base_name = req.item_name.strip()
+    for opt in sorted(all_option_names, key=len, reverse=True):
+        if base_name.lower().endswith(opt.lower()):
+            base_name = base_name[: len(base_name) - len(opt)].strip()
+            break  # Only strip one trailing option
+    if not base_name:
+        base_name = req.item_name.strip()  # Safety: never use an empty name
+    print(f"[add-variants] Original name: {req.item_name!r}, base name: {base_name!r}, options: {all_option_names}")
+
     results = []
 
     for loc in locations:
@@ -2662,23 +2711,18 @@ async def add_variants_to_existing_item(
                     category_ids = [c.get("id") for c in cats if c.get("id")]
                     break
 
-            # Step 1: Create the item group
-            group = await client.create_item_group(req.item_name)
+            # Step 1: Create the item group using the CLEAN base name (no size suffix)
+            group = await client.create_item_group(base_name)
             group_id = group["id"]
 
-            # Step 2 & 3: Create attributes and their options
+            # Step 2 & 3: Create attributes and their options (using merged/deduped variants)
             attribute_options: list[list[dict]] = []
-            for variant in req.variants:
-                if not variant.attribute_name.strip():
-                    continue
-                valid_options = [o.strip() for o in variant.option_names if o.strip()]
-                if not valid_options:
-                    continue
-                attr = await client.create_attribute(variant.attribute_name.strip(), group_id)
+            for variant in merged_variant_list:
+                attr = await client.create_attribute(variant.attribute_name, group_id)
                 attr_id = attr["id"]
 
                 options_for_attr: list[dict] = []
-                for opt_name in valid_options:
+                for opt_name in variant.option_names:
                     opt = await client.create_option(attr_id, opt_name)
                     options_for_attr.append({"id": opt["id"], "name": opt_name, "attr_name": variant.attribute_name})
                 attribute_options.append(options_for_attr)
@@ -2694,7 +2738,7 @@ async def add_variants_to_existing_item(
             created_items = []
             for combo in option_combos:
                 item_data: dict = {
-                    "name": req.item_name,
+                    "name": base_name,
                     "price": req.price,
                     "itemGroup": {"id": group_id},
                 }
@@ -2726,7 +2770,7 @@ async def add_variants_to_existing_item(
                     "name": created_item.get("name", ""),
                 })
 
-            # Delete original non-variant item if requested
+            # Delete original non-variant item if requested (always delete — it's replaced by variants)
             if not req.keep_original and existing_item_id:
                 try:
                     await client.delete_item(existing_item_id)
