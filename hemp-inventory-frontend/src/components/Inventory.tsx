@@ -34,6 +34,7 @@ interface InventoryItem {
   default_tax_rates?: boolean;
   has_image?: boolean;
   item_group_name?: string;
+  modified_time?: number;
 }
 
 interface LocationInfo {
