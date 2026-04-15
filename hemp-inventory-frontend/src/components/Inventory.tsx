@@ -1635,10 +1635,10 @@ export default function Inventory() {
                         // Detect duplicate attribute names
                         const attrNames = validAttrs.map(a => a.attribute_name.trim().toLowerCase());
                         const hasDuplicates = attrNames.length !== new Set(attrNames).size;
-                        // Merge duplicates for accurate preview (mirrors backend logic)
+                        // Merge duplicates for accurate preview (mirrors backend logic — case-insensitive)
                         const merged: Record<string, string[]> = {};
                         for (const a of validAttrs) {
-                          const key = a.attribute_name.trim();
+                          const key = a.attribute_name.trim().toLowerCase();
                           if (!merged[key]) merged[key] = [];
                           for (const o of a.option_names) {
                             const ot = o.trim();
@@ -2680,10 +2680,10 @@ export default function Inventory() {
                     // Detect duplicate attribute names
                     const attrNames = validAttrs.map(a => a.attribute_name.trim().toLowerCase());
                     const hasDuplicates = attrNames.length !== new Set(attrNames).size;
-                    // Merge duplicates for accurate preview (mirrors backend logic)
+                    // Merge duplicates for accurate preview (mirrors backend logic — case-insensitive)
                     const merged: Record<string, string[]> = {};
                     for (const a of validAttrs) {
-                      const key = a.attribute_name.trim();
+                      const key = a.attribute_name.trim().toLowerCase();
                       if (!merged[key]) merged[key] = [];
                       for (const o of a.option_names) {
                         const ot = o.trim();

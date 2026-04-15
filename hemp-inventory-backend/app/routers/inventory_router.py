@@ -2487,20 +2487,23 @@ async def create_item_group(
     if not locations:
         raise HTTPException(status_code=400, detail="No locations configured")
 
-    # Merge duplicate attribute names: combine options from attributes with the same name.
+    # Merge duplicate attribute names (case-insensitive): combine options from attributes with the same name.
     # This prevents accidental cartesian explosion (e.g. two "Size" attributes with 3 opts each → 9 combos).
-    merged_variants: dict[str, list[str]] = {}
+    merged_variants: dict[str, list[str]] = {}  # keyed by lowercase name
+    merged_display_names: dict[str, str] = {}  # lowercase → first-seen original-case name
     for v in req.variants:
         attr_name = v.attribute_name.strip()
         if not attr_name:
             continue
-        if attr_name not in merged_variants:
-            merged_variants[attr_name] = []
+        key = attr_name.lower()
+        if key not in merged_variants:
+            merged_variants[key] = []
+            merged_display_names[key] = attr_name  # preserve first-seen casing for Clover
         for o in v.option_names:
             o_stripped = o.strip()
-            if o_stripped and o_stripped not in merged_variants[attr_name]:
-                merged_variants[attr_name].append(o_stripped)
-    merged_variant_list = [VariantOption(attribute_name=k, option_names=v) for k, v in merged_variants.items() if v]
+            if o_stripped and o_stripped not in merged_variants[key]:
+                merged_variants[key].append(o_stripped)
+    merged_variant_list = [VariantOption(attribute_name=merged_display_names[k], option_names=v) for k, v in merged_variants.items() if v]
     if not merged_variant_list:
         raise HTTPException(status_code=400, detail="At least one attribute with options is required for variants.")
 
@@ -2660,20 +2663,23 @@ async def add_variants_to_existing_item(
     if not req.variants or not any(v.attribute_name.strip() and any(o.strip() for o in v.option_names) for v in req.variants):
         raise HTTPException(status_code=400, detail="At least one attribute with options is required")
 
-    # Merge duplicate attribute names: combine options from attributes with the same name
-    merged_variants: dict[str, list[str]] = {}
+    # Merge duplicate attribute names (case-insensitive): combine options from attributes with the same name
+    merged_variants: dict[str, list[str]] = {}  # keyed by lowercase name
+    merged_display_names: dict[str, str] = {}  # lowercase → first-seen original-case name
     for v in req.variants:
         attr_name = v.attribute_name.strip()
         if not attr_name:
             continue
-        if attr_name not in merged_variants:
-            merged_variants[attr_name] = []
+        key = attr_name.lower()
+        if key not in merged_variants:
+            merged_variants[key] = []
+            merged_display_names[key] = attr_name  # preserve first-seen casing for Clover
         for o in v.option_names:
             o_stripped = o.strip()
-            if o_stripped and o_stripped not in merged_variants[attr_name]:
-                merged_variants[attr_name].append(o_stripped)
+            if o_stripped and o_stripped not in merged_variants[key]:
+                merged_variants[key].append(o_stripped)
     # Replace req.variants with merged version for processing
-    merged_variant_list = [VariantOption(attribute_name=k, option_names=v) for k, v in merged_variants.items() if v]
+    merged_variant_list = [VariantOption(attribute_name=merged_display_names[k], option_names=v) for k, v in merged_variants.items() if v]
 
     # Derive a clean base name by stripping any option values from the end of item_name.
     # e.g. "Lemon Cherry Gelato Smalls 28 Grams" with option "28 Grams" → "Lemon Cherry Gelato Smalls"
