@@ -2562,6 +2562,14 @@ async def address_autocomplete(q: str):
     if len(q) < 3:
         return []
     try:
+        # Extract leading house number from user query (e.g. "10401 Yellowlegs Ave" → "10401")
+        query_house_number = ""
+        q_stripped = q.strip()
+        if q_stripped and q_stripped[0].isdigit():
+            parts = q_stripped.split(None, 1)
+            if parts and parts[0].isdigit():
+                query_house_number = parts[0]
+
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.get(
                 "https://nominatim.openstreetmap.org/search",
@@ -2586,10 +2594,14 @@ async def address_autocomplete(q: str):
                     continue
                 house = a.get("house_number", "")
                 road = a.get("road", "")
+                # If Nominatim didn't return a house number, use the one from the query
+                if not house and query_house_number:
+                    house = query_house_number
                 street = f"{house} {road}".strip() if house else road
                 if not street:
                     continue
-                city = a.get("city") or a.get("town") or a.get("village") or a.get("hamlet") or (a.get("county", "").replace(" County", "")) or ""
+                # Don't use county as city — county names are not cities
+                city = a.get("city") or a.get("town") or a.get("village") or a.get("hamlet") or ""
                 state = a.get("state", "FL")
                 # Normalize state name to abbreviation
                 state_map = {
