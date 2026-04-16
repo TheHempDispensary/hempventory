@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getOnlineOrders, updateOrderStatus, updateOrderNotes, updateOrderCustomer, createShipment, purchaseLabel, getShippingLabel, refundOrder, resendOrderConfirmation, convertToShipping } from "../lib/api";
 import { MessageSquare, Save, Edit2, X } from "lucide-react";
 import { RefreshCw, Search, Package, ChevronDown, ChevronUp, Truck, CheckCircle, XCircle, Clock, ShoppingCart, Printer, Tag, ExternalLink, Loader2, RotateCcw, AlertTriangle, DollarSign, Mail, MapPin } from "lucide-react";
@@ -253,6 +253,7 @@ export default function OnlineOrders() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [page, setPage] = useState(1);
+  const prevStatusFilter = useRef(statusFilter);
   const PAGE_SIZE = 50;
   const [expandedOrder, setExpandedOrder] = useState<number | null>(null);
   const [updatingStatus, setUpdatingStatus] = useState<number | null>(null);
@@ -333,10 +334,14 @@ export default function OnlineOrders() {
   };
 
   useEffect(() => {
-    setPage(1);
-  }, [statusFilter]);
-
-  useEffect(() => {
+    // When status filter changes, always reset to page 1 and fetch
+    if (prevStatusFilter.current !== statusFilter) {
+      prevStatusFilter.current = statusFilter;
+      if (page !== 1) {
+        setPage(1); // This will re-trigger this effect with page=1
+        return;
+      }
+    }
     loadOrders(page);
   }, [page, statusFilter]);
 
