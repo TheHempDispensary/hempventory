@@ -2620,12 +2620,23 @@ async def address_autocomplete(q: str):
                     "Wisconsin": "WI", "Wyoming": "WY",
                 }
                 state_abbr = state_map.get(state, state[:2].upper() if len(state) > 2 else state)
+                postcode = a.get("postcode", "")
+                # Build a clean display string instead of using Nominatim's raw display_name
+                # which often includes county names (e.g. "Hernando County") instead of city
+                display_parts = [street]
+                if city:
+                    display_parts.append(city)
+                if state_abbr:
+                    display_parts.append(state_abbr)
+                if postcode:
+                    display_parts.append(postcode)
+                clean_display = ", ".join(display_parts)
                 results.append({
-                    "display": r.get("display_name", ""),
+                    "display": clean_display,
                     "address": street,
                     "city": city,
                     "state": state_abbr,
-                    "zip": a.get("postcode", ""),
+                    "zip": postcode,
                 })
             return results
     except Exception:
