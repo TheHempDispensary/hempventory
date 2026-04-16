@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getOnlineOrders, updateOrderStatus, updateOrderNotes, updateOrderCustomer, createShipment, purchaseLabel, getShippingLabel, refundOrder, resendOrderConfirmation, convertToShipping } from "../lib/api";
 import { MessageSquare, Save, Edit2, X } from "lucide-react";
 import { RefreshCw, Search, Package, ChevronDown, ChevronUp, Truck, CheckCircle, XCircle, Clock, ShoppingCart, Printer, Tag, ExternalLink, Loader2, RotateCcw, AlertTriangle, DollarSign, Mail, MapPin } from "lucide-react";
@@ -252,6 +252,9 @@ export default function OnlineOrders() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [page, setPage] = useState(1);
+  const prevStatusFilter = useRef(statusFilter);
+  const PAGE_SIZE = 50;
   const [expandedOrder, setExpandedOrder] = useState<number | null>(null);
   const [updatingStatus, setUpdatingStatus] = useState<number | null>(null);
   const [selectedOrders, setSelectedOrders] = useState<Set<number>>(new Set());
@@ -315,10 +318,10 @@ export default function OnlineOrders() {
     shipping_zip: "",
   });
 
-  const loadOrders = async () => {
+  const loadOrders = async (p: number = page) => {
     setLoading(true);
     try {
-      const params: { limit: number; offset: number; status?: string } = { limit: 100, offset: 0 };
+      const params: { limit: number; offset: number; status?: string } = { limit: PAGE_SIZE, offset: (p - 1) * PAGE_SIZE };
       if (statusFilter !== "all") params.status = statusFilter;
       const res = await getOnlineOrders(params);
       setOrders(res.data.orders || []);
@@ -331,8 +334,18 @@ export default function OnlineOrders() {
   };
 
   useEffect(() => {
-    loadOrders();
-  }, [statusFilter]);
+    // When status filter changes, always reset to page 1 and fetch
+    if (prevStatusFilter.current !== statusFilter) {
+      prevStatusFilter.current = statusFilter;
+      if (page !== 1) {
+        setPage(1); // This will re-trigger this effect with page=1
+        return;
+      }
+    }
+    loadOrders(page);
+  }, [page, statusFilter]);
+
+  const totalPages = Math.ceil(total / PAGE_SIZE);
 
   const handleStatusChange = async (orderId: number, newStatus: string) => {
     setUpdatingStatus(orderId);
@@ -662,7 +675,7 @@ export default function OnlineOrders() {
             </button>
           )}
           <button
-            onClick={loadOrders}
+            onClick={() => loadOrders()}
             disabled={loading}
             className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors"
           >
@@ -1448,6 +1461,48 @@ export default function OnlineOrders() {
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* Pagination */}
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between bg-white px-4 py-3 rounded-lg border border-gray-200">
+          <div className="text-sm text-gray-500">
+            Showing {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, total)} of {total} orders
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setPage(1)}
+              disabled={page === 1 || loading}
+              className="px-3 py-1 text-sm rounded-lg border border-gray-300 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              First
+            </button>
+            <button
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              disabled={page === 1 || loading}
+              className="px-3 py-1 text-sm rounded-lg border border-gray-300 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Prev
+            </button>
+            <span className="text-sm font-medium text-gray-700">
+              Page {page} of {totalPages}
+            </span>
+            <button
+              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              disabled={page === totalPages || loading}
+              className="px-3 py-1 text-sm rounded-lg border border-gray-300 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Next
+            </button>
+            <button
+              onClick={() => setPage(totalPages)}
+              disabled={page === totalPages || loading}
+              className="px-3 py-1 text-sm rounded-lg border border-gray-300 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Last
+            </button>
+          </div>
         </div>
       )}
     </div>
