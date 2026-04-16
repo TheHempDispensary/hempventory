@@ -334,12 +334,11 @@ export default function OnlineOrders() {
 
   useEffect(() => {
     setPage(1);
-    loadOrders(1);
   }, [statusFilter]);
 
   useEffect(() => {
     loadOrders(page);
-  }, [page]);
+  }, [page, statusFilter]);
 
   const totalPages = Math.ceil(total / PAGE_SIZE);
 
