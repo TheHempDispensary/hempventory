@@ -122,6 +122,8 @@ export default function Loyalty() {
   // Rewards
   const [rewards, setRewards] = useState<Reward[]>([]);
   const [showAddReward, setShowAddReward] = useState(false);
+  const [editingReward, setEditingReward] = useState<Reward | null>(null);
+  const [editRewardForm, setEditRewardForm] = useState({ name: "", points_required: "", reward_value: "", description: "" });
 
   // Forms
   const [newCustomer, setNewCustomer] = useState({ first_name: "", last_name: "", phone: "", email: "", birthday: "", notes: "" });
@@ -379,6 +381,27 @@ export default function Loyalty() {
     } catch (err) {
       console.error(err);
       showToast("error", "Failed to create reward");
+    }
+  };
+
+  const handleEditReward = async () => {
+    if (!editingReward || !editRewardForm.name || !editRewardForm.points_required || !editRewardForm.reward_value) {
+      showToast("error", "Fill in all reward fields");
+      return;
+    }
+    try {
+      await updateLoyaltyReward(editingReward.id, {
+        name: editRewardForm.name,
+        points_required: parseInt(editRewardForm.points_required),
+        reward_value: parseFloat(editRewardForm.reward_value),
+        description: editRewardForm.description,
+      });
+      showToast("success", "Reward updated");
+      setEditingReward(null);
+      loadRewards();
+    } catch (err) {
+      console.error(err);
+      showToast("error", "Failed to update reward");
     }
   };
 
@@ -734,6 +757,7 @@ export default function Loyalty() {
                     <button onClick={() => handleToggleReward(r)} className={`px-2 py-1 rounded text-xs font-medium ${r.is_active ? "bg-green-50 text-green-700" : "bg-gray-100 text-gray-500"}`}>
                       {r.is_active ? "Active" : "Inactive"}
                     </button>
+                    <button onClick={() => { setEditingReward(r); setEditRewardForm({ name: r.name, points_required: String(r.points_required), reward_value: String(r.reward_value), description: r.description || "" }); }} className="p-1 rounded hover:bg-blue-50 text-blue-400"><Edit3 className="w-3.5 h-3.5" /></button>
                     <button onClick={() => handleDeleteReward(r.id)} className="p-1 rounded hover:bg-red-50 text-red-400"><Trash2 className="w-3.5 h-3.5" /></button>
                   </div>
                 </div>
@@ -881,6 +905,35 @@ export default function Loyalty() {
             {rewards.filter(r => r.is_active).length === 0 && (
               <p className="text-sm text-gray-400 text-center py-4">No active rewards</p>
             )}
+          </div>
+        </Modal>
+      )}
+
+      {/* ── Edit Reward Modal ── */}
+      {editingReward && (
+        <Modal title="Edit Reward" onClose={() => setEditingReward(null)}>
+          <div className="space-y-3">
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Reward Name</label>
+              <input value={editRewardForm.name} onChange={(e) => setEditRewardForm({ ...editRewardForm, name: e.target.value })} className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm" />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Points Required</label>
+                <input type="number" value={editRewardForm.points_required} onChange={(e) => setEditRewardForm({ ...editRewardForm, points_required: e.target.value })} className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Discount Value ($)</label>
+                <input type="number" step="0.01" value={editRewardForm.reward_value} onChange={(e) => setEditRewardForm({ ...editRewardForm, reward_value: e.target.value })} className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm" />
+              </div>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Description</label>
+              <input value={editRewardForm.description} onChange={(e) => setEditRewardForm({ ...editRewardForm, description: e.target.value })} className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm" />
+            </div>
+            <button onClick={handleEditReward} className="w-full px-4 py-2.5 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700">
+              Save Changes
+            </button>
           </div>
         </Modal>
       )}
