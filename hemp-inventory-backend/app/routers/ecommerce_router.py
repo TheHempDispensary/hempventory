@@ -739,6 +739,8 @@ async def validate_promo(
     product_ids = promo["product_ids"] if "product_ids" in promo.keys() else ""
     exclude_coupons = bool(promo["exclude_from_other_coupons"]) if "exclude_from_other_coupons" in promo.keys() else False
 
+    excluded_brands = promo["excluded_brands"] if "excluded_brands" in promo.keys() else ""
+
     return {
         "valid": True,
         "discount_pct": promo["discount_pct"],
@@ -747,7 +749,20 @@ async def validate_promo(
         "applies_to": applies_to,
         "product_ids": product_ids,
         "exclude_from_other_coupons": exclude_coupons,
+        "excluded_brands": excluded_brands,
     }
+
+
+@router.get("/brands")
+async def list_brands():
+    """Return unique brand/category names from the product catalog."""
+    cached = await _get_cached_products()
+    brands: set = set()
+    for product in cached.get("products", []):
+        for cat in product.get("categories", []):
+            if cat:
+                brands.add(cat)
+    return sorted(brands)
 
 
 # ── Promo Code Management (Admin) ────────────────────────────────────────────
@@ -781,6 +796,7 @@ async def list_promos(db: aiosqlite.Connection = Depends(get_db)):
             "exclude_from_other_coupons": bool(row["exclude_from_other_coupons"]) if "exclude_from_other_coupons" in row.keys() else False,
             "clover_discount_id": row["clover_discount_id"] if "clover_discount_id" in row.keys() else "",
             "is_direct_discount": bool(row["is_direct_discount"]) if "is_direct_discount" in row.keys() else False,
+            "excluded_brands": row["excluded_brands"] if "excluded_brands" in row.keys() else "",
             "created_at": row["created_at"],
         })
     return promos
@@ -799,6 +815,7 @@ class PromoCreateRequest(BaseModel):
     product_ids: str = ""  # comma-separated Clover item IDs
     exclude_from_other_coupons: bool = False
     sync_to_clover: bool = False
+    excluded_brands: str = ""  # comma-separated brand/category names to exclude
 
 
 async def _get_hq_clover_client(db: aiosqlite.Connection) -> Optional[CloverClient]:
@@ -838,11 +855,11 @@ async def create_promo(body: PromoCreateRequest, db: aiosqlite.Connection = Depe
     try:
         await db.execute(
             """INSERT INTO promo_codes (code, discount_pct, discount_amount, single_use, max_uses,
-               expires_at, starts_at, applies_to, product_ids, exclude_from_other_coupons, clover_discount_id, is_direct_discount)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               expires_at, starts_at, applies_to, product_ids, exclude_from_other_coupons, clover_discount_id, is_direct_discount, excluded_brands)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (code, body.discount_pct, body.discount_amount, int(body.single_use), body.max_uses,
              body.expires_at, body.starts_at, body.applies_to, body.product_ids,
-             int(body.exclude_from_other_coupons), clover_discount_id, int(body.is_direct_discount)),
+             int(body.exclude_from_other_coupons), clover_discount_id, int(body.is_direct_discount), body.excluded_brands),
         )
         await db.commit()
     except Exception:
@@ -862,6 +879,7 @@ class PromoUpdateRequest(BaseModel):
     product_ids: Optional[str] = None
     exclude_from_other_coupons: Optional[bool] = None
     sync_to_clover: bool = False
+    excluded_brands: Optional[str] = None
 
 
 @router.put("/promos/{promo_id}")
@@ -899,6 +917,9 @@ async def update_promo(promo_id: int, body: PromoUpdateRequest, db: aiosqlite.Co
     if body.exclude_from_other_coupons is not None:
         updates.append("exclude_from_other_coupons = ?")
         params.append(int(body.exclude_from_other_coupons))
+    if body.excluded_brands is not None:
+        updates.append("excluded_brands = ?")
+        params.append(body.excluded_brands)
     if not updates:
         return {"status": "no changes"}
     params.append(promo_id)

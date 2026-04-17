@@ -19,6 +19,7 @@ interface PromoCode {
   exclude_from_other_coupons: boolean;
   clover_discount_id: string;
   is_direct_discount: boolean;
+  excluded_brands: string;
   created_at: string;
 }
 
@@ -99,6 +100,9 @@ export default function Discounts() {
   const [newProductIds, setNewProductIds] = useState<string[]>([]);
   const [newExcludeOtherCoupons, setNewExcludeOtherCoupons] = useState(false);
   const [newSyncToClover, setNewSyncToClover] = useState(false);
+  const [newExcludedBrands, setNewExcludedBrands] = useState<string[]>([]);
+  const [brands, setBrands] = useState<string[]>([]);
+  const [brandSearch, setBrandSearch] = useState("");
 
   // Usage history
   const [usageCode, setUsageCode] = useState<string | null>(null);
@@ -116,6 +120,7 @@ export default function Discounts() {
   const [editProductIds, setEditProductIds] = useState<string[]>([]);
   const [editExcludeOtherCoupons, setEditExcludeOtherCoupons] = useState(false);
   const [editSyncToClover, setEditSyncToClover] = useState(false);
+  const [editExcludedBrands, setEditExcludedBrands] = useState<string[]>([]);
 
   const loadPromos = async () => {
     setLoading(true);
@@ -140,6 +145,12 @@ export default function Discounts() {
     } catch {
       // non-critical
     }
+    try {
+      const brandRes = await api.get("/api/ecommerce/brands");
+      setBrands(brandRes.data || []);
+    } catch {
+      // non-critical
+    }
   }, []);
 
   useEffect(() => { loadPromos(); loadProducts(); }, [loadProducts]);
@@ -147,7 +158,7 @@ export default function Discounts() {
   const resetCreateForm = () => {
     setNewIsDirectDiscount(false); setNewCode(""); setNewDiscountValue(""); setNewSingleUse(false); setNewMaxUses("");
     setNewExpiresAt(""); setNewStartsAt(""); setNewAppliesTo("all"); setNewProductIds([]);
-    setNewExcludeOtherCoupons(false); setNewSyncToClover(false);
+    setNewExcludeOtherCoupons(false); setNewSyncToClover(false); setNewExcludedBrands([]); setBrandSearch("");
   };
 
   const resetVdForm = () => {
@@ -251,6 +262,7 @@ export default function Discounts() {
         product_ids: newProductIds.join(","),
         exclude_from_other_coupons: newExcludeOtherCoupons,
         sync_to_clover: newSyncToClover,
+        excluded_brands: newExcludedBrands.join(","),
       });
       const label = newIsDirectDiscount ? "Direct discount" : "Promo code \"" + newCode.trim().toUpperCase() + "\"";
       setSuccess(label + " created!" + (newSyncToClover ? " Synced to Clover POS." : ""));
@@ -272,6 +284,7 @@ export default function Discounts() {
     setEditProductIds(promo.product_ids ? promo.product_ids.split(",").filter(Boolean) : []);
     setEditExcludeOtherCoupons(promo.exclude_from_other_coupons);
     setEditSyncToClover(!!promo.clover_discount_id);
+    setEditExcludedBrands(promo.excluded_brands ? promo.excluded_brands.split(",").filter(Boolean) : []);
   };
 
   const handleUpdate = async (promoId: number) => {
@@ -290,6 +303,7 @@ export default function Discounts() {
         product_ids: editProductIds.join(","),
         exclude_from_other_coupons: editExcludeOtherCoupons,
         sync_to_clover: editSyncToClover,
+        excluded_brands: editExcludedBrands.join(","),
       });
       setEditingId(null); setSuccess("Discount updated!");
       setTimeout(() => setSuccess(""), 3000); loadPromos();
@@ -592,6 +606,39 @@ export default function Discounts() {
           <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
             {renderProductSelector(newAppliesTo, setNewAppliesTo, newProductIds, setNewProductIds, "new")}
             <div className="space-y-3">
+              {newIsDirectDiscount && (
+                <div>
+                  <label className="text-sm font-medium text-gray-700 flex items-center gap-1 mb-1">
+                    <Ban className="w-3.5 h-3.5" /> Exclude Brands
+                  </label>
+                  {newExcludedBrands.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mb-2">
+                      {newExcludedBrands.map((b) => (
+                        <span key={b} className="inline-flex items-center gap-1 px-2 py-0.5 bg-red-50 text-red-700 text-xs rounded-full border border-red-200">
+                          {b}
+                          <button onClick={() => setNewExcludedBrands(newExcludedBrands.filter((x) => x !== b))} className="hover:text-red-900">
+                            <X className="w-3 h-3" />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <div className="border border-gray-200 rounded-lg p-2 max-h-36 overflow-y-auto">
+                    <input type="text" placeholder="Search brands..." value={brandSearch}
+                      onChange={(e) => setBrandSearch(e.target.value)}
+                      className="w-full px-2 py-1 border border-gray-200 rounded text-xs mb-1 focus:ring-2 focus:ring-green-500" />
+                    {brands.filter((b) => b.toLowerCase().includes(brandSearch.toLowerCase())).map((b) => (
+                      <label key={b} className="flex items-center gap-2 py-0.5 cursor-pointer hover:bg-gray-50 px-1 rounded">
+                        <input type="checkbox" checked={newExcludedBrands.includes(b)}
+                          onChange={() => setNewExcludedBrands(newExcludedBrands.includes(b) ? newExcludedBrands.filter((x) => x !== b) : [...newExcludedBrands, b])}
+                          className="w-3.5 h-3.5 rounded border-gray-300 text-red-600 focus:ring-red-500" />
+                        <span className="text-xs text-gray-700">{b}</span>
+                      </label>
+                    ))}
+                    {brands.length === 0 && <p className="text-xs text-gray-400">Loading brands...</p>}
+                  </div>
+                </div>
+              )}
               <label className="flex items-center gap-2 cursor-pointer pt-6">
                 <input type="checkbox" checked={newExcludeOtherCoupons} onChange={(e) => setNewExcludeOtherCoupons(e.target.checked)}
                   className="w-4 h-4 rounded border-gray-300 text-orange-600 focus:ring-orange-500" />
@@ -693,6 +740,35 @@ export default function Discounts() {
                   <div className="mt-3">
                     {renderProductSelector(editAppliesTo, setEditAppliesTo, editProductIds, setEditProductIds, "edit-" + promo.id)}
                   </div>
+                  {promo.is_direct_discount && (
+                    <div className="mt-3">
+                      <label className="text-sm font-medium text-gray-700 flex items-center gap-1 mb-1">
+                        <Ban className="w-3.5 h-3.5" /> Exclude Brands
+                      </label>
+                      {editExcludedBrands.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mb-2">
+                          {editExcludedBrands.map((b) => (
+                            <span key={b} className="inline-flex items-center gap-1 px-2 py-0.5 bg-red-50 text-red-700 text-xs rounded-full border border-red-200">
+                              {b}
+                              <button onClick={() => setEditExcludedBrands(editExcludedBrands.filter((x) => x !== b))} className="hover:text-red-900">
+                                <X className="w-3 h-3" />
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      <div className="border border-gray-200 rounded-lg p-2 max-h-36 overflow-y-auto">
+                        {brands.map((b) => (
+                          <label key={b} className="flex items-center gap-2 py-0.5 cursor-pointer hover:bg-gray-50 px-1 rounded">
+                            <input type="checkbox" checked={editExcludedBrands.includes(b)}
+                              onChange={() => setEditExcludedBrands(editExcludedBrands.includes(b) ? editExcludedBrands.filter((x) => x !== b) : [...editExcludedBrands, b])}
+                              className="w-3.5 h-3.5 rounded border-gray-300 text-red-600 focus:ring-red-500" />
+                            <span className="text-xs text-gray-700">{b}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="p-4">
@@ -745,6 +821,11 @@ export default function Discounts() {
                       </span>
                     )}
                     {promo.applies_to === "all" && <span className="text-gray-400">All products</span>}
+                    {promo.excluded_brands && (
+                      <span className="text-red-600">
+                        <Ban className="w-3 h-3 inline" /> Excludes: {promo.excluded_brands.split(",").join(", ")}
+                      </span>
+                    )}
                     {promo.exclude_from_other_coupons && <span className="text-orange-600"><Ban className="w-3 h-3 inline" /> Excludes other coupons</span>}
                     {promo.clover_discount_id && <span className="text-blue-600"><Cloud className="w-3 h-3 inline" /> Clover synced</span>}
                     <span className="text-gray-400">Created: {formatDate(promo.created_at)}</span>
