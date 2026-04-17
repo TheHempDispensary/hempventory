@@ -707,6 +707,7 @@ async def validate_promo(
              AND starts_at IS NOT NULL AND starts_at != ''
              AND expires_at IS NOT NULL AND expires_at != ''
              AND starts_at <= ? AND expires_at >= ?
+           ORDER BY discount_pct DESC
            LIMIT 1""",
         (today, today),
     )
