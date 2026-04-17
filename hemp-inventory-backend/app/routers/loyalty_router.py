@@ -495,6 +495,21 @@ async def list_rewards(
     } for r in rows]}
 
 
+@router.get("/rewards/public")
+async def public_list_rewards(
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Public endpoint for the Website to fetch active rewards (no auth required)."""
+    cursor = await db.execute(
+        "SELECT id, name, points_required, reward_type, reward_value, description, is_active FROM loyalty_rewards WHERE is_active = 1 ORDER BY points_required ASC"
+    )
+    rows = await cursor.fetchall()
+    return {"rewards": [{
+        "id": r[0], "name": r[1], "points_required": r[2], "reward_type": r[3],
+        "reward_value": r[4], "description": r[5], "is_active": bool(r[6])
+    } for r in rows]}
+
+
 @router.post("/rewards")
 async def create_reward(
     data: RewardCreate,
