@@ -765,6 +765,42 @@ async def list_brands():
     return sorted(brands)
 
 
+@router.get("/active-sale")
+async def active_sale(db: aiosqlite.Connection = Depends(get_db)):
+    """Public endpoint: Check if there is an active Direct Discount sale today (US Eastern)."""
+    from datetime import datetime, timedelta, timezone
+
+    # US Eastern = UTC-4 (EDT) or UTC-5 (EST). Use a simple offset for EDT (April is always EDT).
+    eastern = timezone(timedelta(hours=-4))
+    today = datetime.now(eastern).strftime("%Y-%m-%d")
+
+    cursor = await db.execute(
+        """SELECT discount_pct, excluded_brands, starts_at, expires_at
+           FROM promo_codes
+           WHERE is_direct_discount = 1
+             AND is_active = 1
+             AND starts_at IS NOT NULL AND starts_at != ''
+             AND expires_at IS NOT NULL AND expires_at != ''
+             AND starts_at <= ?
+             AND expires_at >= ?
+           ORDER BY discount_pct DESC
+           LIMIT 1""",
+        (today, today),
+    )
+    row = await cursor.fetchone()
+    if not row:
+        return {"active": False}
+
+    excluded = [b.strip() for b in (row["excluded_brands"] or "").split(",") if b.strip()]
+    return {
+        "active": True,
+        "discount_percent": round(row["discount_pct"] * 100, 2),
+        "excluded_brands": excluded,
+        "start_date": row["starts_at"],
+        "end_date": row["expires_at"],
+    }
+
+
 # ── Promo Code Management (Admin) ────────────────────────────────────────────
 
 @router.get("/promos")
