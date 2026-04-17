@@ -696,6 +696,25 @@ async def validate_promo(
     code = body.promo_code.strip().upper()
     email = body.email.strip().lower()
 
+    # Block promo codes when a sale is active (loyalty rewards are still allowed)
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    eastern = ZoneInfo("America/New_York")
+    today = datetime.now(eastern).strftime("%Y-%m-%d")
+    sale_cursor = await db.execute(
+        """SELECT discount_pct FROM promo_codes
+           WHERE is_direct_discount = 1 AND is_active = 1
+             AND starts_at IS NOT NULL AND starts_at != ''
+             AND expires_at IS NOT NULL AND expires_at != ''
+             AND starts_at <= ? AND expires_at >= ?
+           LIMIT 1""",
+        (today, today),
+    )
+    active_sale = await sale_cursor.fetchone()
+    if active_sale:
+        pct = round(active_sale["discount_pct"] * 100)
+        return {"valid": False, "reason": f"Promo codes are disabled during our {pct}% OFF sale. Loyalty rewards can still be redeemed at checkout."}
+
     cursor = await db.execute("SELECT * FROM promo_codes WHERE code = ? AND is_active = 1", (code,))
     promo = await cursor.fetchone()
     if not promo:
