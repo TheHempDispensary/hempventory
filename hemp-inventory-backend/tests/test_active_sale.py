@@ -1,8 +1,8 @@
 """Test the /active-sale endpoint."""
 import pytest
 import aiosqlite
-from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from httpx import AsyncClient, ASGITransport
 from app.main import app
@@ -36,7 +36,7 @@ async def test_active_sale_no_discounts(db):
 @pytest.mark.asyncio
 async def test_active_sale_with_discount(db):
     """When an active direct discount covers today, return it."""
-    eastern = timezone(timedelta(hours=-4))
+    eastern = ZoneInfo("America/New_York")
     today = datetime.now(eastern).strftime("%Y-%m-%d")
 
     await db.execute(
@@ -68,7 +68,7 @@ async def test_active_sale_with_discount(db):
 @pytest.mark.asyncio
 async def test_active_sale_returns_highest(db):
     """When multiple active discounts overlap, return the highest discount_pct."""
-    eastern = timezone(timedelta(hours=-4))
+    eastern = ZoneInfo("America/New_York")
     today = datetime.now(eastern).strftime("%Y-%m-%d")
 
     await db.execute(

@@ -768,10 +768,10 @@ async def list_brands():
 @router.get("/active-sale")
 async def active_sale(db: aiosqlite.Connection = Depends(get_db)):
     """Public endpoint: Check if there is an active Direct Discount sale today (US Eastern)."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
 
-    # US Eastern = UTC-4 (EDT) or UTC-5 (EST). Use a simple offset for EDT (April is always EDT).
-    eastern = timezone(timedelta(hours=-4))
+    eastern = ZoneInfo("America/New_York")
     today = datetime.now(eastern).strftime("%Y-%m-%d")
 
     cursor = await db.execute(
