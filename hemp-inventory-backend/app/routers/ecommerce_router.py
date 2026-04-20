@@ -1275,6 +1275,16 @@ async def create_order(
                 detail=f"The following items are only available for shipping and cannot be picked up in store: {names}. Please switch to 'Ship To Me' to order these products.",
             )
 
+    # Server-side enforcement: Shipping orders MUST have a non-zero shipping cost.
+    # Prevents customers from bypassing the shipping rate selection (e.g. via DevTools)
+    # and getting free shipping on orders that should be charged.
+    if order.fulfillment_type == "shipping" and order.shipping_cost <= 0:
+        print(f"[order] BLOCKED shipping order with $0 shipping cost from {order.customer.email}")
+        raise HTTPException(
+            status_code=400,
+            detail="Shipping cost is required for delivery orders. Please select a shipping rate and try again.",
+        )
+
     # Real-time stock validation BEFORE charging the customer.
     # Prevents customers from ordering items that are out of stock (stale cache).
     out_of_stock = await _check_realtime_stock(order.items, order.fulfillment_type)
