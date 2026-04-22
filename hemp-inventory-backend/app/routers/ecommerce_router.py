@@ -1089,9 +1089,10 @@ async def _compute_clover_volume_discount(client, product_sku: str, product_name
     Returns (label, percentage, amount_cents).
     """
     # Build a clear label that includes the product name so staff knows
-    # this discount is ONLY for that specific product
-    short_name = product_name.split(" ")[:3]  # e.g. "DELTA 9 THC"
-    short_name = " ".join(short_name)
+    # this discount is ONLY for that specific product.
+    # Clover discount names can be up to 127 chars. Use the full product name
+    # but truncate if very long to leave room for the suffix.
+    short_name = product_name if len(product_name) <= 40 else product_name[:40].rstrip()
     if discount_type == "percent_off":
         pct = int(round(discount_value))
         label = f"{short_name} ONLY: {customer_label or f'{pct}% off {min_quantity}+'}"  
