@@ -1260,8 +1260,26 @@ async def resync_volume_discounts_to_clover(db: aiosqlite.Connection = Depends(g
                 vd["discount_value"], vd["customer_label"],
             )
             if clover_id:
-                await client.update_discount(clover_id, name=label, percentage=pct, amount=amt)
-                results.append({"id": vd["id"], "product": vd["product_name"], "clover_id": clover_id, "action": "updated", "label": label, "amount_cents": amt, "percentage": pct})
+                # Try update first; if it fails (e.g. type mismatch), delete and recreate
+                try:
+                    await client.update_discount(clover_id, name=label, percentage=pct, amount=amt)
+                    results.append({"id": vd["id"], "product": vd["product_name"], "clover_id": clover_id, "action": "updated", "label": label, "amount_cents": amt, "percentage": pct})
+                    continue
+                except Exception:
+                    # Delete the old discount and create a fresh one
+                    try:
+                        await client.delete_discount(clover_id)
+                    except Exception:
+                        pass  # Already gone or inaccessible
+                    # Clear stale ID immediately after delete, before attempting create
+                    await db.execute("UPDATE volume_discounts SET clover_discount_id = '' WHERE id = ?", (vd["id"],))
+                    await db.commit()
+                    result = await client.create_discount(name=label, percentage=pct, amount=amt)
+                    new_id = result.get("id", "")
+                    if new_id:
+                        await db.execute("UPDATE volume_discounts SET clover_discount_id = ? WHERE id = ?", (new_id, vd["id"]))
+                        await db.commit()
+                    results.append({"id": vd["id"], "product": vd["product_name"], "clover_id": new_id, "action": "recreated", "label": label, "amount_cents": amt, "percentage": pct})
             else:
                 result = await client.create_discount(name=label, percentage=pct, amount=amt)
                 new_id = result.get("id", "")
