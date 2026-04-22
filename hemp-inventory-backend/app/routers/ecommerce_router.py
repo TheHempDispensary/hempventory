@@ -1387,10 +1387,18 @@ async def create_order(
                     charge_id = charge_result.get("id", "")
                     payment_status = "paid"
                 else:
-                    error_msg = charge_result.get("message") or charge_result.get("error", {}).get("message", "Payment was declined.")
+                    raw_msg = charge_result.get("message") or charge_result.get("error", {}).get("message", "")
+                    print(f"[order] Clover charge failed: status={resp.status_code} raw={raw_msg} result={charge_result}")
+                    # Show user-friendly message for card declines (Clover 402)
+                    if resp.status_code == 402 or "decline" in raw_msg.lower():
+                        user_msg = "Your card was declined. Please check your card details or try a different payment method."
+                    elif raw_msg:
+                        user_msg = raw_msg
+                    else:
+                        user_msg = "Payment was declined. Please try again or use a different card."
                     raise HTTPException(
                         status_code=400,
-                        detail=f"Payment failed: {error_msg}",
+                        detail=f"Payment failed: {user_msg}",
                     )
             except httpx.HTTPError as e:
                 raise HTTPException(
