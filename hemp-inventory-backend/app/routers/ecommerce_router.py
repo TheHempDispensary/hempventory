@@ -934,7 +934,7 @@ class PromoUpdateRequest(BaseModel):
     applies_to: Optional[str] = None
     product_ids: Optional[str] = None
     exclude_from_other_coupons: Optional[bool] = None
-    sync_to_clover: bool = False
+    sync_to_clover: Optional[bool] = None
     excluded_brands: Optional[str] = None
 
 
@@ -976,14 +976,15 @@ async def update_promo(promo_id: int, body: PromoUpdateRequest, db: aiosqlite.Co
     if body.excluded_brands is not None:
         updates.append("excluded_brands = ?")
         params.append(body.excluded_brands)
-    if not updates:
+    if not updates and body.sync_to_clover is None:
         return {"status": "no changes"}
-    params.append(promo_id)
-    await db.execute(f"UPDATE promo_codes SET {', '.join(updates)} WHERE id = ?", params)
-    await db.commit()
+    if updates:
+        params.append(promo_id)
+        await db.execute(f"UPDATE promo_codes SET {', '.join(updates)} WHERE id = ?", params)
+        await db.commit()
 
     # Sync to Clover POS if requested
-    if body.sync_to_clover:
+    if body.sync_to_clover is True:
         try:
             cursor = await db.execute("SELECT * FROM promo_codes WHERE id = ?", (promo_id,))
             promo = await cursor.fetchone()
@@ -1005,6 +1006,24 @@ async def update_promo(promo_id: int, body: PromoUpdateRequest, db: aiosqlite.Co
                             await db.commit()
         except Exception as e:
             print(f"[promo] Clover sync failed: {e}")
+    elif body.sync_to_clover is False:
+        # Unsync from Clover: delete the discount and clear the ID
+        try:
+            cursor = await db.execute("SELECT * FROM promo_codes WHERE id = ?", (promo_id,))
+            promo = await cursor.fetchone()
+            if promo:
+                clover_id = promo["clover_discount_id"] if "clover_discount_id" in promo.keys() else ""
+                if clover_id:
+                    client = await _get_hq_clover_client(db)
+                    if client:
+                        try:
+                            await client.delete_discount(clover_id)
+                        except Exception:
+                            pass  # Already gone or inaccessible
+                        await db.execute("UPDATE promo_codes SET clover_discount_id = '' WHERE id = ?", (promo_id,))
+                        await db.commit()
+        except Exception as e:
+            print(f"[promo] Clover unsync failed: {e}")
 
     return {"status": "updated"}
 
