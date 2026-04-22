@@ -815,9 +815,18 @@ export default function Discounts() {
                     {promo.single_use && !promo.is_direct_discount && <span className="text-orange-600">Single use per email</span>}
                     {promo.starts_at && <span><Calendar className="w-3 h-3 inline" /> Starts: {formatDate(promo.starts_at)}</span>}
                     {promo.expires_at && <span><Calendar className="w-3 h-3 inline" /> Expires: {formatDate(promo.expires_at)}</span>}
-                    {promo.applies_to === "specific" && (
+                    {promo.applies_to === "specific" && promo.product_ids && (
                       <span className="text-blue-600">
-                        <ShoppingBag className="w-3 h-3 inline" /> {promo.product_ids ? promo.product_ids.split(",").length : 0} specific product{promo.product_ids && promo.product_ids.split(",").length !== 1 ? "s" : ""}
+                        <ShoppingBag className="w-3 h-3 inline" />{" "}
+                        {(() => {
+                          const ids = promo.product_ids.split(",").filter(Boolean);
+                          const names = ids.map((pid) => {
+                            const found = products.find((p) => p.id === pid);
+                            return found ? found.name : pid;
+                          });
+                          if (names.length <= 3) return names.join(", ");
+                          return names.slice(0, 3).join(", ") + ` +${names.length - 3} more`;
+                        })()}
                       </span>
                     )}
                     {promo.applies_to === "all" && <span className="text-gray-400">All products</span>}
