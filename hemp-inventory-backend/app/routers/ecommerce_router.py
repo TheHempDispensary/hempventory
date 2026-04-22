@@ -1271,6 +1271,9 @@ async def resync_volume_discounts_to_clover(db: aiosqlite.Connection = Depends(g
                         await client.delete_discount(clover_id)
                     except Exception:
                         pass  # Already gone or inaccessible
+                    # Clear stale ID immediately after delete, before attempting create
+                    await db.execute("UPDATE volume_discounts SET clover_discount_id = '' WHERE id = ?", (vd["id"],))
+                    await db.commit()
                     result = await client.create_discount(name=label, percentage=pct, amount=amt)
                     new_id = result.get("id", "")
                     if new_id:
