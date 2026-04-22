@@ -1079,6 +1079,55 @@ async def list_active_volume_discounts(db: aiosqlite.Connection = Depends(get_db
     return [dict(r) for r in rows]
 
 
+async def _compute_clover_volume_discount(client, product_sku: str, product_name: str,
+                                           min_quantity: int, discount_type: str,
+                                           discount_value: float, customer_label: str) -> tuple:
+    """Compute the correct Clover discount name, percentage, and amount (cents) for a volume discount.
+
+    For fixed_total discounts, looks up the item price in Clover to calculate the
+    actual per-item discount amount instead of sending the target price.
+    Returns (label, percentage, amount_cents).
+    """
+    # Build a clear label that includes the product name so staff knows
+    # this discount is ONLY for that specific product
+    short_name = product_name.split(" ")[:3]  # e.g. "DELTA 9 THC"
+    short_name = " ".join(short_name)
+    if discount_type == "percent_off":
+        pct = int(round(discount_value))
+        label = f"{short_name} ONLY: {customer_label or f'{pct}% off {min_quantity}+'}"  
+        return label, pct, 0
+    elif discount_type == "fixed_total":
+        # fixed_total means the TOTAL price for min_quantity items is discount_value.
+        # We need the original per-item price to calculate the actual discount.
+        per_item_discount_cents = 0
+        try:
+            # product_sku may be a Clover item ID or a barcode SKU.
+            # Try direct lookup first, then fall back to searching by SKU filter.
+            original_price = 0
+            try:
+                item = await client.get_item(product_sku)
+                original_price = item.get("price", 0)
+            except Exception:
+                # SKU is likely a barcode, search all items for it
+                all_items = await client.get_items(expand="")
+                for it in all_items.get("elements", []):
+                    if it.get("sku") == product_sku:
+                        original_price = it.get("price", 0)
+                        break
+            if original_price > 0:
+                target_per_item = int(round(discount_value * 100 / min_quantity))
+                per_item_discount_cents = max(original_price - target_per_item, 0)
+        except Exception:
+            per_item_discount_cents = 0
+        label = f"{short_name} ONLY: {customer_label or f'Buy {min_quantity} for ${discount_value:.0f}'}"
+        return label, 0, per_item_discount_cents
+    else:
+        # amount_off: discount_value is the dollar amount off per item
+        amt = int(round(discount_value * 100))
+        label = f"{short_name} ONLY: {customer_label or f'${discount_value:.2f} off {min_quantity}+'}"
+        return label, 0, amt
+
+
 @router.post("/volume-discounts")
 async def create_volume_discount(body: VolumeDiscountCreateRequest, db: aiosqlite.Connection = Depends(get_db)):
     """Admin: Create a new volume discount."""
@@ -1092,14 +1141,12 @@ async def create_volume_discount(body: VolumeDiscountCreateRequest, db: aiosqlit
         try:
             client = await _get_hq_clover_client(db)
             if client:
-                label = body.customer_label or f"Buy {body.min_quantity}+ {body.product_name}"
-                if body.discount_type == "percent_off":
-                    pct = int(round(body.discount_value))
-                    result = await client.create_discount(name=label, percentage=pct, amount=0)
-                else:
-                    # For fixed_total and amount_off, compute a per-unit amount
-                    amt = int(round(body.discount_value * 100))
-                    result = await client.create_discount(name=label, percentage=0, amount=amt)
+                label, pct, amt = await _compute_clover_volume_discount(
+                    client, body.product_sku, body.product_name,
+                    body.min_quantity, body.discount_type,
+                    body.discount_value, body.customer_label,
+                )
+                result = await client.create_discount(name=label, percentage=pct, amount=amt)
                 clover_discount_id = result.get("id", "")
         except Exception as e:
             print(f"[volume-discount] Clover sync failed: {e}")
@@ -1148,14 +1195,12 @@ async def update_volume_discount(discount_id: int, body: VolumeDiscountUpdateReq
             if vd:
                 client = await _get_hq_clover_client(db)
                 if client:
-                    label = vd["customer_label"] or f"Buy {vd['min_quantity']}+ {vd['product_name']}"
                     clover_id = vd["clover_discount_id"] if "clover_discount_id" in vd.keys() else ""
-                    if vd["discount_type"] == "percent_off":
-                        pct = int(round(vd["discount_value"]))
-                        amt = 0
-                    else:
-                        pct = 0
-                        amt = int(round(vd["discount_value"] * 100))
+                    label, pct, amt = await _compute_clover_volume_discount(
+                        client, vd["product_sku"], vd["product_name"],
+                        vd["min_quantity"], vd["discount_type"],
+                        vd["discount_value"], vd["customer_label"],
+                    )
                     if clover_id:
                         await client.update_discount(clover_id, name=label, percentage=pct, amount=amt)
                     else:
@@ -1187,6 +1232,46 @@ async def delete_volume_discount(discount_id: int, db: aiosqlite.Connection = De
     await db.execute("DELETE FROM volume_discounts WHERE id = ?", (discount_id,))
     await db.commit()
     return {"status": "deleted"}
+
+
+@router.post("/volume-discounts/resync-clover")
+async def resync_volume_discounts_to_clover(db: aiosqlite.Connection = Depends(get_db)):
+    """Admin: Re-sync all active volume discounts to Clover with corrected names and amounts.
+
+    This updates existing Clover discounts to include the product name in the label
+    (so staff knows which product the discount is for) and fixes the discount amount
+    calculation for fixed_total discounts.
+    """
+    cursor = await db.execute("SELECT * FROM volume_discounts WHERE is_active = 1 AND sync_to_clover = 1")
+    rows = await cursor.fetchall()
+    results = []
+    client = await _get_hq_clover_client(db)
+    if not client:
+        raise HTTPException(status_code=500, detail="Could not connect to Clover")
+
+    for vd in rows:
+        vd = dict(vd)
+        clover_id = vd.get("clover_discount_id", "")
+        try:
+            label, pct, amt = await _compute_clover_volume_discount(
+                client, vd["product_sku"], vd["product_name"],
+                vd["min_quantity"], vd["discount_type"],
+                vd["discount_value"], vd["customer_label"],
+            )
+            if clover_id:
+                await client.update_discount(clover_id, name=label, percentage=pct, amount=amt)
+                results.append({"id": vd["id"], "product": vd["product_name"], "clover_id": clover_id, "action": "updated", "label": label, "amount_cents": amt, "percentage": pct})
+            else:
+                result = await client.create_discount(name=label, percentage=pct, amount=amt)
+                new_id = result.get("id", "")
+                if new_id:
+                    await db.execute("UPDATE volume_discounts SET clover_discount_id = ? WHERE id = ?", (new_id, vd["id"]))
+                    await db.commit()
+                results.append({"id": vd["id"], "product": vd["product_name"], "clover_id": new_id, "action": "created", "label": label, "amount_cents": amt, "percentage": pct})
+        except Exception as e:
+            results.append({"id": vd["id"], "product": vd["product_name"], "error": str(e)})
+
+    return {"status": "resynced", "results": results}
 
 
 async def _check_realtime_stock(items: List[OrderItem], fulfillment_type: str) -> list[str]:
