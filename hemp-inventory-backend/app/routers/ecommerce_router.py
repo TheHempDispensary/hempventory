@@ -976,11 +976,12 @@ async def update_promo(promo_id: int, body: PromoUpdateRequest, db: aiosqlite.Co
     if body.excluded_brands is not None:
         updates.append("excluded_brands = ?")
         params.append(body.excluded_brands)
-    if not updates:
+    if not updates and body.sync_to_clover is None:
         return {"status": "no changes"}
-    params.append(promo_id)
-    await db.execute(f"UPDATE promo_codes SET {', '.join(updates)} WHERE id = ?", params)
-    await db.commit()
+    if updates:
+        params.append(promo_id)
+        await db.execute(f"UPDATE promo_codes SET {', '.join(updates)} WHERE id = ?", params)
+        await db.commit()
 
     # Sync to Clover POS if requested
     if body.sync_to_clover is True:
@@ -1019,8 +1020,8 @@ async def update_promo(promo_id: int, body: PromoUpdateRequest, db: aiosqlite.Co
                             await client.delete_discount(clover_id)
                         except Exception:
                             pass  # Already gone or inaccessible
-                    await db.execute("UPDATE promo_codes SET clover_discount_id = '' WHERE id = ?", (promo_id,))
-                    await db.commit()
+                        await db.execute("UPDATE promo_codes SET clover_discount_id = '' WHERE id = ?", (promo_id,))
+                        await db.commit()
         except Exception as e:
             print(f"[promo] Clover unsync failed: {e}")
 
