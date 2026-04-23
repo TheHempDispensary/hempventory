@@ -922,9 +922,9 @@ async def _build_clover_promo_name(client: Optional[CloverClient], code: str,
 
     product_list = ", ".join(names)
     label = f"{desc}: {product_list}"
-    # Truncate to 127 chars (Clover limit)
-    if len(label) > 127:
-        label = label[:124] + "..."
+    # Truncate to 64 chars (Clover name limit)
+    if len(label) > 64:
+        label = label[:61] + "..."
     return label
 
 
@@ -1228,9 +1228,9 @@ async def _compute_clover_volume_discount(client, product_sku: str, product_name
     """
     # Build a clear label that includes the product name so staff knows
     # this discount is ONLY for that specific product.
-    # Clover discount names can be up to 127 chars. Use the full product name
+    # Clover discount names can be up to 64 chars. Use the full product name
     # but truncate if very long to leave room for the suffix.
-    short_name = product_name if len(product_name) <= 40 else product_name[:40].rstrip()
+    short_name = product_name if len(product_name) <= 25 else product_name[:25].rstrip()
     if discount_type == "percent_off":
         pct = int(round(discount_value))
         label = f"{short_name} ONLY: {customer_label or f'{pct}% off {min_quantity}+'}"  
