@@ -902,9 +902,11 @@ async def _build_clover_promo_name(client: Optional[CloverClient], code: str,
         return code
 
     names: list[str] = []
+    # Use the product cache (which is already populated from Clover) instead of
+    # making individual API calls that can fail due to rate limits or timeouts.
     try:
-        all_items = await client.get_items(expand="")
-        id_to_name = {it["id"]: it.get("name", it["id"]) for it in all_items.get("elements", [])}
+        cached = await _get_cached_products()
+        id_to_name = {p["id"]: p.get("name", p["id"]) for p in cached.get("products", [])}
         for pid in ids:
             names.append(id_to_name.get(pid, pid))
     except Exception:
@@ -920,9 +922,9 @@ async def _build_clover_promo_name(client: Optional[CloverClient], code: str,
 
     product_list = ", ".join(names)
     label = f"{desc}: {product_list}"
-    # Truncate to 127 chars (Clover limit)
-    if len(label) > 127:
-        label = label[:124] + "..."
+    # Truncate to 64 chars (Clover name limit)
+    if len(label) > 64:
+        label = label[:61] + "..."
     return label
 
 
@@ -1108,8 +1110,10 @@ async def resync_promos_to_clover(db: aiosqlite.Connection = Depends(get_db)):
     Updates existing Clover discounts so direct discounts targeting specific
     products show the product names in Clover POS (instead of the internal code).
     """
+    # Include promos that either have a Clover ID (update) or are direct discounts
+    # that should be synced but lost their Clover ID (recreate).
     cursor = await db.execute(
-        "SELECT * FROM promo_codes WHERE is_active = 1 AND clover_discount_id != ''"
+        "SELECT * FROM promo_codes WHERE is_active = 1 AND (clover_discount_id != '' OR is_direct_discount = 1)"
     )
     rows = await cursor.fetchall()
     results = []
@@ -1120,8 +1124,6 @@ async def resync_promos_to_clover(db: aiosqlite.Connection = Depends(get_db)):
     for row in rows:
         row = dict(row)
         clover_id = row.get("clover_discount_id", "")
-        if not clover_id:
-            continue
         try:
             pct_val = row["discount_pct"]
             amt_val = row["discount_amount"]
@@ -1134,23 +1136,28 @@ async def resync_promos_to_clover(db: aiosqlite.Connection = Depends(get_db)):
                 client, row["code"], is_direct, applies_to,
                 product_ids, pct_val, amt_val,
             )
-            try:
-                await client.update_discount(clover_id, name=clover_name, percentage=pct, amount=amt)
-                results.append({"id": row["id"], "code": row["code"], "clover_id": clover_id, "action": "updated", "label": clover_name})
-            except Exception:
-                # Delete stale and recreate
+            if clover_id:
                 try:
-                    await client.delete_discount(clover_id)
+                    await client.update_discount(clover_id, name=clover_name, percentage=pct, amount=amt)
+                    results.append({"id": row["id"], "code": row["code"], "clover_id": clover_id, "action": "updated", "label": clover_name})
+                    continue
                 except Exception:
-                    pass
-                await db.execute("UPDATE promo_codes SET clover_discount_id = '' WHERE id = ?", (row["id"],))
-                await db.commit()
-                result = await client.create_discount(name=clover_name, percentage=pct, amount=amt)
-                new_id = result.get("id", "")
-                if new_id:
-                    await db.execute("UPDATE promo_codes SET clover_discount_id = ? WHERE id = ?", (new_id, row["id"]))
+                    # Delete stale entry
+                    try:
+                        await client.delete_discount(clover_id)
+                    except Exception:
+                        pass
+                    await db.execute("UPDATE promo_codes SET clover_discount_id = '' WHERE id = ?", (row["id"],))
                     await db.commit()
-                results.append({"id": row["id"], "code": row["code"], "clover_id": new_id, "action": "recreated", "label": clover_name})
+            # Create new Clover discount (either fresh or after stale delete)
+            import asyncio as _asyncio
+            await _asyncio.sleep(0.5)  # Small delay to avoid Clover rate limits
+            result = await client.create_discount(name=clover_name, percentage=pct, amount=amt)
+            new_id = result.get("id", "")
+            if new_id:
+                await db.execute("UPDATE promo_codes SET clover_discount_id = ? WHERE id = ?", (new_id, row["id"]))
+                await db.commit()
+            results.append({"id": row["id"], "code": row["code"], "clover_id": new_id, "action": "created" if not clover_id else "recreated", "label": clover_name})
         except Exception as e:
             results.append({"id": row["id"], "code": row["code"], "error": str(e)})
 
@@ -1221,9 +1228,9 @@ async def _compute_clover_volume_discount(client, product_sku: str, product_name
     """
     # Build a clear label that includes the product name so staff knows
     # this discount is ONLY for that specific product.
-    # Clover discount names can be up to 127 chars. Use the full product name
+    # Clover discount names can be up to 64 chars. Use the full product name
     # but truncate if very long to leave room for the suffix.
-    short_name = product_name if len(product_name) <= 40 else product_name[:40].rstrip()
+    short_name = product_name if len(product_name) <= 25 else product_name[:25].rstrip()
     if discount_type == "percent_off":
         pct = int(round(discount_value))
         label = f"{short_name} ONLY: {customer_label or f'{pct}% off {min_quantity}+'}"  
