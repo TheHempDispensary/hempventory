@@ -1110,8 +1110,10 @@ async def resync_promos_to_clover(db: aiosqlite.Connection = Depends(get_db)):
     Updates existing Clover discounts so direct discounts targeting specific
     products show the product names in Clover POS (instead of the internal code).
     """
+    # Include promos that either have a Clover ID (update) or are direct discounts
+    # that should be synced but lost their Clover ID (recreate).
     cursor = await db.execute(
-        "SELECT * FROM promo_codes WHERE is_active = 1 AND clover_discount_id != ''"
+        "SELECT * FROM promo_codes WHERE is_active = 1 AND (clover_discount_id != '' OR is_direct_discount = 1)"
     )
     rows = await cursor.fetchall()
     results = []
@@ -1122,8 +1124,6 @@ async def resync_promos_to_clover(db: aiosqlite.Connection = Depends(get_db)):
     for row in rows:
         row = dict(row)
         clover_id = row.get("clover_discount_id", "")
-        if not clover_id:
-            continue
         try:
             pct_val = row["discount_pct"]
             amt_val = row["discount_amount"]
@@ -1136,23 +1136,28 @@ async def resync_promos_to_clover(db: aiosqlite.Connection = Depends(get_db)):
                 client, row["code"], is_direct, applies_to,
                 product_ids, pct_val, amt_val,
             )
-            try:
-                await client.update_discount(clover_id, name=clover_name, percentage=pct, amount=amt)
-                results.append({"id": row["id"], "code": row["code"], "clover_id": clover_id, "action": "updated", "label": clover_name})
-            except Exception:
-                # Delete stale and recreate
+            if clover_id:
                 try:
-                    await client.delete_discount(clover_id)
+                    await client.update_discount(clover_id, name=clover_name, percentage=pct, amount=amt)
+                    results.append({"id": row["id"], "code": row["code"], "clover_id": clover_id, "action": "updated", "label": clover_name})
+                    continue
                 except Exception:
-                    pass
-                await db.execute("UPDATE promo_codes SET clover_discount_id = '' WHERE id = ?", (row["id"],))
-                await db.commit()
-                result = await client.create_discount(name=clover_name, percentage=pct, amount=amt)
-                new_id = result.get("id", "")
-                if new_id:
-                    await db.execute("UPDATE promo_codes SET clover_discount_id = ? WHERE id = ?", (new_id, row["id"]))
+                    # Delete stale entry
+                    try:
+                        await client.delete_discount(clover_id)
+                    except Exception:
+                        pass
+                    await db.execute("UPDATE promo_codes SET clover_discount_id = '' WHERE id = ?", (row["id"],))
                     await db.commit()
-                results.append({"id": row["id"], "code": row["code"], "clover_id": new_id, "action": "recreated", "label": clover_name})
+            # Create new Clover discount (either fresh or after stale delete)
+            import asyncio as _asyncio
+            await _asyncio.sleep(0.5)  # Small delay to avoid Clover rate limits
+            result = await client.create_discount(name=clover_name, percentage=pct, amount=amt)
+            new_id = result.get("id", "")
+            if new_id:
+                await db.execute("UPDATE promo_codes SET clover_discount_id = ? WHERE id = ?", (new_id, row["id"]))
+                await db.commit()
+            results.append({"id": row["id"], "code": row["code"], "clover_id": new_id, "action": "created" if not clover_id else "recreated", "label": clover_name})
         except Exception as e:
             results.append({"id": row["id"], "code": row["code"], "error": str(e)})
 
