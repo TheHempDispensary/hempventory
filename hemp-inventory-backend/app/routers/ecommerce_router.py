@@ -902,13 +902,12 @@ async def _build_clover_promo_name(client: Optional[CloverClient], code: str,
         return code
 
     names: list[str] = []
-    try:
-        all_items = await client.get_items(expand="")
-        id_to_name = {it["id"]: it.get("name", it["id"]) for it in all_items.get("elements", [])}
-        for pid in ids:
-            names.append(id_to_name.get(pid, pid))
-    except Exception:
-        names = ids  # fall back to raw IDs
+    for pid in ids:
+        try:
+            item = await client.get_item(pid)
+            names.append(item.get("name", pid))
+        except Exception:
+            names.append(pid)  # fall back to raw ID
 
     # Build discount description
     if discount_pct > 0:
