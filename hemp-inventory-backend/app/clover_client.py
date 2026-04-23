@@ -454,7 +454,9 @@ class CloverClient:
                 headers=self._headers(),
                 json=body,
             )
-            resp.raise_for_status()
+            if resp.status_code >= 400:
+                detail = resp.text[:500] if resp.text else "no body"
+                raise Exception(f"Clover create_discount {resp.status_code}: {detail} (body sent: {body})")
             return resp.json()
 
     async def update_discount(self, discount_id: str, name: str, percentage: int = 0, amount: int = 0) -> dict:
