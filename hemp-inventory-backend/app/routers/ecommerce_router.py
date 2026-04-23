@@ -902,12 +902,15 @@ async def _build_clover_promo_name(client: Optional[CloverClient], code: str,
         return code
 
     names: list[str] = []
-    for pid in ids:
-        try:
-            item = await client.get_item(pid)
-            names.append(item.get("name", pid))
-        except Exception:
-            names.append(pid)  # fall back to raw ID
+    # Use the product cache (which is already populated from Clover) instead of
+    # making individual API calls that can fail due to rate limits or timeouts.
+    try:
+        cached = await _get_cached_products()
+        id_to_name = {p["id"]: p.get("name", p["id"]) for p in cached.get("products", [])}
+        for pid in ids:
+            names.append(id_to_name.get(pid, pid))
+    except Exception:
+        names = ids  # fall back to raw IDs
 
     # Build discount description
     if discount_pct > 0:
