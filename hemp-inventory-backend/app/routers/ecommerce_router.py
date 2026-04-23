@@ -883,6 +883,49 @@ async def _get_hq_clover_client(db: aiosqlite.Connection) -> Optional[CloverClie
     return None
 
 
+async def _build_clover_promo_name(client: Optional[CloverClient], code: str,
+                                    is_direct: bool, applies_to: str,
+                                    product_ids: str, discount_pct: float,
+                                    discount_amount: int) -> str:
+    """Build a descriptive Clover discount name.
+
+    For direct discounts targeting specific products, include the product names
+    so POS staff knows which items the discount applies to.
+    Clover discount names can be up to 127 chars.
+    """
+    if not is_direct or applies_to != "specific" or not product_ids or not client:
+        return code
+
+    # Look up product names from Clover
+    ids = [pid.strip() for pid in product_ids.split(",") if pid.strip()]
+    if not ids:
+        return code
+
+    names: list[str] = []
+    try:
+        all_items = await client.get_items(expand="")
+        id_to_name = {it["id"]: it.get("name", it["id"]) for it in all_items.get("elements", [])}
+        for pid in ids:
+            names.append(id_to_name.get(pid, pid))
+    except Exception:
+        names = ids  # fall back to raw IDs
+
+    # Build discount description
+    if discount_pct > 0:
+        desc = f"{int(round(discount_pct * 100))}% off"
+    elif discount_amount > 0:
+        desc = f"${discount_amount / 100:.2f} off"
+    else:
+        desc = "Discount"
+
+    product_list = ", ".join(names)
+    label = f"{desc}: {product_list}"
+    # Truncate to 127 chars (Clover limit)
+    if len(label) > 127:
+        label = label[:124] + "..."
+    return label
+
+
 @router.post("/promos")
 async def create_promo(body: PromoCreateRequest, db: aiosqlite.Connection = Depends(get_db)):
     """Admin: Create a new promo code or direct discount."""
@@ -903,7 +946,11 @@ async def create_promo(body: PromoCreateRequest, db: aiosqlite.Connection = Depe
             if client:
                 pct = int(round(body.discount_pct * 100)) if body.discount_pct > 0 else 0
                 amt = body.discount_amount if body.discount_amount > 0 else 0
-                result = await client.create_discount(name=code, percentage=pct, amount=amt)
+                clover_name = await _build_clover_promo_name(
+                    client, code, body.is_direct_discount, body.applies_to,
+                    body.product_ids, body.discount_pct, body.discount_amount,
+                )
+                result = await client.create_discount(name=clover_name, percentage=pct, amount=amt)
                 clover_discount_id = result.get("id", "")
         except Exception as e:
             print(f"[promo] Clover sync failed: {e}")
@@ -996,10 +1043,17 @@ async def update_promo(promo_id: int, body: PromoUpdateRequest, db: aiosqlite.Co
                     amt_val = body.discount_amount if body.discount_amount is not None else promo["discount_amount"]
                     pct = int(round(pct_val * 100)) if pct_val > 0 else 0
                     amt = amt_val if amt_val > 0 else 0
+                    is_direct = bool(promo["is_direct_discount"]) if "is_direct_discount" in promo.keys() else False
+                    applies_to = promo["applies_to"] if "applies_to" in promo.keys() else "all"
+                    product_ids = promo["product_ids"] if "product_ids" in promo.keys() else ""
+                    clover_name = await _build_clover_promo_name(
+                        client, promo["code"], is_direct, applies_to,
+                        product_ids, pct_val, amt_val,
+                    )
                     if clover_id:
-                        await client.update_discount(clover_id, name=promo["code"], percentage=pct, amount=amt)
+                        await client.update_discount(clover_id, name=clover_name, percentage=pct, amount=amt)
                     else:
-                        result = await client.create_discount(name=promo["code"], percentage=pct, amount=amt)
+                        result = await client.create_discount(name=clover_name, percentage=pct, amount=amt)
                         new_id = result.get("id", "")
                         if new_id:
                             await db.execute("UPDATE promo_codes SET clover_discount_id = ? WHERE id = ?", (new_id, promo_id))
@@ -1045,6 +1099,62 @@ async def delete_promo(promo_id: int, db: aiosqlite.Connection = Depends(get_db)
     await db.execute("DELETE FROM promo_codes WHERE id = ?", (promo_id,))
     await db.commit()
     return {"status": "deleted"}
+
+
+@router.post("/promos/resync-clover")
+async def resync_promos_to_clover(db: aiosqlite.Connection = Depends(get_db)):
+    """Admin: Re-sync all Clover-synced promo/direct discounts with descriptive names.
+
+    Updates existing Clover discounts so direct discounts targeting specific
+    products show the product names in Clover POS (instead of the internal code).
+    """
+    cursor = await db.execute(
+        "SELECT * FROM promo_codes WHERE is_active = 1 AND clover_discount_id != ''"
+    )
+    rows = await cursor.fetchall()
+    results = []
+    client = await _get_hq_clover_client(db)
+    if not client:
+        raise HTTPException(status_code=500, detail="Could not connect to Clover")
+
+    for row in rows:
+        row = dict(row)
+        clover_id = row.get("clover_discount_id", "")
+        if not clover_id:
+            continue
+        try:
+            pct_val = row["discount_pct"]
+            amt_val = row["discount_amount"]
+            pct = int(round(pct_val * 100)) if pct_val > 0 else 0
+            amt = amt_val if amt_val > 0 else 0
+            is_direct = bool(row.get("is_direct_discount", 0))
+            applies_to = row.get("applies_to", "all")
+            product_ids = row.get("product_ids", "")
+            clover_name = await _build_clover_promo_name(
+                client, row["code"], is_direct, applies_to,
+                product_ids, pct_val, amt_val,
+            )
+            try:
+                await client.update_discount(clover_id, name=clover_name, percentage=pct, amount=amt)
+                results.append({"id": row["id"], "code": row["code"], "clover_id": clover_id, "action": "updated", "label": clover_name})
+            except Exception:
+                # Delete stale and recreate
+                try:
+                    await client.delete_discount(clover_id)
+                except Exception:
+                    pass
+                await db.execute("UPDATE promo_codes SET clover_discount_id = '' WHERE id = ?", (row["id"],))
+                await db.commit()
+                result = await client.create_discount(name=clover_name, percentage=pct, amount=amt)
+                new_id = result.get("id", "")
+                if new_id:
+                    await db.execute("UPDATE promo_codes SET clover_discount_id = ? WHERE id = ?", (new_id, row["id"]))
+                    await db.commit()
+                results.append({"id": row["id"], "code": row["code"], "clover_id": new_id, "action": "recreated", "label": clover_name})
+        except Exception as e:
+            results.append({"id": row["id"], "code": row["code"], "error": str(e)})
+
+    return {"status": "resynced", "results": results}
 
 
 # ─── Volume Discounts ───────────────────────────────────────────────
@@ -1104,7 +1214,9 @@ async def _compute_clover_volume_discount(client, product_sku: str, product_name
     """Compute the correct Clover discount name, percentage, and amount (cents) for a volume discount.
 
     For fixed_total discounts, looks up the item price in Clover to calculate the
-    actual per-item discount amount instead of sending the target price.
+    TOTAL discount amount (not per-item) so staff can apply it once to the order.
+    Clover line-item discounts multiply amount × qty, so we use the total discount
+    and instruct staff to apply at order level.
     Returns (label, percentage, amount_cents).
     """
     # Build a clear label that includes the product name so staff knows
@@ -1118,8 +1230,10 @@ async def _compute_clover_volume_discount(client, product_sku: str, product_name
         return label, pct, 0
     elif discount_type == "fixed_total":
         # fixed_total means the TOTAL price for min_quantity items is discount_value.
-        # We need the original per-item price to calculate the actual discount.
-        per_item_discount_cents = 0
+        # We compute the TOTAL discount (original_total - target_total) and send that
+        # as a flat amount.  Staff must apply this to the ORDER (not a line item)
+        # so Clover doesn't multiply it by the quantity.
+        total_discount_cents = 0
         try:
             # product_sku may be a Clover item ID or a barcode SKU.
             # Try direct lookup first, then fall back to searching by SKU filter.
@@ -1135,12 +1249,14 @@ async def _compute_clover_volume_discount(client, product_sku: str, product_name
                         original_price = it.get("price", 0)
                         break
             if original_price > 0:
-                target_per_item = int(round(discount_value * 100 / min_quantity))
-                per_item_discount_cents = max(original_price - target_per_item, 0)
+                original_total = original_price * min_quantity
+                target_total = int(round(discount_value * 100))
+                total_discount_cents = max(original_total - target_total, 0)
         except Exception:
-            per_item_discount_cents = 0
-        label = f"{short_name} ONLY: {customer_label or f'Buy {min_quantity} for ${discount_value:.0f}'}"
-        return label, 0, per_item_discount_cents
+            total_discount_cents = 0
+        total_dollars = total_discount_cents / 100
+        label = f"{short_name} ONLY: ${total_dollars:.0f} off {min_quantity}+ (apply to order)"
+        return label, 0, total_discount_cents
     else:
         # amount_off: discount_value is the dollar amount off per item
         amt = int(round(discount_value * 100))
