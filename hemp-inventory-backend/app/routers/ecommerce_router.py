@@ -1550,7 +1550,7 @@ async def create_order(
         effective_subtotal = order.subtotal - order.discount - order.volume_discount
         # Cap: loyalty cannot exceed effective subtotal (no covering tax),
         # AND must leave at least $1.00 of product cost for the customer to pay.
-        max_loyalty = max(min(item_subtotal - 100, effective_subtotal), 0)
+        max_loyalty = max(min(item_subtotal - 100, effective_subtotal - 100), 0)
         if order.loyalty_discount > max_loyalty:
             print(f"[order] Loyalty capped: requested ${order.loyalty_discount/100:.2f}, max allowed ${max_loyalty/100:.2f} (item_subtotal ${item_subtotal/100:.2f}, effective_subtotal ${effective_subtotal/100:.2f})")
             order.loyalty_discount = max_loyalty
@@ -1606,7 +1606,7 @@ async def create_order(
         diff = corrected_subtotal - order.subtotal
         print(f"[order] Subtotal corrected from ${order.subtotal/100:.2f} to ${corrected_subtotal/100:.2f} (diff: ${diff/100:.2f})")
         order.subtotal = corrected_subtotal
-        order.total = order.subtotal - order.discount + order.shipping_cost + order.tax
+        order.total = order.subtotal - order.discount - order.volume_discount + order.shipping_cost + order.tax - order.loyalty_discount
 
     # Process payment via Clover if a payment token is provided
     if order.payment_token:
