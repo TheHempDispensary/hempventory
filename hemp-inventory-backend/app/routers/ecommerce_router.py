@@ -685,6 +685,7 @@ async def refresh_products():
 class ValidatePromoRequest(BaseModel):
     promo_code: str
     email: str
+    phone: str = ""
 
 
 @router.post("/validate-promo")
@@ -745,15 +746,28 @@ async def validate_promo(
     if promo["max_uses"] > 0 and promo["times_used"] >= promo["max_uses"]:
         return {"valid": False, "reason": "This promo code has reached its usage limit"}
 
-    # Check single-use per customer
-    if promo["single_use"] and email:
-        cursor = await db.execute(
-            "SELECT COUNT(*) FROM ecommerce_orders WHERE LOWER(customer_email) = ? AND promo_code = ? AND payment_status != 'cancelled'",
-            (email, code),
-        )
-        count = (await cursor.fetchone())[0]
-        if count > 0:
-            return {"valid": False, "reason": "This promo code has already been used with this email address"}
+    # Check single-use per customer (by email AND phone number to prevent multi-account abuse)
+    if promo["single_use"]:
+        if email:
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM ecommerce_orders WHERE LOWER(customer_email) = ? AND promo_code = ? AND payment_status != 'cancelled'",
+                (email, code),
+            )
+            count = (await cursor.fetchone())[0]
+            if count > 0:
+                return {"valid": False, "reason": "This promo code has already been used with this email address"}
+        # Also check by phone number to prevent creating new emails to reuse codes
+        phone = body.phone.strip().replace("-", "").replace(" ", "").replace("(", "").replace(")", "")
+        if phone and len(phone) >= 10:
+            # Normalize: take last 10 digits
+            phone_normalized = phone[-10:]
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM ecommerce_orders WHERE REPLACE(REPLACE(REPLACE(REPLACE(customer_phone, '-', ''), ' ', ''), '(', ''), ')', '') LIKE ? AND promo_code = ? AND payment_status != 'cancelled'",
+                (f"%{phone_normalized}", code),
+            )
+            count = (await cursor.fetchone())[0]
+            if count > 0:
+                return {"valid": False, "reason": "This promo code has already been used with this phone number"}
 
     applies_to = promo["applies_to"] if "applies_to" in promo.keys() else "all"
     product_ids = promo["product_ids"] if "product_ids" in promo.keys() else ""
@@ -1520,6 +1534,52 @@ async def create_order(
                 status_code=400,
                 detail=f"The following items are only available for shipping and cannot be picked up in store: {names}. Please switch to 'Ship To Me' to order these products.",
             )
+
+    # Server-side enforcement: Promo codes and loyalty rewards cannot be stacked together.
+    if order.promo_code and order.loyalty_discount > 0:
+        print(f"[order] BLOCKED promo+loyalty stacking: code={order.promo_code} loyalty=${order.loyalty_discount/100:.2f} from {order.customer.email}")
+        raise HTTPException(
+            status_code=400,
+            detail="Promo codes and loyalty rewards cannot be used together. Please choose one or the other.",
+        )
+
+    # Server-side enforcement: Loyalty rewards cannot cover 100% of the order.
+    # Customer must pay at least $1.00 before tax/shipping.
+    if order.loyalty_discount > 0:
+        item_subtotal = sum(item.price * item.quantity for item in order.items)
+        max_loyalty = item_subtotal - 100  # Leave at least $1.00
+        if max_loyalty < 0:
+            max_loyalty = 0
+        if order.loyalty_discount > max_loyalty and max_loyalty >= 0:
+            print(f"[order] Loyalty capped: requested ${order.loyalty_discount/100:.2f}, max allowed ${max_loyalty/100:.2f} (subtotal ${item_subtotal/100:.2f})")
+            order.loyalty_discount = max_loyalty
+            # Recalculate total with capped loyalty
+            order.total = order.subtotal - order.discount - order.volume_discount + order.shipping_cost + order.tax - order.loyalty_discount
+
+    # Server-side enforcement: Loyalty rewards apply to subtotal only, not tax.
+    if order.loyalty_discount > 0:
+        effective_subtotal = order.subtotal - order.discount - order.volume_discount
+        if order.loyalty_discount > effective_subtotal:
+            print(f"[order] Loyalty exceeds subtotal: ${order.loyalty_discount/100:.2f} > ${effective_subtotal/100:.2f}, capping")
+            order.loyalty_discount = max(effective_subtotal, 0)
+            order.total = effective_subtotal - order.loyalty_discount + order.shipping_cost + order.tax
+
+    # Server-side enforcement: FIRST10 phone number check (prevent multi-email abuse)
+    if order.promo_code and order.promo_code.upper() == "FIRST10" and order.customer.phone:
+        phone = order.customer.phone.strip().replace("-", "").replace(" ", "").replace("(", "").replace(")", "")
+        if len(phone) >= 10:
+            phone_normalized = phone[-10:]
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM ecommerce_orders WHERE REPLACE(REPLACE(REPLACE(REPLACE(customer_phone, '-', ''), ' ', ''), '(', ''), ')', '') LIKE ? AND promo_code = 'FIRST10' AND payment_status != 'cancelled'",
+                (f"%{phone_normalized}",),
+            )
+            count = (await cursor.fetchone())[0]
+            if count > 0:
+                print(f"[order] BLOCKED FIRST10 reuse by phone {phone_normalized} (email: {order.customer.email})")
+                raise HTTPException(
+                    status_code=400,
+                    detail="The FIRST10 promo code has already been used with this phone number. This code is limited to one use per customer.",
+                )
 
     # Server-side enforcement: Shipping orders MUST have a non-zero shipping cost.
     # Prevents customers from bypassing the shipping rate selection (e.g. via DevTools)
