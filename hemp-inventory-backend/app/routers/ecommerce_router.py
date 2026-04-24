@@ -1543,25 +1543,17 @@ async def create_order(
             detail="Promo codes and loyalty rewards cannot be used together. Please choose one or the other.",
         )
 
-    # Server-side enforcement: Loyalty rewards cannot cover 100% of the order.
-    # Customer must pay at least $1.00 before tax/shipping.
+    # Server-side enforcement: Loyalty rewards capped to subtotal only (not tax),
+    # and customer must pay at least $1.00 before tax/shipping.
     if order.loyalty_discount > 0:
         item_subtotal = sum(item.price * item.quantity for item in order.items)
-        max_loyalty = item_subtotal - 100  # Leave at least $1.00
-        if max_loyalty < 0:
-            max_loyalty = 0
-        if order.loyalty_discount > max_loyalty and max_loyalty >= 0:
-            print(f"[order] Loyalty capped: requested ${order.loyalty_discount/100:.2f}, max allowed ${max_loyalty/100:.2f} (subtotal ${item_subtotal/100:.2f})")
-            order.loyalty_discount = max_loyalty
-            # Recalculate total with capped loyalty
-            order.total = order.subtotal - order.discount - order.volume_discount + order.shipping_cost + order.tax - order.loyalty_discount
-
-    # Server-side enforcement: Loyalty rewards apply to subtotal only, not tax.
-    if order.loyalty_discount > 0:
         effective_subtotal = order.subtotal - order.discount - order.volume_discount
-        if order.loyalty_discount > effective_subtotal:
-            print(f"[order] Loyalty exceeds subtotal: ${order.loyalty_discount/100:.2f} > ${effective_subtotal/100:.2f}, capping")
-            order.loyalty_discount = max(effective_subtotal, 0)
+        # Cap: loyalty cannot exceed effective subtotal (no covering tax),
+        # AND must leave at least $1.00 of product cost for the customer to pay.
+        max_loyalty = max(min(item_subtotal - 100, effective_subtotal), 0)
+        if order.loyalty_discount > max_loyalty:
+            print(f"[order] Loyalty capped: requested ${order.loyalty_discount/100:.2f}, max allowed ${max_loyalty/100:.2f} (item_subtotal ${item_subtotal/100:.2f}, effective_subtotal ${effective_subtotal/100:.2f})")
+            order.loyalty_discount = max_loyalty
             order.total = effective_subtotal - order.loyalty_discount + order.shipping_cost + order.tax
 
     # Server-side enforcement: FIRST10 phone number check (prevent multi-email abuse)
