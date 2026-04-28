@@ -3251,12 +3251,13 @@ async def _sync_clover_online_orders(db: aiosqlite.Connection) -> dict:
                         li_price = li.get("price", 0)
                         li_item_ref = li.get("item", {})
                         li_product_id = li_item_ref.get("id", "") if li_item_ref else ""
-                        items_subtotal += li_price
+                        li_qty = max(round(li.get("unitQty", 1000) / 1000), 1)
+                        items_subtotal += li_price * li_qty
                         item_records.append({
                             "product_id": li_product_id,
                             "name": li_name,
                             "price": li_price,
-                            "quantity": 1,
+                            "quantity": li_qty,
                         })
 
                     # Derive tax (total - items subtotal, capped at 0)
