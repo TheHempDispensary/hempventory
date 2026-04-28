@@ -13,6 +13,7 @@ from app.database import init_db, get_db, DB_PATH
 from app.routers import auth_router, locations_router, inventory_router, par_router, alerts_router, ecommerce_router, loyalty_router, timeclock_router, sales_router, shipping_router, scraper_router, chat_router
 from app.routers.inventory_router import _do_sync
 from app.routers.loyalty_router import _do_bulk_import_customers, _do_sync_orders
+from app.routers.ecommerce_router import _sync_clover_online_orders
 
 import aiosqlite
 
@@ -105,6 +106,23 @@ async def _scheduled_refund_sync():
         print(f"[auto-sync] Refund sync failed: {e}")
 
 
+async def _scheduled_clover_order_sync():
+    """Background job: import online orders placed through Clover's native ordering system."""
+    try:
+        db = await aiosqlite.connect(DB_PATH)
+        db.row_factory = aiosqlite.Row
+        try:
+            result = await _sync_clover_online_orders(db)
+            synced = result.get('synced', 0)
+            skipped = result.get('skipped', 0)
+            if synced > 0:
+                print(f"[auto-sync] Clover online orders: {synced} imported, {skipped} skipped")
+        finally:
+            await db.close()
+    except Exception as e:
+        print(f"[auto-sync] Clover order sync failed: {e}")
+
+
 async def _scheduled_ecommerce_refresh():
     """Background job: refresh the ecommerce product cache from Clover every 10 minutes."""
     try:
@@ -122,12 +140,15 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(_scheduled_refund_sync, "interval", minutes=15, id="refund_sync", replace_existing=True)
     scheduler.add_job(_scheduled_loyalty_sync, "interval", minutes=10, id="loyalty_sync", replace_existing=True)
     scheduler.add_job(_scheduled_ecommerce_refresh, "interval", minutes=10, id="ecommerce_refresh", replace_existing=True)
+    scheduler.add_job(_scheduled_clover_order_sync, "interval", minutes=5, id="clover_order_sync", replace_existing=True)
     scheduler.start()
     # Run initial inventory sync in background so server starts accepting requests immediately
     asyncio.create_task(_scheduled_inventory_sync())
     # Load disk cache first for instant availability, then refresh from Clover in background
     await ecommerce_router._load_disk_cache()
     asyncio.create_task(ecommerce_router._fetch_and_cache_products())
+    # Import any Clover online orders that arrived while the server was down
+    asyncio.create_task(_scheduled_clover_order_sync())
     yield
     scheduler.shutdown()
 

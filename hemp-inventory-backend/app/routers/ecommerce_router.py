@@ -1510,6 +1510,7 @@ async def create_order(
 ):
     """Public endpoint: Create an e-commerce order with Clover payment processing."""
     charge_id = ""
+    clover_order_id = ""
     payment_status = "pending"
 
     # Server-side enforcement: Block LeafLife / HQ-only items from pickup orders.
@@ -1721,8 +1722,8 @@ async def create_order(
             """INSERT INTO ecommerce_orders
                (order_number, customer_first_name, customer_last_name, customer_email, customer_phone,
                 shipping_address, shipping_apartment, shipping_city, shipping_state, shipping_zip,
-                subtotal, discount, volume_discount, loyalty_discount, promo_code, shipping_cost, tax, total, notes, charge_id, payment_status, fulfillment_type, shipping_service)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                subtotal, discount, volume_discount, loyalty_discount, promo_code, shipping_cost, tax, total, notes, charge_id, payment_status, fulfillment_type, shipping_service, clover_order_id, source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 order_number,
                 order.customer.first_name,
@@ -1747,6 +1748,8 @@ async def create_order(
                 payment_status,
                 order.fulfillment_type,
                 order.shipping_service,
+                clover_order_id,
+                "website",
             ),
         )
         order_id = cursor.lastrowid
@@ -3138,3 +3141,334 @@ async def get_all_discount_usage(db=Depends(get_db)):
     rows = await cursor.fetchall()
     stats = [dict(zip(cols, row)) for row in rows]
     return {"codes": stats}
+
+
+# ── Clover native online-order sync ─────────────────────────────────────────
+# Clover has its own online ordering system.  Orders placed through it land
+# directly on the store's Clover account and bypass Hempventory entirely —
+# meaning no DB record and no email notification.  This background job polls
+# each Clover location for recent orders whose title starts with
+# "Online_order" and imports any that aren't already tracked.
+
+
+async def _get_locations_for_sync(db: aiosqlite.Connection) -> list:
+    """Return all non-virtual/non-central locations."""
+    cursor = await db.execute(
+        "SELECT id, name, merchant_id, api_token FROM locations "
+        "WHERE LOWER(name) NOT LIKE '%virtual%' AND LOWER(name) NOT LIKE '%central%'"
+    )
+    return await cursor.fetchall()
+
+
+async def _sync_clover_online_orders(db: aiosqlite.Connection) -> dict:
+    """Poll Clover locations for native online orders and import new ones."""
+    from datetime import datetime, timezone, timedelta
+
+    locations = await _get_locations_for_sync(db)
+    if not locations:
+        return {"synced": 0, "skipped": 0}
+
+    synced = 0
+    skipped = 0
+    # Look back 7 days to catch anything recently missed
+    cutoff_ms = int((datetime.now(timezone.utc) - timedelta(days=7)).timestamp() * 1000)
+
+    smtp_settings = await _get_smtp_settings(db)
+
+    for loc in locations:
+        loc_id, loc_name, merchant_id, api_token = loc[0], loc[1], loc[2], loc[3]
+        try:
+            client = CloverClient(merchant_id, api_token)
+            offset = 0
+            limit = 100
+            while True:
+                orders_data = await client.get_orders(
+                    limit=limit,
+                    offset=offset,
+                    filter_str=f"createdTime>={cutoff_ms}",
+                    expand="lineItems,customers",
+                )
+                orders = orders_data.get("elements", [])
+                if not orders:
+                    break
+
+                for order in orders:
+                    clover_oid = order.get("id", "")
+                    title = order.get("title") or ""
+                    note = order.get("note") or ""
+
+                    # Only process Clover-native online orders (title starts with "Online_order")
+                    if not title.lower().startswith("online_order"):
+                        continue
+
+                    # Skip if already imported
+                    dup_cursor = await db.execute(
+                        "SELECT id FROM ecommerce_orders WHERE clover_order_id = ?",
+                        (clover_oid,),
+                    )
+                    if await dup_cursor.fetchone():
+                        skipped += 1
+                        continue
+
+                    # Also skip if this order was created by Hempventory (note contains "Online Order -")
+                    if "Online Order -" in note:
+                        skipped += 1
+                        continue
+
+                    order_total = order.get("total", 0)
+                    if order_total <= 0:
+                        skipped += 1
+                        continue
+
+                    # Extract customer info from the Clover order
+                    cust_first = ""
+                    cust_last = ""
+                    cust_email = ""
+                    cust_phone = ""
+                    customers_data = order.get("customers", {})
+                    cust_elements = customers_data.get("elements", []) if customers_data else []
+                    if cust_elements:
+                        c = cust_elements[0]
+                        cust_first = (c.get("firstName") or "").strip()
+                        cust_last = (c.get("lastName") or "").strip()
+                        emails = c.get("emailAddresses", {})
+                        if emails and emails.get("elements"):
+                            cust_email = emails["elements"][0].get("emailAddress", "")
+                        phones = c.get("phoneNumbers", {})
+                        if phones and phones.get("elements"):
+                            cust_phone = phones["elements"][0].get("phoneNumber", "")
+
+                    # Extract line items
+                    line_items_data = order.get("lineItems", {})
+                    li_elements = line_items_data.get("elements", []) if line_items_data else []
+
+                    items_subtotal = 0
+                    item_records: list[dict] = []
+                    for li in li_elements:
+                        if li.get("refunded") or li.get("isRefund"):
+                            continue
+                        li_name = li.get("name", "Unknown")
+                        li_price = li.get("price", 0)
+                        li_item_ref = li.get("item", {})
+                        li_product_id = li_item_ref.get("id", "") if li_item_ref else ""
+                        items_subtotal += li_price
+                        item_records.append({
+                            "product_id": li_product_id,
+                            "name": li_name,
+                            "price": li_price,
+                            "quantity": 1,
+                        })
+
+                    # Derive tax (total - items subtotal, capped at 0)
+                    tax_amount = max(order_total - items_subtotal, 0)
+
+                    # Generate an order number that identifies this as a Clover import
+                    order_number = f"CLV-{clover_oid[:8]}"
+
+                    # Determine fulfillment type from location
+                    if "west" in loc_name.lower():
+                        fulfillment_type = "pickup_west"
+                    elif "east" in loc_name.lower():
+                        fulfillment_type = "pickup_east"
+                    else:
+                        fulfillment_type = "shipping"
+
+                    try:
+                        cursor = await db.execute(
+                            """INSERT INTO ecommerce_orders
+                               (order_number, customer_first_name, customer_last_name,
+                                customer_email, customer_phone,
+                                subtotal, tax, total, notes,
+                                payment_status, fulfillment_type,
+                                clover_order_id, source)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            (
+                                order_number,
+                                cust_first,
+                                cust_last,
+                                cust_email,
+                                cust_phone,
+                                items_subtotal,
+                                tax_amount,
+                                order_total,
+                                f"Clover online order synced from {loc_name}. Original title: {title}",
+                                "paid",
+                                fulfillment_type,
+                                clover_oid,
+                                "clover",
+                            ),
+                        )
+                        new_order_id = cursor.lastrowid
+
+                        for item_rec in item_records:
+                            await db.execute(
+                                """INSERT INTO ecommerce_order_items
+                                   (order_id, product_id, product_name, price, quantity)
+                                   VALUES (?, ?, ?, ?, ?)""",
+                                (
+                                    new_order_id,
+                                    item_rec["product_id"],
+                                    item_rec["name"],
+                                    item_rec["price"],
+                                    item_rec["quantity"],
+                                ),
+                            )
+
+                        await db.commit()
+                        synced += 1
+                        print(
+                            f"[clover-sync] Imported order {order_number} "
+                            f"(clover_id={clover_oid}) from {loc_name}: "
+                            f"{_format_price(order_total)}, {len(item_records)} item(s)"
+                        )
+
+                        # Send store notification email for the imported order
+                        asyncio.create_task(
+                            _send_clover_order_notification(
+                                smtp_settings, order_number, loc_name,
+                                cust_first, cust_last, cust_email, cust_phone,
+                                item_records, items_subtotal, tax_amount,
+                                order_total, clover_oid, fulfillment_type,
+                            )
+                        )
+
+                    except Exception as insert_err:
+                        print(f"[clover-sync] Failed to import {clover_oid}: {insert_err}")
+                        continue
+
+                if len(orders) < limit:
+                    break
+                offset += limit
+                await asyncio.sleep(0.5)
+
+        except Exception as loc_err:
+            print(f"[clover-sync] Error syncing {loc_name}: {loc_err}")
+
+    return {"synced": synced, "skipped": skipped}
+
+
+async def _send_clover_order_notification(
+    smtp_settings: dict[str, str],
+    order_number: str,
+    location_name: str,
+    first_name: str,
+    last_name: str,
+    email: str,
+    phone: str,
+    items: list[dict],
+    subtotal: int,
+    tax: int,
+    total: int,
+    clover_order_id: str,
+    fulfillment_type: str,
+) -> None:
+    """Send a store notification email for a Clover-imported online order."""
+    try:
+        if not smtp_settings.get("smtp_user") or not smtp_settings.get("smtp_password"):
+            return
+
+        items_html = ""
+        for item in items:
+            items_html += f"""
+            <tr>
+                <td style="padding: 10px 12px; border-bottom: 1px solid #e5e7eb;">{item['name']}</td>
+                <td style="padding: 10px 12px; border-bottom: 1px solid #e5e7eb; text-align: center;">{item['quantity']}</td>
+                <td style="padding: 10px 12px; border-bottom: 1px solid #e5e7eb; text-align: right;">{_format_price(item['price'])}</td>
+            </tr>
+            """
+
+        store_html = f"""
+        <html>
+        <body style="font-family: 'Helvetica Neue', Arial, sans-serif; color: #1f2937; max-width: 600px; margin: 0 auto;">
+            <div style="background: #7c3aed; padding: 20px; text-align: center;">
+                <h1 style="color: white; margin: 0; font-size: 22px;">Clover Online Order Detected</h1>
+            </div>
+            <div style="padding: 24px; background: #f9fafb;">
+                <p style="font-size: 14px; color: #6b7280;">
+                    This order was placed through <strong>Clover's online ordering</strong>
+                    (not through the website).  It has been automatically imported into Hempventory.
+                </p>
+
+                <table style="width: 100%; margin: 16px 0; background: white; border-radius: 8px; overflow: hidden;">
+                    <tr style="background: #f3f4f6;">
+                        <td style="padding: 10px 12px; font-weight: bold;">Order Number</td>
+                        <td style="padding: 10px 12px;">{order_number}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 10px 12px; font-weight: bold;">Clover Order ID</td>
+                        <td style="padding: 10px 12px; font-family: monospace; font-size: 13px;">{clover_order_id}</td>
+                    </tr>
+                    <tr style="background: #f3f4f6;">
+                        <td style="padding: 10px 12px; font-weight: bold;">Location</td>
+                        <td style="padding: 10px 12px;">{location_name}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 10px 12px; font-weight: bold;">Customer</td>
+                        <td style="padding: 10px 12px;">{first_name} {last_name}</td>
+                    </tr>
+                    <tr style="background: #f3f4f6;">
+                        <td style="padding: 10px 12px; font-weight: bold;">Email</td>
+                        <td style="padding: 10px 12px;">{email or 'N/A'}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 10px 12px; font-weight: bold;">Phone</td>
+                        <td style="padding: 10px 12px;">{phone or 'N/A'}</td>
+                    </tr>
+                </table>
+
+                <h3 style="margin-top: 20px;">Items Ordered</h3>
+                <table style="width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden;">
+                    <thead>
+                        <tr style="background: #7c3aed; color: white;">
+                            <th style="padding: 10px 12px; text-align: left;">Product</th>
+                            <th style="padding: 10px 12px; text-align: center;">Qty</th>
+                            <th style="padding: 10px 12px; text-align: right;">Price</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {items_html}
+                    </tbody>
+                </table>
+
+                <table style="width: 100%; margin-top: 16px; background: white; border-radius: 8px; overflow: hidden;">
+                    <tr>
+                        <td style="padding: 8px 12px;">Subtotal</td>
+                        <td style="padding: 8px 12px; text-align: right;">{_format_price(subtotal)}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 8px 12px;">Tax</td>
+                        <td style="padding: 8px 12px; text-align: right;">{_format_price(tax)}</td>
+                    </tr>
+                    <tr style="font-weight: bold; font-size: 18px; background: #f3f4f6;">
+                        <td style="padding: 12px;">Total</td>
+                        <td style="padding: 12px; text-align: right; color: #7c3aed;">{_format_price(total)}</td>
+                    </tr>
+                </table>
+            </div>
+            <div style="padding: 16px; text-align: center; color: #9ca3af; font-size: 12px;">
+                The Hemp Dispensary — Clover Order Sync
+            </div>
+        </body>
+        </html>
+        """
+
+        subject = f"Clover Online Order {order_number} — {_format_price(total)} from {first_name} {last_name} ({location_name})"
+
+        if fulfillment_type == "pickup_west":
+            store_recipients = "west@thehempdispensary.com, THD1SHW@icloud.com"
+        elif fulfillment_type == "pickup_east":
+            store_recipients = "east@thehempdispensary.com, THD7SHE@icloud.com"
+        else:
+            store_recipients = STORE_EMAIL
+
+        loop = asyncio.get_event_loop()
+        sent = await loop.run_in_executor(
+            None, _send_smtp_email, smtp_settings, store_recipients, subject, store_html,
+        )
+        if sent:
+            print(f"[clover-sync] Store notification sent for {order_number}")
+        else:
+            print(f"[clover-sync] FAILED to send notification for {order_number}")
+
+    except Exception as e:
+        print(f"[clover-sync] Email error for {order_number}: {e}")

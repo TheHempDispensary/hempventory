@@ -41,6 +41,8 @@ interface Order {
   staff_notes?: string;
   shipping_service?: string;
   fulfillment_type?: string;
+  source?: string;
+  clover_order_id?: string;
   items: OrderItem[];
 }
 
@@ -800,6 +802,11 @@ export default function OnlineOrders() {
                             {order.tracking_number}
                           </span>
                         )}
+                        {order.source === "clover" && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-violet-100 text-violet-800">
+                            Clover Order
+                          </span>
+                        )}
                       </div>
                       <p className="text-sm text-gray-500 truncate">
                         {order.customer_first_name} {order.customer_last_name} &middot; {order.customer_email}
@@ -894,7 +901,9 @@ export default function OnlineOrders() {
                       <div>
                         <h4 className="text-xs font-semibold text-gray-500 uppercase mb-2">Order Info</h4>
                         <p className="text-sm text-gray-600">Placed: {formatDate(order.created_at)}</p>
-                        <p className="text-sm text-gray-600">Charge: <span className="font-mono text-xs">{order.charge_id}</span></p>
+                        <p className="text-sm text-gray-600">Charge: <span className="font-mono text-xs">{order.charge_id || "N/A"}</span></p>
+                        {order.clover_order_id && <p className="text-sm text-gray-600">Clover ID: <span className="font-mono text-xs">{order.clover_order_id}</span></p>}
+                        {order.source === "clover" && <p className="text-sm text-violet-600 font-medium">Source: Clover Online Ordering</p>}
                         {order.notes && <p className="text-sm text-gray-600 mt-1">Notes: {order.notes}</p>}
                         {order.tracking_number && (
                           <div className="mt-2">
