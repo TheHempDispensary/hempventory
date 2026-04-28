@@ -331,6 +331,50 @@ async def _do_sync(db: aiosqlite.Connection) -> dict:
 
     await db.commit()
 
+    # Auto-delete LeafLife products (SKU starts with LF-) that have 0 stock
+    # across ALL locations. These are supplier-shipped items that should be
+    # removed from inventory once depleted.
+    leaflife_to_delete: list[str] = []
+    for key, item_data in list(inventory.items()):
+        sku = item_data.get("sku", "")
+        if not (isinstance(sku, str) and sku.startswith("LF-")):
+            continue
+        total_stock = sum(
+            loc_data.get("stock", 0)
+            for loc_data in item_data.get("locations", {}).values()
+        )
+        if total_stock <= 0:
+            leaflife_to_delete.append(key)
+
+    if leaflife_to_delete:
+        for key in leaflife_to_delete:
+            item_data = inventory.pop(key)
+            sku = item_data.get("sku", "")
+            clover_ids = item_data.get("clover_ids", {})
+            # Delete from each Clover location where it exists
+            for loc in locations:
+                loc_name = loc[1]
+                merchant_id, api_token = loc[2], loc[3]
+                clover_id = clover_ids.get(loc_name, "")
+                if clover_id:
+                    try:
+                        client = CloverClient(merchant_id, api_token)
+                        await client.delete_item(clover_id)
+                    except Exception as e:
+                        print(f"[leaflife-cleanup] Failed to delete {sku} from {loc_name}: {e}")
+            # Clean up DB records
+            await db.execute(
+                "DELETE FROM par_levels WHERE sku = ?", (sku,)
+            )
+            await db.execute(
+                "DELETE FROM inventory_snapshots WHERE sku = ?", (sku,)
+            )
+            print(f"[leaflife-cleanup] Deleted {sku} ({item_data.get('name', '')}) - 0 stock")
+        await db.commit()
+        # Rebuild items_list after removals
+        items_list = sorted(inventory.values(), key=lambda x: x["name"])
+        result = {"items": items_list, "locations": location_list}
+
     # Update cache – but never overwrite a good cache with empty data
     # (protects against temporary Clover API failures wiping the cache)
     async with _cache_lock:
