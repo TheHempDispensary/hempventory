@@ -109,7 +109,7 @@ async function main() {
     if (!product.slug) continue;
     entries.push(
       buildUrlEntry({
-        loc: `${BASE_URL}/shop/product/${product.slug}`,
+        loc: `${BASE_URL}/products/product/${product.slug}`,
         lastmod: today,
         changefreq: "weekly",
         priority: "0.8",
