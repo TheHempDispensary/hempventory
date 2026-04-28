@@ -1038,11 +1038,12 @@ async def _build_clover_promo_name(client: Optional[CloverClient], code: str,
                                     discount_amount: int) -> str:
     """Build a descriptive Clover discount name.
 
-    For direct discounts targeting specific products, include the product names
-    so POS staff knows which items the discount applies to.
+    For discounts targeting specific products (both promo codes and direct
+    discounts), include the product names so POS staff knows which items
+    the discount applies to and doesn't apply it to other items.
     Clover discount names can be up to 127 chars.
     """
-    if not is_direct or applies_to != "specific" or not product_ids or not client:
+    if applies_to != "specific" or not product_ids or not client:
         return code
 
     # Look up product names from Clover
@@ -1051,8 +1052,6 @@ async def _build_clover_promo_name(client: Optional[CloverClient], code: str,
         return code
 
     names: list[str] = []
-    # Use the product cache (which is already populated from Clover) instead of
-    # making individual API calls that can fail due to rate limits or timeouts.
     try:
         cached = await _get_cached_products()
         id_to_name = {p["id"]: p.get("name", p["id"]) for p in cached.get("products", [])}
@@ -1061,7 +1060,7 @@ async def _build_clover_promo_name(client: Optional[CloverClient], code: str,
     except Exception:
         names = ids  # fall back to raw IDs
 
-    # Build discount description
+    # Build discount description with product names
     if discount_pct > 0:
         desc = f"{int(round(discount_pct * 100))}% off"
     elif discount_amount > 0:
@@ -1070,7 +1069,10 @@ async def _build_clover_promo_name(client: Optional[CloverClient], code: str,
         desc = "Discount"
 
     product_list = ", ".join(names)
-    label = f"{desc}: {product_list}"
+    if is_direct:
+        label = f"{desc}: {product_list}"
+    else:
+        label = f"{code} {desc}: {product_list} ONLY"
     # Truncate to 64 chars (Clover name limit)
     if len(label) > 64:
         label = label[:61] + "..."
