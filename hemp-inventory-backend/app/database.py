@@ -579,6 +579,21 @@ async def init_db():
             )
         """)
 
+        # Multi-location Clover discount ID mapping
+        # Maps HempVentory discount IDs to Clover discount IDs per merchant location
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS clover_discount_map (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                discount_id INTEGER NOT NULL,
+                discount_type TEXT NOT NULL,
+                merchant_id TEXT NOT NULL,
+                clover_discount_id TEXT NOT NULL,
+                location_name TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(discount_id, discount_type, merchant_id)
+            )
+        """)
+
         # Discount usage tracking table (logs every use of a discount code)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS discount_usage (

@@ -897,6 +897,141 @@ async def _get_hq_clover_client(db: aiosqlite.Connection) -> Optional[CloverClie
     return None
 
 
+async def _get_all_location_clients(db: aiosqlite.Connection) -> list[tuple[str, str, "CloverClient"]]:
+    """Get CloverClient instances for all store locations.
+
+    Returns list of (merchant_id, location_name, CloverClient) tuples.
+    """
+    cursor = await db.execute(
+        "SELECT name, merchant_id, api_token FROM locations "
+        "WHERE merchant_id != '' AND api_token != ''"
+    )
+    rows = await cursor.fetchall()
+    clients: list[tuple[str, str, CloverClient]] = []
+    for row in rows:
+        clients.append((row["merchant_id"], row["name"], CloverClient(row["merchant_id"], row["api_token"])))
+    return clients
+
+
+async def _sync_discount_to_all_locations(
+    db: aiosqlite.Connection,
+    discount_id: int,
+    discount_type: str,
+    name: str,
+    percentage: int = 0,
+    amount: int = 0,
+) -> list[dict]:
+    """Create a discount on all Clover locations. Returns list of results per location."""
+    clients = await _get_all_location_clients(db)
+    results: list[dict] = []
+    for merchant_id, location_name, client in clients:
+        try:
+            resp = await client.create_discount(name=name, percentage=percentage, amount=amount)
+            clover_discount_id = resp.get("id", "")
+            if clover_discount_id:
+                await db.execute(
+                    """INSERT OR REPLACE INTO clover_discount_map
+                       (discount_id, discount_type, merchant_id, clover_discount_id, location_name)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (discount_id, discount_type, merchant_id, clover_discount_id, location_name),
+                )
+            results.append({"merchant_id": merchant_id, "location": location_name, "clover_id": clover_discount_id})
+        except Exception as e:
+            print(f"[discount-sync] Create failed for {location_name} ({merchant_id}): {e}")
+            results.append({"merchant_id": merchant_id, "location": location_name, "error": str(e)})
+    if results:
+        await db.commit()
+    return results
+
+
+async def _update_discount_on_all_locations(
+    db: aiosqlite.Connection,
+    discount_id: int,
+    discount_type: str,
+    name: str,
+    percentage: int = 0,
+    amount: int = 0,
+) -> list[dict]:
+    """Update a discount on all Clover locations. Creates if not yet synced to a location."""
+    clients = await _get_all_location_clients(db)
+    results: list[dict] = []
+    for merchant_id, location_name, client in clients:
+        try:
+            cursor = await db.execute(
+                "SELECT clover_discount_id FROM clover_discount_map "
+                "WHERE discount_id = ? AND discount_type = ? AND merchant_id = ?",
+                (discount_id, discount_type, merchant_id),
+            )
+            row = await cursor.fetchone()
+            clover_id = row["clover_discount_id"] if row else ""
+
+            if clover_id:
+                await client.update_discount(clover_id, name=name, percentage=percentage, amount=amount)
+                results.append({"merchant_id": merchant_id, "location": location_name, "clover_id": clover_id, "action": "updated"})
+            else:
+                resp = await client.create_discount(name=name, percentage=percentage, amount=amount)
+                new_id = resp.get("id", "")
+                if new_id:
+                    await db.execute(
+                        """INSERT OR REPLACE INTO clover_discount_map
+                           (discount_id, discount_type, merchant_id, clover_discount_id, location_name)
+                           VALUES (?, ?, ?, ?, ?)""",
+                        (discount_id, discount_type, merchant_id, new_id, location_name),
+                    )
+                results.append({"merchant_id": merchant_id, "location": location_name, "clover_id": new_id, "action": "created"})
+        except Exception as e:
+            print(f"[discount-sync] Update failed for {location_name} ({merchant_id}): {e}")
+            results.append({"merchant_id": merchant_id, "location": location_name, "error": str(e)})
+    if results:
+        await db.commit()
+    return results
+
+
+async def _delete_discount_from_all_locations(
+    db: aiosqlite.Connection,
+    discount_id: int,
+    discount_type: str,
+) -> list[dict]:
+    """Delete a discount from all Clover locations."""
+    cursor = await db.execute(
+        "SELECT merchant_id, clover_discount_id, location_name "
+        "FROM clover_discount_map "
+        "WHERE discount_id = ? AND discount_type = ?",
+        (discount_id, discount_type),
+    )
+    mappings = await cursor.fetchall()
+    results: list[dict] = []
+    clients = await _get_all_location_clients(db)
+    client_map = {mid: c for mid, _, c in clients}
+
+    for mapping in mappings:
+        merchant_id = mapping["merchant_id"]
+        clover_id = mapping["clover_discount_id"]
+        location_name = mapping["location_name"] or merchant_id
+        try:
+            client = client_map.get(merchant_id)
+            if client:
+                await client.delete_discount(clover_id)
+            results.append({
+                "merchant_id": merchant_id,
+                "location": location_name, "action": "deleted",
+            })
+        except Exception as e:
+            print(f"[discount-sync] Delete failed for {location_name} ({merchant_id}): {e}")
+            results.append({
+                "merchant_id": merchant_id,
+                "location": location_name, "error": str(e),
+            })
+
+    await db.execute(
+        "DELETE FROM clover_discount_map "
+        "WHERE discount_id = ? AND discount_type = ?",
+        (discount_id, discount_type),
+    )
+    await db.commit()
+    return results
+
+
 async def _build_clover_promo_name(client: Optional[CloverClient], code: str,
                                     is_direct: bool, applies_to: str,
                                     product_ids: str, discount_pct: float,
@@ -955,24 +1090,8 @@ async def create_promo(body: PromoCreateRequest, db: aiosqlite.Connection = Depe
             raise HTTPException(status_code=400, detail="Promo code is required")
     clover_discount_id = ""
 
-    # Sync to Clover POS if requested
-    if body.sync_to_clover:
-        try:
-            client = await _get_hq_clover_client(db)
-            if client:
-                pct = int(round(body.discount_pct * 100)) if body.discount_pct > 0 else 0
-                amt = body.discount_amount if body.discount_amount > 0 else 0
-                clover_name = await _build_clover_promo_name(
-                    client, code, body.is_direct_discount, body.applies_to,
-                    body.product_ids, body.discount_pct, body.discount_amount,
-                )
-                result = await client.create_discount(name=clover_name, percentage=pct, amount=amt)
-                clover_discount_id = result.get("id", "")
-        except Exception as e:
-            print(f"[promo] Clover sync failed: {e}")
-
     try:
-        await db.execute(
+        cursor = await db.execute(
             """INSERT INTO promo_codes (code, discount_pct, discount_amount, single_use, max_uses,
                expires_at, starts_at, applies_to, product_ids, exclude_from_other_coupons, clover_discount_id, is_direct_discount, excluded_brands)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -981,8 +1100,38 @@ async def create_promo(body: PromoCreateRequest, db: aiosqlite.Connection = Depe
              int(body.exclude_from_other_coupons), clover_discount_id, int(body.is_direct_discount), body.excluded_brands),
         )
         await db.commit()
+        promo_id = cursor.lastrowid
     except Exception:
         raise HTTPException(status_code=400, detail=f"Promo code '{code}' already exists")
+
+    # Sync to all Clover POS locations (non-blocking: errors logged, don't fail response)
+    if body.sync_to_clover:
+        try:
+            pct = int(round(body.discount_pct * 100)) if body.discount_pct > 0 else 0
+            amt = body.discount_amount if body.discount_amount > 0 else 0
+            clients = await _get_all_location_clients(db)
+            ref_client = clients[0][2] if clients else None
+            clover_name = await _build_clover_promo_name(
+                ref_client, code, body.is_direct_discount, body.applies_to,
+                body.product_ids, body.discount_pct, body.discount_amount,
+            )
+            sync_results = await _sync_discount_to_all_locations(
+                db, promo_id, "promo", name=clover_name,
+                percentage=pct, amount=amt,
+            )
+            # Store first successful Clover ID in legacy column for backward compat
+            for r in sync_results:
+                if r.get("clover_id"):
+                    clover_discount_id = r["clover_id"]
+                    await db.execute(
+                        "UPDATE promo_codes SET clover_discount_id = ? WHERE id = ?",
+                        (clover_discount_id, promo_id),
+                    )
+                    await db.commit()
+                    break
+        except Exception as e:
+            print(f"[promo] Clover sync failed: {e}")
+
     return {"status": "created", "code": code, "clover_discount_id": clover_discount_id}
 
 
@@ -1046,52 +1195,37 @@ async def update_promo(promo_id: int, body: PromoUpdateRequest, db: aiosqlite.Co
         await db.execute(f"UPDATE promo_codes SET {', '.join(updates)} WHERE id = ?", params)
         await db.commit()
 
-    # Sync to Clover POS if requested
+    # Sync to all Clover POS locations (non-blocking: errors logged, don't fail response)
     if body.sync_to_clover is True:
         try:
             cursor = await db.execute("SELECT * FROM promo_codes WHERE id = ?", (promo_id,))
             promo = await cursor.fetchone()
             if promo:
-                client = await _get_hq_clover_client(db)
-                if client:
-                    clover_id = promo["clover_discount_id"] if "clover_discount_id" in promo.keys() else ""
-                    pct_val = body.discount_pct if body.discount_pct is not None else promo["discount_pct"]
-                    amt_val = body.discount_amount if body.discount_amount is not None else promo["discount_amount"]
-                    pct = int(round(pct_val * 100)) if pct_val > 0 else 0
-                    amt = amt_val if amt_val > 0 else 0
-                    is_direct = bool(promo["is_direct_discount"]) if "is_direct_discount" in promo.keys() else False
-                    applies_to = promo["applies_to"] if "applies_to" in promo.keys() else "all"
-                    product_ids = promo["product_ids"] if "product_ids" in promo.keys() else ""
-                    clover_name = await _build_clover_promo_name(
-                        client, promo["code"], is_direct, applies_to,
-                        product_ids, pct_val, amt_val,
-                    )
-                    if clover_id:
-                        await client.update_discount(clover_id, name=clover_name, percentage=pct, amount=amt)
-                    else:
-                        result = await client.create_discount(name=clover_name, percentage=pct, amount=amt)
-                        new_id = result.get("id", "")
-                        if new_id:
-                            await db.execute("UPDATE promo_codes SET clover_discount_id = ? WHERE id = ?", (new_id, promo_id))
-                            await db.commit()
+                pct_val = body.discount_pct if body.discount_pct is not None else promo["discount_pct"]
+                amt_val = body.discount_amount if body.discount_amount is not None else promo["discount_amount"]
+                pct = int(round(pct_val * 100)) if pct_val > 0 else 0
+                amt = amt_val if amt_val > 0 else 0
+                is_direct = bool(promo["is_direct_discount"]) if "is_direct_discount" in promo.keys() else False
+                applies_to = promo["applies_to"] if "applies_to" in promo.keys() else "all"
+                product_ids = promo["product_ids"] if "product_ids" in promo.keys() else ""
+                clients = await _get_all_location_clients(db)
+                ref_client = clients[0][2] if clients else None
+                clover_name = await _build_clover_promo_name(
+                    ref_client, promo["code"], is_direct, applies_to,
+                    product_ids, pct_val, amt_val,
+                )
+                await _update_discount_on_all_locations(
+                    db, promo_id, "promo",
+                    name=clover_name, percentage=pct, amount=amt,
+                )
         except Exception as e:
             print(f"[promo] Clover sync failed: {e}")
     elif body.sync_to_clover is False:
-        # Unsync from Clover: delete the discount and clear the ID
+        # Unsync from Clover: delete from all locations
         try:
-            cursor = await db.execute("SELECT * FROM promo_codes WHERE id = ?", (promo_id,))
-            promo = await cursor.fetchone()
-            if promo:
-                clover_id = promo["clover_discount_id"] if "clover_discount_id" in promo.keys() else ""
-                if clover_id:
-                    client = await _get_hq_clover_client(db)
-                    if client:
-                        try:
-                            await client.delete_discount(clover_id)
-                        except Exception:
-                            pass  # Already gone or inaccessible
-                        await db.execute("UPDATE promo_codes SET clover_discount_id = '' WHERE id = ?", (promo_id,))
-                        await db.commit()
+            await _delete_discount_from_all_locations(db, promo_id, "promo")
+            await db.execute("UPDATE promo_codes SET clover_discount_id = '' WHERE id = ?", (promo_id,))
+            await db.commit()
         except Exception as e:
             print(f"[promo] Clover unsync failed: {e}")
 
@@ -1100,18 +1234,12 @@ async def update_promo(promo_id: int, body: PromoUpdateRequest, db: aiosqlite.Co
 
 @router.delete("/promos/{promo_id}")
 async def delete_promo(promo_id: int, db: aiosqlite.Connection = Depends(get_db)):
-    """Admin: Delete a promo code (also removes from Clover POS if synced)."""
-    cursor = await db.execute("SELECT * FROM promo_codes WHERE id = ?", (promo_id,))
-    promo = await cursor.fetchone()
-    if promo:
-        clover_id = promo["clover_discount_id"] if "clover_discount_id" in promo.keys() else ""
-        if clover_id:
-            try:
-                client = await _get_hq_clover_client(db)
-                if client:
-                    await client.delete_discount(clover_id)
-            except Exception as e:
-                print(f"[promo] Clover delete failed: {e}")
+    """Admin: Delete a promo code (also removes from all Clover POS locations)."""
+    # Delete from all Clover locations first (non-blocking: errors logged)
+    try:
+        await _delete_discount_from_all_locations(db, promo_id, "promo")
+    except Exception as e:
+        print(f"[promo] Clover delete failed: {e}")
     await db.execute("DELETE FROM promo_codes WHERE id = ?", (promo_id,))
     await db.commit()
     return {"status": "deleted"}
@@ -1119,25 +1247,24 @@ async def delete_promo(promo_id: int, db: aiosqlite.Connection = Depends(get_db)
 
 @router.post("/promos/resync-clover")
 async def resync_promos_to_clover(db: aiosqlite.Connection = Depends(get_db)):
-    """Admin: Re-sync all Clover-synced promo/direct discounts with descriptive names.
+    """Admin: Re-sync all active promo/direct discounts to all Clover POS locations.
 
     Updates existing Clover discounts so direct discounts targeting specific
     products show the product names in Clover POS (instead of the internal code).
+    Syncs to ALL configured store locations.
     """
-    # Include promos that either have a Clover ID (update) or are direct discounts
-    # that should be synced but lost their Clover ID (recreate).
     cursor = await db.execute(
         "SELECT * FROM promo_codes WHERE is_active = 1 AND (clover_discount_id != '' OR is_direct_discount = 1)"
     )
     rows = await cursor.fetchall()
-    results = []
-    client = await _get_hq_clover_client(db)
-    if not client:
-        raise HTTPException(status_code=500, detail="Could not connect to Clover")
+    clients = await _get_all_location_clients(db)
+    if not clients:
+        raise HTTPException(status_code=500, detail="No Clover locations configured")
 
+    ref_client = clients[0][2]
+    results = []
     for row in rows:
         row = dict(row)
-        clover_id = row.get("clover_discount_id", "")
         try:
             pct_val = row["discount_pct"]
             amt_val = row["discount_amount"]
@@ -1147,31 +1274,19 @@ async def resync_promos_to_clover(db: aiosqlite.Connection = Depends(get_db)):
             applies_to = row.get("applies_to", "all")
             product_ids = row.get("product_ids", "")
             clover_name = await _build_clover_promo_name(
-                client, row["code"], is_direct, applies_to,
+                ref_client, row["code"], is_direct, applies_to,
                 product_ids, pct_val, amt_val,
             )
-            if clover_id:
-                try:
-                    await client.update_discount(clover_id, name=clover_name, percentage=pct, amount=amt)
-                    results.append({"id": row["id"], "code": row["code"], "clover_id": clover_id, "action": "updated", "label": clover_name})
-                    continue
-                except Exception:
-                    # Delete stale entry
-                    try:
-                        await client.delete_discount(clover_id)
-                    except Exception:
-                        pass
-                    await db.execute("UPDATE promo_codes SET clover_discount_id = '' WHERE id = ?", (row["id"],))
-                    await db.commit()
-            # Create new Clover discount (either fresh or after stale delete)
             import asyncio as _asyncio
-            await _asyncio.sleep(0.5)  # Small delay to avoid Clover rate limits
-            result = await client.create_discount(name=clover_name, percentage=pct, amount=amt)
-            new_id = result.get("id", "")
-            if new_id:
-                await db.execute("UPDATE promo_codes SET clover_discount_id = ? WHERE id = ?", (new_id, row["id"]))
-                await db.commit()
-            results.append({"id": row["id"], "code": row["code"], "clover_id": new_id, "action": "created" if not clover_id else "recreated", "label": clover_name})
+            await _asyncio.sleep(0.3)
+            sync_results = await _update_discount_on_all_locations(
+                db, row["id"], "promo",
+                name=clover_name, percentage=pct, amount=amt,
+            )
+            results.append({
+                "id": row["id"], "code": row["code"],
+                "label": clover_name, "locations": sync_results,
+            })
         except Exception as e:
             results.append({"id": row["id"], "code": row["code"], "error": str(e)})
 
@@ -1294,21 +1409,7 @@ async def create_volume_discount(body: VolumeDiscountCreateRequest, db: aiosqlit
         raise HTTPException(status_code=400, detail="Discount value must be greater than 0")
 
     clover_discount_id = ""
-    if body.sync_to_clover:
-        try:
-            client = await _get_hq_clover_client(db)
-            if client:
-                label, pct, amt = await _compute_clover_volume_discount(
-                    client, body.product_sku, body.product_name,
-                    body.min_quantity, body.discount_type,
-                    body.discount_value, body.customer_label,
-                )
-                result = await client.create_discount(name=label, percentage=pct, amount=amt)
-                clover_discount_id = result.get("id", "")
-        except Exception as e:
-            print(f"[volume-discount] Clover sync failed: {e}")
-
-    await db.execute(
+    cursor = await db.execute(
         """INSERT INTO volume_discounts (product_sku, product_name, min_quantity, discount_type,
            discount_value, customer_label, is_active, sync_to_clover, clover_discount_id)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -1317,6 +1418,34 @@ async def create_volume_discount(body: VolumeDiscountCreateRequest, db: aiosqlit
          int(body.sync_to_clover), clover_discount_id),
     )
     await db.commit()
+    vd_id = cursor.lastrowid
+
+    # Sync to all Clover POS locations (non-blocking: errors logged)
+    if body.sync_to_clover:
+        try:
+            clients = await _get_all_location_clients(db)
+            ref_client = clients[0][2] if clients else None
+            if ref_client:
+                label, pct, amt = await _compute_clover_volume_discount(
+                    ref_client, body.product_sku, body.product_name,
+                    body.min_quantity, body.discount_type,
+                    body.discount_value, body.customer_label,
+                )
+                sync_results = await _sync_discount_to_all_locations(
+                    db, vd_id, "volume", name=label, percentage=pct, amount=amt,
+                )
+                for r in sync_results:
+                    if r.get("clover_id"):
+                        clover_discount_id = r["clover_id"]
+                        await db.execute(
+                            "UPDATE volume_discounts SET clover_discount_id = ? WHERE id = ?",
+                            (clover_discount_id, vd_id),
+                        )
+                        await db.commit()
+                        break
+        except Exception as e:
+            print(f"[volume-discount] Clover sync failed: {e}")
+
     return {"status": "created", "clover_discount_id": clover_discount_id}
 
 
@@ -1344,28 +1473,23 @@ async def update_volume_discount(discount_id: int, body: VolumeDiscountUpdateReq
     await db.execute(f"UPDATE volume_discounts SET {', '.join(updates)} WHERE id = ?", params)
     await db.commit()
 
-    # Sync to Clover if requested
+    # Sync to all Clover POS locations (non-blocking: errors logged)
     if body.sync_to_clover:
         try:
             cursor = await db.execute("SELECT * FROM volume_discounts WHERE id = ?", (discount_id,))
             vd = await cursor.fetchone()
             if vd:
-                client = await _get_hq_clover_client(db)
-                if client:
-                    clover_id = vd["clover_discount_id"] if "clover_discount_id" in vd.keys() else ""
+                clients = await _get_all_location_clients(db)
+                ref_client = clients[0][2] if clients else None
+                if ref_client:
                     label, pct, amt = await _compute_clover_volume_discount(
-                        client, vd["product_sku"], vd["product_name"],
+                        ref_client, vd["product_sku"], vd["product_name"],
                         vd["min_quantity"], vd["discount_type"],
                         vd["discount_value"], vd["customer_label"],
                     )
-                    if clover_id:
-                        await client.update_discount(clover_id, name=label, percentage=pct, amount=amt)
-                    else:
-                        result = await client.create_discount(name=label, percentage=pct, amount=amt)
-                        new_id = result.get("id", "")
-                        if new_id:
-                            await db.execute("UPDATE volume_discounts SET clover_discount_id = ? WHERE id = ?", (new_id, discount_id))
-                            await db.commit()
+                    await _update_discount_on_all_locations(
+                        db, discount_id, "volume", name=label, percentage=pct, amount=amt,
+                    )
         except Exception as e:
             print(f"[volume-discount] Clover sync failed: {e}")
 
@@ -1374,18 +1498,12 @@ async def update_volume_discount(discount_id: int, body: VolumeDiscountUpdateReq
 
 @router.delete("/volume-discounts/{discount_id}")
 async def delete_volume_discount(discount_id: int, db: aiosqlite.Connection = Depends(get_db)):
-    """Admin: Delete a volume discount."""
-    cursor = await db.execute("SELECT * FROM volume_discounts WHERE id = ?", (discount_id,))
-    vd = await cursor.fetchone()
-    if vd:
-        clover_id = vd["clover_discount_id"] if "clover_discount_id" in vd.keys() else ""
-        if clover_id:
-            try:
-                client = await _get_hq_clover_client(db)
-                if client:
-                    await client.delete_discount(clover_id)
-            except Exception as e:
-                print(f"[volume-discount] Clover delete failed: {e}")
+    """Admin: Delete a volume discount (also removes from all Clover POS locations)."""
+    # Delete from all Clover locations first (non-blocking: errors logged)
+    try:
+        await _delete_discount_from_all_locations(db, discount_id, "volume")
+    except Exception as e:
+        print(f"[volume-discount] Clover delete failed: {e}")
     await db.execute("DELETE FROM volume_discounts WHERE id = ?", (discount_id,))
     await db.commit()
     return {"status": "deleted"}
@@ -1393,56 +1511,33 @@ async def delete_volume_discount(discount_id: int, db: aiosqlite.Connection = De
 
 @router.post("/volume-discounts/resync-clover")
 async def resync_volume_discounts_to_clover(db: aiosqlite.Connection = Depends(get_db)):
-    """Admin: Re-sync all active volume discounts to Clover with corrected names and amounts.
+    """Admin: Re-sync all active volume discounts to all Clover POS locations.
 
-    This updates existing Clover discounts to include the product name in the label
-    (so staff knows which product the discount is for) and fixes the discount amount
-    calculation for fixed_total discounts.
+    Updates existing Clover discounts to include the product name in the label
+    and fixes the discount amount calculation. Syncs to ALL configured locations.
     """
     cursor = await db.execute("SELECT * FROM volume_discounts WHERE is_active = 1 AND sync_to_clover = 1")
     rows = await cursor.fetchall()
-    results = []
-    client = await _get_hq_clover_client(db)
-    if not client:
-        raise HTTPException(status_code=500, detail="Could not connect to Clover")
+    clients = await _get_all_location_clients(db)
+    if not clients:
+        raise HTTPException(status_code=500, detail="No Clover locations configured")
 
+    ref_client = clients[0][2]
+    results = []
     for vd in rows:
         vd = dict(vd)
-        clover_id = vd.get("clover_discount_id", "")
         try:
             label, pct, amt = await _compute_clover_volume_discount(
-                client, vd["product_sku"], vd["product_name"],
+                ref_client, vd["product_sku"], vd["product_name"],
                 vd["min_quantity"], vd["discount_type"],
                 vd["discount_value"], vd["customer_label"],
             )
-            if clover_id:
-                # Try update first; if it fails (e.g. type mismatch), delete and recreate
-                try:
-                    await client.update_discount(clover_id, name=label, percentage=pct, amount=amt)
-                    results.append({"id": vd["id"], "product": vd["product_name"], "clover_id": clover_id, "action": "updated", "label": label, "amount_cents": amt, "percentage": pct})
-                    continue
-                except Exception:
-                    # Delete the old discount and create a fresh one
-                    try:
-                        await client.delete_discount(clover_id)
-                    except Exception:
-                        pass  # Already gone or inaccessible
-                    # Clear stale ID immediately after delete, before attempting create
-                    await db.execute("UPDATE volume_discounts SET clover_discount_id = '' WHERE id = ?", (vd["id"],))
-                    await db.commit()
-                    result = await client.create_discount(name=label, percentage=pct, amount=amt)
-                    new_id = result.get("id", "")
-                    if new_id:
-                        await db.execute("UPDATE volume_discounts SET clover_discount_id = ? WHERE id = ?", (new_id, vd["id"]))
-                        await db.commit()
-                    results.append({"id": vd["id"], "product": vd["product_name"], "clover_id": new_id, "action": "recreated", "label": label, "amount_cents": amt, "percentage": pct})
-            else:
-                result = await client.create_discount(name=label, percentage=pct, amount=amt)
-                new_id = result.get("id", "")
-                if new_id:
-                    await db.execute("UPDATE volume_discounts SET clover_discount_id = ? WHERE id = ?", (new_id, vd["id"]))
-                    await db.commit()
-                results.append({"id": vd["id"], "product": vd["product_name"], "clover_id": new_id, "action": "created", "label": label, "amount_cents": amt, "percentage": pct})
+            import asyncio as _asyncio
+            await _asyncio.sleep(0.3)
+            sync_results = await _update_discount_on_all_locations(
+                db, vd["id"], "volume", name=label, percentage=pct, amount=amt,
+            )
+            results.append({"id": vd["id"], "product": vd["product_name"], "label": label, "locations": sync_results})
         except Exception as e:
             results.append({"id": vd["id"], "product": vd["product_name"], "error": str(e)})
 
