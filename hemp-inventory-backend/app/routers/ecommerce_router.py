@@ -3334,6 +3334,7 @@ async def _sync_clover_online_orders(db: aiosqlite.Connection) -> dict:
                         )
 
                     except Exception as insert_err:
+                        await db.rollback()
                         print(f"[clover-sync] Failed to import {clover_oid}: {insert_err}")
                         continue
 
