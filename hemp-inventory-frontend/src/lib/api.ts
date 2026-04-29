@@ -507,10 +507,14 @@ export const purchaseLabel = (data: {
   rate_id: string;
   order_id: number;
   label_file_type?: string;
+  shipment_id?: number;
 }) => api.post("/api/shipping/purchase-label", data);
 
 export const getShippingLabel = (orderId: number) =>
   api.get(`/api/shipping/label/${orderId}`);
+
+export const getOrderShipments = (orderId: number) =>
+  api.get(`/api/shipping/shipments/${orderId}`);
 
 // Resend Confirmation
 export const resendOrderConfirmation = (orderId: number) =>

@@ -594,6 +594,26 @@ async def init_db():
             )
         """)
 
+        # Split-shipment tracking: stores per-shipment tracking for orders
+        # that ship from multiple origins (e.g. store FL + LeafLife WI)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS order_shipments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id INTEGER NOT NULL,
+                shipment_type TEXT NOT NULL,
+                item_ids TEXT NOT NULL DEFAULT '',
+                from_label TEXT NOT NULL DEFAULT '',
+                shippo_shipment_id TEXT,
+                tracking_number TEXT,
+                tracking_url TEXT,
+                label_url TEXT,
+                shippo_transaction_id TEXT,
+                tracking_status TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (order_id) REFERENCES ecommerce_orders(id)
+            )
+        """)
+
         # Discount usage tracking table (logs every use of a discount code)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS discount_usage (

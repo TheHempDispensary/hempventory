@@ -2451,7 +2451,7 @@ async def get_orders(
     rows = await cursor.fetchall()
     orders = [dict(zip(columns, row)) for row in rows]
 
-    # Fetch items for each order
+    # Fetch items and shipments for each order
     for order in orders:
         item_cursor = await db.execute(
             "SELECT product_id, product_name, sku, price, quantity FROM ecommerce_order_items WHERE order_id = ?",
@@ -2460,6 +2460,28 @@ async def get_orders(
         item_cols = [desc[0] for desc in item_cursor.description]
         item_rows = await item_cursor.fetchall()
         order["items"] = [dict(zip(item_cols, row)) for row in item_rows]
+
+        # Attach split-shipment data when present
+        scur = await db.execute(
+            """SELECT id, shipment_type, from_label, tracking_number, tracking_url,
+                      label_url, tracking_status, item_ids
+               FROM order_shipments WHERE order_id = ? ORDER BY id""",
+            (order["id"],),
+        )
+        shipment_rows = await scur.fetchall()
+        if shipment_rows:
+            shipments = []
+            for s in shipment_rows:
+                shipments.append({
+                    "shipment_id": s[0],
+                    "shipment_type": s[1],
+                    "from_label": s[2],
+                    "tracking_number": s[3] or "",
+                    "tracking_url": s[4] or "",
+                    "label_url": s[5] or "",
+                    "tracking_status": s[6] or "",
+                })
+            order["shipments"] = shipments
 
     # Get total count
     count_query = "SELECT COUNT(*) FROM ecommerce_orders"

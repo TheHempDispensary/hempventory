@@ -106,6 +106,67 @@ class PurchaseLabelRequest(BaseModel):
     rate_id: str
     order_id: int
     label_file_type: str = "PDF"
+    shipment_id: int | None = None  # order_shipments.id for split-shipment orders
+
+
+def _is_leaflife_item(sku: str, name: str) -> bool:
+    """Check if a single item is a LeafLife product."""
+    if sku and isinstance(sku, str) and sku.upper().startswith("LF-"):
+        return True
+    if name:
+        lower = name.lower()
+        if any(kw in lower for kw in LEAFLIFE_NAME_KEYWORDS):
+            return True
+    return False
+
+
+def _filter_usps_rates(rates: list[dict]) -> list[dict]:
+    """Extract and format USPS Ground Advantage and Priority rates."""
+    ALLOWED_SERVICES = {"ground advantage", "priority"}
+    BLOCKED_SERVICES = {"priority mail express"}
+    formatted: list[dict] = []
+    for rate in rates:
+        provider = rate.get("provider", "")
+        if "USPS" not in provider.upper():
+            continue
+        service_name = rate.get("servicelevel", {}).get("name", "").lower()
+        if any(blocked in service_name for blocked in BLOCKED_SERVICES):
+            continue
+        if not any(allowed in service_name for allowed in ALLOWED_SERVICES):
+            continue
+        formatted.append({
+            "id": rate["object_id"],
+            "provider": provider,
+            "service_level": rate.get("servicelevel", {}).get("name", ""),
+            "amount": rate.get("amount", "0"),
+            "currency": rate.get("currency", "USD"),
+            "estimated_days": rate.get("estimated_days"),
+            "duration_terms": rate.get("duration_terms", ""),
+            "arrives_by": rate.get("arrives_by"),
+        })
+    formatted.sort(key=lambda r: float(r["amount"]))
+    return formatted
+
+
+async def _create_shippo_shipment(
+    headers: dict, from_address: dict, to_address: dict, parcel: dict, is_hazmat: bool
+) -> dict:
+    """Create a single Shippo shipment and return the parsed JSON."""
+    shipment_data: dict = {
+        "address_from": from_address,
+        "address_to": to_address,
+        "parcels": [parcel],
+        "async": False,
+    }
+    if is_hazmat:
+        shipment_data["extra"] = {"dangerous_goods": {"contains": True}}
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(f"{SHIPPO_API_URL}/shipments/", headers=headers, json=shipment_data)
+        if resp.status_code not in (200, 201):
+            print(f"[shippo] Shipment creation failed: {resp.status_code} {resp.text}")
+            raise HTTPException(status_code=resp.status_code, detail=f"Shippo error: {resp.text}")
+        return resp.json()
 
 
 @router.post("/create-shipment")
@@ -114,10 +175,15 @@ async def create_shipment(
     request: Request,
     db: aiosqlite.Connection = Depends(get_db),
 ):
-    """Create a Shippo shipment for an order and return available rates."""
+    """Create Shippo shipment(s) for an order and return available rates.
+
+    For mixed orders (containing both store and LeafLife items), two shipments
+    are created — one from the store (FL) and one from the LeafLife supplier (WI).
+    Each shipment group is stored in the ``order_shipments`` table and returned
+    with its own set of rates.
+    """
     _verify_admin(request)
 
-    # Get the order
     cursor = await db.execute("SELECT * FROM ecommerce_orders WHERE id = ?", (body.order_id,))
     columns = [desc[0] for desc in cursor.description]
     row = await cursor.fetchone()
@@ -125,17 +191,20 @@ async def create_shipment(
         raise HTTPException(status_code=404, detail="Order not found")
     order = dict(zip(columns, row))
 
-    # Check if this order contains LeafLife products (ship from WI supplier)
     items_cursor = await db.execute(
-        "SELECT sku, product_name FROM ecommerce_order_items WHERE order_id = ?", (body.order_id,)
+        "SELECT id, sku, product_name FROM ecommerce_order_items WHERE order_id = ?", (body.order_id,)
     )
     item_rows = await items_cursor.fetchall()
-    order_skus = [r[0] for r in item_rows if r[0]]
-    order_names = [r[1] for r in item_rows if r[1]]
-    is_leaflife = _has_leaflife_products_skus(order_skus) or _has_leaflife_products_names(order_names)
-    from_address = LEAFLIFE_FROM_ADDRESS if is_leaflife else DEFAULT_FROM_ADDRESS
 
-    # Build the destination address
+    # Partition items into store vs LeafLife
+    store_items: list[tuple] = []
+    leaflife_items: list[tuple] = []
+    for item_id, sku, name in item_rows:
+        if _is_leaflife_item(sku or "", name or ""):
+            leaflife_items.append((item_id, sku, name))
+        else:
+            store_items.append((item_id, sku, name))
+
     to_address = {
         "name": f"{order['customer_first_name']} {order['customer_last_name']}",
         "street1": order["shipping_address"],
@@ -148,7 +217,6 @@ async def create_shipment(
         "phone": order.get("customer_phone", ""),
     }
 
-    # Build parcel — Shippo allows max 4 decimal places for weight
     parcel = {
         "length": str(round(body.parcel_length, 4)),
         "width": str(round(body.parcel_width, 4)),
@@ -158,65 +226,73 @@ async def create_shipment(
         "mass_unit": body.parcel_mass_unit,
     }
 
-    shipment_data = {
-        "address_from": from_address,
-        "address_to": to_address,
-        "parcels": [parcel],
-        "async": False,
-    }
-
-    # If hazmat, declare dangerous goods per Shippo API so the label prints hazmat markings
-    if body.is_hazmat:
-        shipment_data["extra"] = {
-            "dangerous_goods": {
-                "contains": True,
-            },
-        }
-
     headers = _get_shippo_headers()
+    is_mixed = bool(store_items) and bool(leaflife_items)
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(f"{SHIPPO_API_URL}/shipments/", headers=headers, json=shipment_data)
-        if resp.status_code not in (200, 201):
-            print(f"[shippo] Shipment creation failed: {resp.status_code} {resp.text}")
-            raise HTTPException(status_code=resp.status_code, detail=f"Shippo error: {resp.text}")
+    # Clear any previous shipment records for this order (in case admin retries)
+    await db.execute("DELETE FROM order_shipments WHERE order_id = ?", (body.order_id,))
 
-        shipment = resp.json()
+    # Build shipment groups
+    groups_to_create: list[tuple[str, dict, list[tuple]]] = []
+    if is_mixed:
+        groups_to_create.append(("store", DEFAULT_FROM_ADDRESS, store_items))
+        groups_to_create.append(("leaflife", LEAFLIFE_FROM_ADDRESS, leaflife_items))
+    elif leaflife_items:
+        groups_to_create.append(("leaflife", LEAFLIFE_FROM_ADDRESS, leaflife_items))
+    else:
+        groups_to_create.append(("store", DEFAULT_FROM_ADDRESS, store_items or list(item_rows)))
 
-    # Extract USPS Ground Advantage and Priority rates (exclude Priority Express)
-    ALLOWED_SERVICES = {"ground advantage", "priority"}
-    BLOCKED_SERVICES = {"priority mail express"}
-    rates = shipment.get("rates", [])
-    formatted_rates = []
-    for rate in rates:
-        provider = rate.get("provider", "")
-        if "USPS" not in provider.upper():
-            continue
-        service_name = rate.get("servicelevel", {}).get("name", "").lower()
-        if any(blocked in service_name for blocked in BLOCKED_SERVICES):
-            continue
-        if not any(allowed in service_name for allowed in ALLOWED_SERVICES):
-            continue
-        formatted_rates.append({
-            "id": rate["object_id"],
-            "provider": provider,
-            "service_level": rate.get("servicelevel", {}).get("name", ""),
-            "amount": rate.get("amount", "0"),
-            "currency": rate.get("currency", "USD"),
-            "estimated_days": rate.get("estimated_days"),
-            "duration_terms": rate.get("duration_terms", ""),
-            "arrives_by": rate.get("arrives_by"),
+    shipment_groups: list[dict] = []
+    for stype, from_addr, items in groups_to_create:
+        shipment = await _create_shippo_shipment(headers, from_addr, to_address, parcel, body.is_hazmat)
+        rates = _filter_usps_rates(shipment.get("rates", []))
+
+        item_id_list = ",".join(str(i[0]) for i in items)
+        item_names = [i[2] or i[1] or "?" for i in items]
+        from_label = "Madison, WI (LeafLife)" if stype == "leaflife" else "Spring Hill, FL (Store)"
+
+        cur = await db.execute(
+            """INSERT INTO order_shipments (order_id, shipment_type, item_ids, from_label, shippo_shipment_id)
+               VALUES (?, ?, ?, ?, ?)""",
+            (body.order_id, stype, item_id_list, from_label, shipment.get("object_id", "")),
+        )
+        shipment_db_id = cur.lastrowid
+
+        shipment_groups.append({
+            "shipment_id": shipment_db_id,
+            "shipment_type": stype,
+            "from_label": from_label,
+            "item_names": item_names,
+            "rates": rates,
+            "address_from": from_addr,
         })
 
-    # Sort by price
-    formatted_rates.sort(key=lambda r: float(r["amount"]))
+    await db.commit()
 
     return {
-        "shipment_id": shipment.get("object_id", ""),
-        "rates": formatted_rates,
-        "address_from": from_address,
+        "is_split": is_mixed,
+        "shipment_groups": shipment_groups,
         "address_to": to_address,
+        # Legacy fields for single-shipment orders (backwards compat)
+        "shipment_id": shipment_groups[0]["rates"][0]["id"] if shipment_groups and shipment_groups[0]["rates"] else "",
+        "rates": shipment_groups[0]["rates"] if len(shipment_groups) == 1 else [],
+        "address_from": shipment_groups[0]["address_from"] if shipment_groups else DEFAULT_FROM_ADDRESS,
     }
+
+
+async def _purchase_shippo_label(headers: dict, rate_id: str, label_file_type: str) -> dict:
+    """Purchase a Shippo label for a given rate and return the transaction JSON."""
+    transaction_data = {
+        "rate": rate_id,
+        "label_file_type": label_file_type,
+        "async": False,
+    }
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(f"{SHIPPO_API_URL}/transactions/", headers=headers, json=transaction_data)
+        if resp.status_code not in (200, 201):
+            print(f"[shippo] Label purchase failed: {resp.status_code} {resp.text}")
+            raise HTTPException(status_code=resp.status_code, detail=f"Shippo error: {resp.text}")
+        return resp.json()
 
 
 @router.post("/purchase-label")
@@ -225,24 +301,18 @@ async def purchase_label(
     request: Request,
     db: aiosqlite.Connection = Depends(get_db),
 ):
-    """Purchase a shipping label for the selected rate."""
+    """Purchase a shipping label for the selected rate.
+
+    If ``shipment_id`` is provided, the label is stored in the ``order_shipments``
+    row instead of directly on the order.  The order-level fields are updated to
+    the *first* purchased shipment's tracking info for backwards compatibility.
+    When all shipment groups for an order have labels, the order is marked shipped
+    and a single tracking email with all tracking numbers is sent.
+    """
     _verify_admin(request)
 
-    transaction_data = {
-        "rate": body.rate_id,
-        "label_file_type": body.label_file_type,
-        "async": False,
-    }
-
     headers = _get_shippo_headers()
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(f"{SHIPPO_API_URL}/transactions/", headers=headers, json=transaction_data)
-        if resp.status_code not in (200, 201):
-            print(f"[shippo] Label purchase failed: {resp.status_code} {resp.text}")
-            raise HTTPException(status_code=resp.status_code, detail=f"Shippo error: {resp.text}")
-
-        transaction = resp.json()
+    transaction = await _purchase_shippo_label(headers, body.rate_id, body.label_file_type)
 
     status = transaction.get("status", "")
     if status == "ERROR":
@@ -253,20 +323,87 @@ async def purchase_label(
     label_url = transaction.get("label_url", "")
     tracking_number = transaction.get("tracking_number", "")
     tracking_url = transaction.get("tracking_url_provider", "")
+    txn_id = transaction.get("object_id", "")
 
-    # Save tracking info to the order
-    if tracking_number:
+    if body.shipment_id and tracking_number:
+        # Split-shipment: store tracking in order_shipments row
         await db.execute(
-            """UPDATE ecommerce_orders 
+            """UPDATE order_shipments
+               SET tracking_number = ?, tracking_url = ?, label_url = ?,
+                   shippo_transaction_id = ?, tracking_status = 'label_created'
+               WHERE id = ?""",
+            (tracking_number, tracking_url, label_url, txn_id, body.shipment_id),
+        )
+
+        # Check if ALL shipment groups for this order now have labels
+        cursor = await db.execute(
+            "SELECT id, tracking_number, tracking_url, from_label FROM order_shipments WHERE order_id = ?",
+            (body.order_id,),
+        )
+        all_shipments = await cursor.fetchall()
+        all_have_labels = all(s[1] for s in all_shipments)
+
+        # Always keep order-level tracking in sync with the first labelled shipment
+        first_labelled = next((s for s in all_shipments if s[1]), None)
+        if first_labelled:
+            await db.execute(
+                """UPDATE ecommerce_orders
+                   SET tracking_number = ?, tracking_url = ?, label_url = ?,
+                       shippo_transaction_id = ?, tracking_status = 'label_created'
+                   WHERE id = ?""",
+                (first_labelled[1], first_labelled[2], label_url, txn_id, body.order_id),
+            )
+
+        if all_have_labels:
+            await db.execute(
+                """UPDATE ecommerce_orders
+                   SET payment_status = CASE WHEN payment_status IN ('paid', 'processing') THEN 'shipped' ELSE payment_status END
+                   WHERE id = ?""",
+                (body.order_id,),
+            )
+            # Send one tracking email with all tracking numbers
+            cursor2 = await db.execute(
+                "SELECT order_number, customer_first_name, customer_email FROM ecommerce_orders WHERE id = ?",
+                (body.order_id,),
+            )
+            order_row = await cursor2.fetchone()
+            if order_row:
+                order_number, first_name, customer_email = order_row
+                if customer_email:
+                    shipment_info = [
+                        {"tracking_number": s[1], "tracking_url": s[2] or "", "from_label": s[3]}
+                        for s in all_shipments if s[1]
+                    ]
+                    smtp_settings = await _get_smtp_settings(db)
+                    if len(shipment_info) > 1:
+                        asyncio.create_task(
+                            _send_split_tracking_email(
+                                smtp_settings, customer_email, first_name or "Customer",
+                                order_number or "", shipment_info,
+                            )
+                        )
+                    else:
+                        asyncio.create_task(
+                            _send_tracking_email(
+                                smtp_settings, customer_email, first_name or "Customer",
+                                order_number or "", tracking_number, tracking_url, "shipped",
+                            )
+                        )
+
+        await db.commit()
+
+    elif tracking_number:
+        # Legacy single-shipment flow
+        await db.execute(
+            """UPDATE ecommerce_orders
                SET tracking_number = ?, tracking_url = ?, label_url = ?, shippo_transaction_id = ?,
                    tracking_status = 'label_created',
                    payment_status = CASE WHEN payment_status IN ('paid', 'processing') THEN 'shipped' ELSE payment_status END
                WHERE id = ?""",
-            (tracking_number, tracking_url, label_url, transaction.get("object_id", ""), body.order_id),
+            (tracking_number, tracking_url, label_url, txn_id, body.order_id),
         )
         await db.commit()
 
-        # Send tracking email to customer (non-blocking)
         cursor = await db.execute(
             "SELECT order_number, customer_first_name, customer_email FROM ecommerce_orders WHERE id = ?",
             (body.order_id,),
@@ -288,8 +425,9 @@ async def purchase_label(
         "label_url": label_url,
         "tracking_number": tracking_number,
         "tracking_url": tracking_url,
-        "transaction_id": transaction.get("object_id", ""),
+        "transaction_id": txn_id,
         "status": status,
+        "shipment_id": body.shipment_id,
     }
 
 
@@ -299,7 +437,11 @@ async def get_label(
     request: Request,
     db: aiosqlite.Connection = Depends(get_db),
 ):
-    """Get the shipping label and tracking info for an order."""
+    """Get shipping label(s) and tracking info for an order.
+
+    Returns split-shipment data in ``shipments`` when the order has multiple
+    shipment groups, plus legacy top-level fields for backwards compatibility.
+    """
     _verify_admin(request)
 
     cursor = await db.execute(
@@ -311,16 +453,84 @@ async def get_label(
         raise HTTPException(status_code=404, detail="Order not found")
 
     tracking_number, tracking_url, label_url, transaction_id = row
-    if not label_url:
-        return {"has_label": False}
+
+    # Check for split shipments
+    scur = await db.execute(
+        """SELECT id, shipment_type, from_label, tracking_number, tracking_url,
+                  label_url, shippo_transaction_id, tracking_status, item_ids
+           FROM order_shipments WHERE order_id = ?""",
+        (order_id,),
+    )
+    shipment_rows = await scur.fetchall()
+
+    shipments = []
+    for s in shipment_rows:
+        if s[5]:  # has label_url
+            shipments.append({
+                "shipment_id": s[0],
+                "shipment_type": s[1],
+                "from_label": s[2],
+                "tracking_number": s[3] or "",
+                "tracking_url": s[4] or "",
+                "label_url": s[5] or "",
+                "transaction_id": s[6] or "",
+                "tracking_status": s[7] or "",
+            })
+
+    if not label_url and not shipments:
+        return {"has_label": False, "shipments": []}
 
     return {
         "has_label": True,
-        "label_url": label_url,
+        "label_url": label_url or (shipments[0]["label_url"] if shipments else ""),
         "tracking_number": tracking_number or "",
         "tracking_url": tracking_url or "",
         "transaction_id": transaction_id or "",
+        "shipments": shipments,
     }
+
+
+@router.get("/shipments/{order_id}")
+async def get_order_shipments(
+    order_id: int,
+    request: Request,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Get all shipment groups for an order (split-shipment aware)."""
+    _verify_admin(request)
+
+    cursor = await db.execute(
+        """SELECT id, shipment_type, from_label, item_ids, tracking_number,
+                  tracking_url, label_url, tracking_status
+           FROM order_shipments WHERE order_id = ? ORDER BY id""",
+        (order_id,),
+    )
+    rows = await cursor.fetchall()
+
+    shipments = []
+    for r in rows:
+        item_ids = [int(x) for x in r[3].split(",") if x.strip()] if r[3] else []
+        item_names: list[str] = []
+        if item_ids:
+            placeholders = ",".join("?" * len(item_ids))
+            icur = await db.execute(
+                f"SELECT product_name FROM ecommerce_order_items WHERE id IN ({placeholders})",
+                item_ids,
+            )
+            item_names = [row[0] for row in await icur.fetchall() if row[0]]
+
+        shipments.append({
+            "shipment_id": r[0],
+            "shipment_type": r[1],
+            "from_label": r[2],
+            "item_names": item_names,
+            "tracking_number": r[4] or "",
+            "tracking_url": r[5] or "",
+            "label_url": r[6] or "",
+            "tracking_status": r[7] or "",
+        })
+
+    return {"shipments": shipments}
 
 
 SHIPPING_MARKUP_CENTS = 200  # $2.00 markup on all rates
@@ -580,6 +790,76 @@ def _build_tracking_html(
     """
 
 
+def _build_split_tracking_html(
+    first_name: str, order_number: str, shipments: list[dict],
+) -> str:
+    """Build an HTML email showing tracking for multiple shipments."""
+    rows = ""
+    for i, s in enumerate(shipments, 1):
+        tracking_link = ""
+        if s.get("tracking_url"):
+            tracking_link = (
+                f' &mdash; <a href="{s["tracking_url"]}" style="color: #065f46;">Track</a>'
+            )
+        rows += f"""
+                <tr{"" if i % 2 else ' style="background: #f3f4f6;"'}>
+                    <td style="padding: 10px 12px; font-weight: bold;">Shipment {i}</td>
+                    <td style="padding: 10px 12px;">{s["from_label"]}</td>
+                </tr>
+                <tr{"" if i % 2 else ' style="background: #f3f4f6;"'}>
+                    <td style="padding: 10px 12px; font-weight: bold;">Tracking</td>
+                    <td style="padding: 10px 12px; font-family: monospace;">{s["tracking_number"]}{tracking_link}</td>
+                </tr>"""
+
+    return f"""
+    <html>
+    <body style="font-family: 'Helvetica Neue', Arial, sans-serif; color: #1f2937; max-width: 600px; margin: 0 auto;">
+        <div style="background: #065f46; padding: 20px; text-align: center;">
+            <h1 style="color: white; margin: 0; font-size: 22px;">Your Order Has Shipped!</h1>
+        </div>
+        <div style="padding: 24px; background: #f9fafb;">
+            <p style="font-size: 16px;">Hi {first_name},</p>
+            <p>Your order <strong>{order_number}</strong> is shipping in <strong>{len(shipments)} packages</strong> from different locations. Here are your tracking details:</p>
+
+            <table style="width: 100%; margin: 16px 0; background: white; border-radius: 8px; overflow: hidden;">
+                <tr style="background: #065f46; color: white;">
+                    <td style="padding: 10px 12px; font-weight: bold;">Order</td>
+                    <td style="padding: 10px 12px;">{order_number}</td>
+                </tr>{rows}
+            </table>
+
+            <p style="margin-top: 20px;">If you have any questions, reply to this email or contact us at
+               <a href="mailto:{STORE_EMAIL}">{STORE_EMAIL}</a>.</p>
+            <p>Thank you for choosing The Hemp Dispensary!</p>
+        </div>
+        <div style="padding: 16px; text-align: center; color: #9ca3af; font-size: 12px;">
+            The Hemp Dispensary — Premium Hemp Products<br>
+            Spring Hill, FL
+        </div>
+    </body>
+    </html>
+    """
+
+
+async def _send_split_tracking_email(
+    smtp_settings: dict[str, str],
+    customer_email: str,
+    first_name: str,
+    order_number: str,
+    shipments: list[dict],
+) -> None:
+    """Send a tracking email with multiple shipment tracking numbers."""
+    try:
+        subject = f"Your Order Has Shipped! — Order {order_number} | The Hemp Dispensary"
+        html = _build_split_tracking_html(first_name, order_number, shipments)
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _send_smtp_email, smtp_settings, customer_email, subject, html)
+        print(f"[tracking] Sent split-shipment email to {customer_email} for order {order_number} ({len(shipments)} shipments)")
+    except Exception as e:
+        print(f"[tracking] Error sending split tracking email: {e}")
+
+
 async def _send_tracking_email(
     smtp_settings: dict[str, str],
     customer_email: str,
@@ -643,12 +923,38 @@ async def shippo_tracking_webhook(request: Request, db: aiosqlite.Connection = D
     if new_status == "TRANSIT" and status_detail and "out for delivery" in status_detail.lower():
         status_key = "out_for_delivery"
 
-    # Find the order by tracking number
+    # Find the order by tracking number (check order_shipments first, then orders)
+    shipment_row_id = None
+    scur = await db.execute(
+        "SELECT id, order_id, tracking_status FROM order_shipments WHERE tracking_number = ?",
+        (tracking_number,),
+    )
+    srow = await scur.fetchone()
+    if srow:
+        shipment_row_id = srow[0]
+        lookup_order_id = srow[1]
+        shipment_current_status = srow[2]
+        # Update shipment-level tracking status
+        if shipment_current_status != status_key:
+            await db.execute(
+                "UPDATE order_shipments SET tracking_status = ? WHERE id = ?",
+                (status_key, shipment_row_id),
+            )
+
     cursor = await db.execute(
         "SELECT id, order_number, customer_first_name, customer_email, tracking_url, tracking_status FROM ecommerce_orders WHERE tracking_number = ?",
         (tracking_number,),
     )
     row = await cursor.fetchone()
+
+    # If not found by order-level tracking, try via order_shipments.order_id
+    if not row and srow:
+        cursor = await db.execute(
+            "SELECT id, order_number, customer_first_name, customer_email, tracking_url, tracking_status FROM ecommerce_orders WHERE id = ?",
+            (lookup_order_id,),
+        )
+        row = await cursor.fetchone()
+
     if not row:
         print(f"[tracking] Webhook received for unknown tracking number: {tracking_number}")
         return {"status": "ignored", "reason": "order_not_found"}
@@ -656,7 +962,7 @@ async def shippo_tracking_webhook(request: Request, db: aiosqlite.Connection = D
     order_id, order_number, first_name, customer_email, tracking_url, current_status = row
 
     # Only send email if status actually changed
-    if current_status == status_key:
+    if current_status == status_key and not shipment_row_id:
         return {"status": "ok", "detail": "no_change"}
 
     # Update tracking status in database
@@ -664,12 +970,23 @@ async def shippo_tracking_webhook(request: Request, db: aiosqlite.Connection = D
         "UPDATE ecommerce_orders SET tracking_status = ? WHERE id = ?",
         (status_key, order_id),
     )
-    # If delivered, update payment_status too
+    # If delivered, check if ALL shipments are delivered before marking order delivered
     if status_key == "delivered":
-        await db.execute(
-            "UPDATE ecommerce_orders SET payment_status = 'delivered' WHERE id = ? AND payment_status = 'shipped'",
-            (order_id,),
-        )
+        all_delivered = True
+        if shipment_row_id:
+            dcur = await db.execute(
+                "SELECT tracking_status FROM order_shipments WHERE order_id = ?",
+                (order_id,),
+            )
+            for drow in await dcur.fetchall():
+                if drow[0] != "delivered":
+                    all_delivered = False
+                    break
+        if all_delivered:
+            await db.execute(
+                "UPDATE ecommerce_orders SET payment_status = 'delivered' WHERE id = ? AND payment_status = 'shipped'",
+                (order_id,),
+            )
     await db.commit()
 
     # Send email notification to customer

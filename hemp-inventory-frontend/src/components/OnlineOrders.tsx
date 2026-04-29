@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { getOnlineOrders, updateOrderStatus, updateOrderNotes, updateOrderCustomer, createShipment, purchaseLabel, getShippingLabel, refundOrder, resendOrderConfirmation, convertToShipping } from "../lib/api";
+import { getOnlineOrders, updateOrderStatus, updateOrderNotes, updateOrderCustomer, createShipment, purchaseLabel, getShippingLabel, refundOrder, resendOrderConfirmation, convertToShipping, getOrderShipments } from "../lib/api";
 import { MessageSquare, Save, Edit2, X } from "lucide-react";
 import { RefreshCw, Search, Package, ChevronDown, ChevronUp, Truck, CheckCircle, XCircle, Clock, ShoppingCart, Printer, Tag, ExternalLink, Loader2, RotateCcw, AlertTriangle, DollarSign, Mail, MapPin } from "lucide-react";
 
@@ -9,6 +9,24 @@ interface OrderItem {
   sku: string;
   price: number;
   quantity: number;
+}
+
+interface OrderShipment {
+  shipment_id: number;
+  shipment_type: string;
+  from_label: string;
+  tracking_number: string;
+  tracking_url: string;
+  label_url: string;
+  tracking_status: string;
+}
+
+interface ShipmentGroup {
+  shipment_id: number;
+  shipment_type: string;
+  from_label: string;
+  item_names: string[];
+  rates: ShippingRate[];
 }
 
 interface Order {
@@ -44,6 +62,7 @@ interface Order {
   source?: string;
   clover_order_id?: string;
   items: OrderItem[];
+  shipments?: OrderShipment[];
 }
 
 interface ShippingRate {
@@ -273,6 +292,9 @@ export default function OnlineOrders() {
   const [parcelWidth, setParcelWidth] = useState("8");
   const [parcelHeight, setParcelHeight] = useState("2");
   const [isHazmat, setIsHazmat] = useState(false);
+  const [shipmentGroups, setShipmentGroups] = useState<ShipmentGroup[]>([]);
+  const [, setIsSplitShipment] = useState(false);
+  const [purchasingShipmentId, setPurchasingShipmentId] = useState<number | null>(null);
 
   // Staff notes state
   const [editingNotes, setEditingNotes] = useState<number | null>(null);
@@ -366,6 +388,8 @@ export default function OnlineOrders() {
   const handleGetRates = async (orderId: number) => {
     setShippingOrderId(orderId);
     setRates([]);
+    setShipmentGroups([]);
+    setIsSplitShipment(false);
     setShippingError("");
     setLoadingRates(true);
     try {
@@ -377,18 +401,57 @@ export default function OnlineOrders() {
         parcel_height: parseFloat(parcelHeight) || 2,
         is_hazmat: isHazmat,
       });
-      const fetchedRates = res.data.rates || [];
-      setRates(fetchedRates);
-      if (fetchedRates.length === 0) {
-        setShippingError("No shipping rates available for this address.");
-      } else {
-        // Auto-select and purchase the rate matching what the customer chose at checkout
+
+      const isSplit = res.data.is_split === true;
+      setIsSplitShipment(isSplit);
+
+      if (isSplit && res.data.shipment_groups?.length > 1) {
+        // Split shipment: show rate groups per shipment
+        const groups: ShipmentGroup[] = res.data.shipment_groups;
+        setShipmentGroups(groups);
+
+        // Auto-purchase all groups if customer-selected service matches
         const orderObj = orders.find(o => o.id === orderId);
         if (orderObj?.shipping_service) {
-          const match = fetchedRates.find((r: ShippingRate) => r.service_level === orderObj.shipping_service);
-          if (match) {
-            handlePurchaseLabel(match.id, orderId);
+          let allAutoMatched = true;
+          for (const group of groups) {
+            const match = group.rates.find(r => r.service_level === orderObj.shipping_service);
+            if (!match) { allAutoMatched = false; break; }
+          }
+          if (allAutoMatched) {
+            for (const group of groups) {
+              const match = group.rates.find(r => r.service_level === orderObj.shipping_service);
+              if (match) {
+                await handlePurchaseSplitLabel(match.id, orderId, group.shipment_id);
+              }
+            }
             return;
+          }
+        }
+
+        // Check if any group has 0 rates
+        if (groups.some(g => g.rates.length === 0)) {
+          setShippingError("No shipping rates available for one or more shipment groups.");
+        }
+      } else {
+        // Single shipment
+        const fetchedRates = res.data.rates || [];
+        const singleGroup = res.data.shipment_groups?.[0];
+        setRates(fetchedRates);
+        if (fetchedRates.length === 0) {
+          setShippingError("No shipping rates available for this address.");
+        } else {
+          const orderObj = orders.find(o => o.id === orderId);
+          if (orderObj?.shipping_service) {
+            const match = fetchedRates.find((r: ShippingRate) => r.service_level === orderObj.shipping_service);
+            if (match) {
+              if (singleGroup) {
+                handlePurchaseSplitLabel(match.id, orderId, singleGroup.shipment_id);
+              } else {
+                handlePurchaseLabel(match.id, orderId);
+              }
+              return;
+            }
           }
         }
       }
@@ -417,6 +480,7 @@ export default function OnlineOrders() {
       );
       setShippingOrderId(null);
       setRates([]);
+      setShipmentGroups([]);
       if (label_url) {
         window.open(label_url, "_blank");
       }
@@ -427,6 +491,56 @@ export default function OnlineOrders() {
       setShippingError(msg);
     } finally {
       setPurchasingLabel(false);
+    }
+  };
+
+  const handlePurchaseSplitLabel = async (rateId: string, orderId: number, shipmentId: number) => {
+    setPurchasingShipmentId(shipmentId);
+    setShippingError("");
+    try {
+      const res = await purchaseLabel({ rate_id: rateId, order_id: orderId, shipment_id: shipmentId });
+      const { label_url, tracking_number, tracking_url } = res.data;
+
+      // Update the shipment group as purchased
+      setShipmentGroups(prev => prev.filter(g => g.shipment_id !== shipmentId));
+
+      // Refresh order shipments from backend
+      const shipmentsRes = await getOrderShipments(orderId);
+      const updatedShipments: OrderShipment[] = shipmentsRes.data.shipments || [];
+
+      // Check if all groups are now purchased
+      const allPurchased = updatedShipments.length > 0 && updatedShipments.every(s => s.label_url);
+
+      setOrders(prev => prev.map(o => {
+        if (o.id !== orderId) return o;
+        return {
+          ...o,
+          tracking_number: tracking_number || o.tracking_number,
+          tracking_url: tracking_url || o.tracking_url,
+          label_url: label_url || o.label_url,
+          shipments: updatedShipments,
+          payment_status: allPurchased ? "shipped" : o.payment_status,
+        };
+      }));
+
+      if (allPurchased) {
+        setShippingOrderId(null);
+        setRates([]);
+        setShipmentGroups([]);
+        // Open all label URLs
+        for (const s of updatedShipments) {
+          if (s.label_url) window.open(s.label_url, "_blank");
+        }
+      } else if (label_url) {
+        window.open(label_url, "_blank");
+      }
+    } catch (err: unknown) {
+      const msg = (err && typeof err === "object" && "response" in err)
+        ? ((err as { response?: { data?: { detail?: string } } }).response?.data?.detail || "Failed to purchase label")
+        : "Failed to purchase label";
+      setShippingError(msg);
+    } finally {
+      setPurchasingShipmentId(null);
     }
   };
 
@@ -796,12 +910,19 @@ export default function OnlineOrders() {
                             {order.shipping_service || "Shipping"}
                           </span>
                         )}
-                        {order.tracking_number && (
+                        {order.shipments && order.shipments.length > 1 ? (
+                          order.shipments.filter(s => s.tracking_number).map((s, i) => (
+                            <span key={s.shipment_id} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
+                              <Truck className="w-3 h-3" />
+                              Pkg {i + 1}: {s.tracking_number}
+                            </span>
+                          ))
+                        ) : order.tracking_number ? (
                           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
                             <Truck className="w-3 h-3" />
                             {order.tracking_number}
                           </span>
-                        )}
+                        ) : null}
                         {order.source === "clover" && (
                           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-violet-100 text-violet-800">
                             Clover Order
@@ -905,7 +1026,31 @@ export default function OnlineOrders() {
                         {order.clover_order_id && <p className="text-sm text-gray-600">Clover ID: <span className="font-mono text-xs">{order.clover_order_id}</span></p>}
                         {order.source === "clover" && <p className="text-sm text-violet-600 font-medium">Source: Clover Online Ordering</p>}
                         {order.notes && <p className="text-sm text-gray-600 mt-1">Notes: {order.notes}</p>}
-                        {order.tracking_number && (
+                        {order.shipments && order.shipments.length > 1 ? (
+                          <div className="mt-2 space-y-2">
+                            <p className="text-xs font-semibold text-indigo-700 uppercase">Split Shipment ({order.shipments.length} packages)</p>
+                            {order.shipments.map((s, i) => (
+                              <div key={s.shipment_id} className="bg-indigo-50 rounded p-2 text-sm">
+                                <p className="font-medium text-gray-900">Pkg {i + 1}: {s.from_label}</p>
+                                {s.tracking_number && (
+                                  <p className="text-gray-600">
+                                    Tracking: <span className="font-mono text-xs font-medium">{s.tracking_number}</span>
+                                  </p>
+                                )}
+                                {s.tracking_url && (
+                                  <a href={s.tracking_url} target="_blank" rel="noopener noreferrer" className="text-sm text-blue-600 hover:underline flex items-center gap-1 mt-0.5">
+                                    <ExternalLink className="w-3 h-3" /> Track
+                                  </a>
+                                )}
+                                {s.label_url && (
+                                  <button onClick={() => window.open(s.label_url, "_blank")} className="text-sm text-indigo-600 hover:underline flex items-center gap-1 mt-0.5">
+                                    <Tag className="w-3 h-3" /> View Label
+                                  </button>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        ) : order.tracking_number ? (
                           <div className="mt-2">
                             <p className="text-sm text-gray-600">
                               Tracking: <span className="font-mono text-xs font-medium">{order.tracking_number}</span>
@@ -916,7 +1061,7 @@ export default function OnlineOrders() {
                               </a>
                             )}
                           </div>
-                        )}
+                        ) : null}
                       </div>
                     </div>
 
@@ -1076,23 +1221,40 @@ export default function OnlineOrders() {
                       )}
 
                       {!(order.fulfillment_type && order.fulfillment_type.startsWith("pickup")) && (
-                        order.label_url ? (
-                          <button
-                            onClick={() => handleViewLabel(order.id)}
-                            className="flex items-center gap-2 px-4 py-2 bg-indigo-100 text-indigo-700 rounded-lg hover:bg-indigo-200 transition-colors text-sm font-medium"
-                          >
-                            <Tag className="w-4 h-4" />
-                            View / Print Label
-                          </button>
+                        order.label_url || (order.shipments && order.shipments.some(s => s.label_url)) ? (
+                          order.shipments && order.shipments.filter(s => s.label_url).length > 1 ? (
+                            <div className="flex items-center gap-2">
+                              {order.shipments.filter(s => s.label_url).map((s, i) => (
+                                <button
+                                  key={s.shipment_id}
+                                  onClick={() => window.open(s.label_url, "_blank")}
+                                  className="flex items-center gap-2 px-4 py-2 bg-indigo-100 text-indigo-700 rounded-lg hover:bg-indigo-200 transition-colors text-sm font-medium"
+                                >
+                                  <Tag className="w-4 h-4" />
+                                  Label {i + 1}
+                                </button>
+                              ))}
+                            </div>
+                          ) : (
+                            <button
+                              onClick={() => handleViewLabel(order.id)}
+                              className="flex items-center gap-2 px-4 py-2 bg-indigo-100 text-indigo-700 rounded-lg hover:bg-indigo-200 transition-colors text-sm font-medium"
+                            >
+                              <Tag className="w-4 h-4" />
+                              View / Print Label
+                            </button>
+                          )
                         ) : (
                           <button
                             onClick={() => {
                               if (isShippingOpen) {
                                 setShippingOrderId(null);
                                 setRates([]);
+                                setShipmentGroups([]);
                               } else {
                                 setShippingOrderId(order.id);
                                 setRates([]);
+                                setShipmentGroups([]);
                                 setShippingError("");
                                 setIsHazmat(orderContainsHazmat(order.items));
                               }
@@ -1421,7 +1583,55 @@ export default function OnlineOrders() {
                           <div className="text-sm text-red-600 bg-red-50 p-3 rounded-lg mb-3">{shippingError}</div>
                         )}
 
-                        {rates.length > 0 && (
+                        {/* Split shipment rate groups */}
+                        {shipmentGroups.length > 1 && (
+                          <div className="space-y-4">
+                            <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-3">
+                              <p className="text-sm font-semibold text-amber-800 flex items-center gap-2">
+                                <Package className="w-4 h-4" />
+                                This order requires {shipmentGroups.length} separate shipments
+                              </p>
+                              <p className="text-xs text-amber-700 mt-1">Items ship from different locations. Select a rate for each shipment below.</p>
+                            </div>
+                            {shipmentGroups.map((group, gi) => (
+                              <div key={group.shipment_id} className="border border-gray-200 rounded-lg overflow-hidden">
+                                <div className={`px-4 py-2 text-sm font-semibold ${group.shipment_type === "leaflife" ? "bg-emerald-50 text-emerald-800" : "bg-blue-50 text-blue-800"}`}>
+                                  Shipment {gi + 1}: {group.from_label}
+                                </div>
+                                <div className="px-4 py-2 border-b border-gray-100">
+                                  <p className="text-xs text-gray-500">Items: {group.item_names.join(", ")}</p>
+                                </div>
+                                <div className="p-3 space-y-2">
+                                  {group.rates.length === 0 ? (
+                                    <p className="text-sm text-red-600">No rates available for this shipment.</p>
+                                  ) : group.rates.map((rate) => (
+                                    <div key={rate.id} className="flex items-center justify-between p-3 border border-gray-200 rounded-lg hover:border-green-300 transition-colors">
+                                      <div>
+                                        <p className="text-sm font-medium text-gray-900">{rate.provider} &mdash; {rate.service_level}</p>
+                                        <p className="text-xs text-gray-500">
+                                          {rate.estimated_days ? `Est. ${rate.estimated_days} day${rate.estimated_days !== 1 ? "s" : ""}` : rate.duration_terms || ""}
+                                        </p>
+                                      </div>
+                                      <div className="flex items-center gap-3">
+                                        <span className="text-lg font-bold text-gray-900">${rate.amount}</span>
+                                        <button
+                                          onClick={() => handlePurchaseSplitLabel(rate.id, order.id, group.shipment_id)}
+                                          disabled={purchasingShipmentId === group.shipment_id}
+                                          className="px-4 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors text-sm font-medium"
+                                        >
+                                          {purchasingShipmentId === group.shipment_id ? "Purchasing..." : "Buy Label"}
+                                        </button>
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Single shipment rates */}
+                        {rates.length > 0 && shipmentGroups.length <= 1 && (
                           <div className="space-y-2">
                             <p className="text-xs font-semibold text-gray-500 uppercase">Select a Rate</p>
                             {rates.map((rate) => (
