@@ -337,13 +337,14 @@ async def purchase_label(
 
         # Check if ALL shipment groups for this order now have labels
         cursor = await db.execute(
-            "SELECT id, tracking_number, tracking_url, from_label FROM order_shipments WHERE order_id = ?",
+            "SELECT id, tracking_number, tracking_url, from_label, label_url, shippo_transaction_id FROM order_shipments WHERE order_id = ?",
             (body.order_id,),
         )
         all_shipments = await cursor.fetchall()
         all_have_labels = all(s[1] for s in all_shipments)
 
-        # Always keep order-level tracking in sync with the first labelled shipment
+        # Keep order-level tracking in sync with the first labelled shipment
+        # All fields (tracking, label, txn_id) come from the same shipment row
         first_labelled = next((s for s in all_shipments if s[1]), None)
         if first_labelled:
             await db.execute(
@@ -351,7 +352,7 @@ async def purchase_label(
                    SET tracking_number = ?, tracking_url = ?, label_url = ?,
                        shippo_transaction_id = ?, tracking_status = 'label_created'
                    WHERE id = ?""",
-                (first_labelled[1], first_labelled[2], label_url, txn_id, body.order_id),
+                (first_labelled[1], first_labelled[2], first_labelled[4], first_labelled[5], body.order_id),
             )
 
         if all_have_labels:
@@ -925,6 +926,8 @@ async def shippo_tracking_webhook(request: Request, db: aiosqlite.Connection = D
 
     # Find the order by tracking number (check order_shipments first, then orders)
     shipment_row_id = None
+    shipment_current_status: str | None = None
+    lookup_order_id: int | None = None
     scur = await db.execute(
         "SELECT id, order_id, tracking_status FROM order_shipments WHERE tracking_number = ?",
         (tracking_number,),
@@ -961,15 +964,37 @@ async def shippo_tracking_webhook(request: Request, db: aiosqlite.Connection = D
 
     order_id, order_number, first_name, customer_email, tracking_url, current_status = row
 
-    # Only send email if status actually changed
-    if current_status == status_key and not shipment_row_id:
+    # Only send email if status actually changed (for both order-level and shipment-level)
+    if current_status == status_key and (not shipment_row_id or shipment_current_status == status_key):
         return {"status": "ok", "detail": "no_change"}
 
-    # Update tracking status in database
-    await db.execute(
-        "UPDATE ecommerce_orders SET tracking_status = ? WHERE id = ?",
-        (status_key, order_id),
-    )
+    # Status ordering: only advance order-level status, never regress
+    _STATUS_ORDER = {
+        "label_created": 0, "in_transit": 1, "out_for_delivery": 2,
+        "delivered": 3, "returned": 4, "failure": 5,
+    }
+    new_order = _STATUS_ORDER.get(status_key, 1)
+    cur_order = _STATUS_ORDER.get(current_status or "", -1)
+
+    # For split shipments, compute the minimum status across all shipment rows
+    if shipment_row_id:
+        scur2 = await db.execute(
+            "SELECT tracking_status FROM order_shipments WHERE order_id = ?",
+            (order_id,),
+        )
+        shipment_statuses = [r[0] for r in await scur2.fetchall() if r[0]]
+        if shipment_statuses:
+            min_status = min(shipment_statuses, key=lambda s: _STATUS_ORDER.get(s, 1))
+            new_order = _STATUS_ORDER.get(min_status, 1)
+            status_key = min_status
+
+    if new_order > cur_order:
+        await db.execute(
+            "UPDATE ecommerce_orders SET tracking_status = ? WHERE id = ?",
+            (status_key, order_id),
+        )
+    else:
+        status_key = current_status or status_key
     # If delivered, check if ALL shipments are delivered before marking order delivered
     if status_key == "delivered":
         all_delivered = True
