@@ -420,7 +420,7 @@ export const deleteScheduleNote = (noteId: number) =>
   api.delete(`/api/timeclock/schedule-notes/${noteId}`);
 
 // Online Orders (ecommerce)
-export const getOnlineOrders = (params?: { limit?: number; offset?: number; status?: string }) =>
+export const getOnlineOrders = (params?: { limit?: number; offset?: number; status?: string; search?: string }) =>
   api.get("/api/ecommerce/orders", { params });
 
 export const updateOrderStatus = (orderId: number, status: string) =>

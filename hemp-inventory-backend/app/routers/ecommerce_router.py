@@ -2422,6 +2422,7 @@ async def get_orders(
     limit: int = 50,
     offset: int = 0,
     status: Optional[str] = None,
+    search: Optional[str] = None,
 ):
     """Get online orders (requires admin auth via Authorization header)."""
     auth = request.headers.get("Authorization", "")
@@ -2437,13 +2438,36 @@ async def get_orders(
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    # Fetch orders
-    query = "SELECT * FROM ecommerce_orders"
+    # Build WHERE clauses
+    where_clauses: list[str] = []
     params: list = []
+
     if status:
-        query += " WHERE payment_status = ?"
+        where_clauses.append("o.payment_status = ?")
         params.append(status)
-    query += " ORDER BY id DESC LIMIT ? OFFSET ?"
+
+    if search and search.strip():
+        # Split search into words so "jimmy jimmy" matches first_name + last_name
+        words = search.strip().split()
+        for word in words:
+            like = f"%{word}%"
+            where_clauses.append(
+                """(o.customer_first_name LIKE ? COLLATE NOCASE
+                   OR o.customer_last_name LIKE ? COLLATE NOCASE
+                   OR o.customer_email LIKE ? COLLATE NOCASE
+                   OR o.order_number LIKE ? COLLATE NOCASE
+                   OR o.tracking_number LIKE ? COLLATE NOCASE
+                   OR o.id IN (
+                       SELECT oi.order_id FROM ecommerce_order_items oi
+                       WHERE oi.product_name LIKE ? COLLATE NOCASE
+                   ))"""
+            )
+            params.extend([like, like, like, like, like, like])
+
+    where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+    # Fetch orders
+    query = f"SELECT o.* FROM ecommerce_orders o{where_sql} ORDER BY o.id DESC LIMIT ? OFFSET ?"
     params.extend([limit, offset])
 
     cursor = await db.execute(query, params)
@@ -2483,12 +2507,33 @@ async def get_orders(
                 })
             order["shipments"] = shipments
 
-    # Get total count
-    count_query = "SELECT COUNT(*) FROM ecommerce_orders"
+    # Get total count with same filters
     count_params: list = []
+    count_where_clauses: list[str] = []
+
     if status:
-        count_query += " WHERE payment_status = ?"
+        count_where_clauses.append("o.payment_status = ?")
         count_params.append(status)
+
+    if search and search.strip():
+        words = search.strip().split()
+        for word in words:
+            like = f"%{word}%"
+            count_where_clauses.append(
+                """(o.customer_first_name LIKE ? COLLATE NOCASE
+                   OR o.customer_last_name LIKE ? COLLATE NOCASE
+                   OR o.customer_email LIKE ? COLLATE NOCASE
+                   OR o.order_number LIKE ? COLLATE NOCASE
+                   OR o.tracking_number LIKE ? COLLATE NOCASE
+                   OR o.id IN (
+                       SELECT oi.order_id FROM ecommerce_order_items oi
+                       WHERE oi.product_name LIKE ? COLLATE NOCASE
+                   ))"""
+            )
+            count_params.extend([like, like, like, like, like, like])
+
+    count_where_sql = (" WHERE " + " AND ".join(count_where_clauses)) if count_where_clauses else ""
+    count_query = f"SELECT COUNT(*) FROM ecommerce_orders o{count_where_sql}"
     count_cursor = await db.execute(count_query, count_params)
     total = (await count_cursor.fetchone())[0]
 
