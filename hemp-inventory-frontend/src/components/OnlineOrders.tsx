@@ -517,7 +517,9 @@ export default function OnlineOrders() {
           ...o,
           tracking_number: tracking_number || o.tracking_number,
           tracking_url: tracking_url || o.tracking_url,
-          label_url: label_url || o.label_url,
+          // Only set order-level label_url when ALL shipments have labels
+          // so the shipping panel stays open for remaining groups
+          label_url: allPurchased ? (label_url || o.label_url) : o.label_url,
           shipments: updatedShipments,
           payment_status: allPurchased ? "shipped" : o.payment_status,
         };
@@ -1584,7 +1586,7 @@ export default function OnlineOrders() {
                         )}
 
                         {/* Split shipment rate groups */}
-                        {shipmentGroups.length > 1 && (
+                        {shipmentGroups.length >= 1 && (
                           <div className="space-y-4">
                             <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-3">
                               <p className="text-sm font-semibold text-amber-800 flex items-center gap-2">

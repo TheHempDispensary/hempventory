@@ -258,6 +258,7 @@ async def create_shipment(
         )
         shipment_db_id = cur.lastrowid
 
+        shippo_shipment_id = shipment.get("object_id", "")
         shipment_groups.append({
             "shipment_id": shipment_db_id,
             "shipment_type": stype,
@@ -265,6 +266,7 @@ async def create_shipment(
             "item_names": item_names,
             "rates": rates,
             "address_from": from_addr,
+            "shippo_shipment_id": shippo_shipment_id,
         })
 
     await db.commit()
@@ -274,7 +276,7 @@ async def create_shipment(
         "shipment_groups": shipment_groups,
         "address_to": to_address,
         # Legacy fields for single-shipment orders (backwards compat)
-        "shipment_id": shipment_groups[0]["rates"][0]["id"] if shipment_groups and shipment_groups[0]["rates"] else "",
+        "shipment_id": shipment_groups[0].get("shippo_shipment_id", "") if shipment_groups else "",
         "rates": shipment_groups[0]["rates"] if len(shipment_groups) == 1 else [],
         "address_from": shipment_groups[0]["address_from"] if shipment_groups else DEFAULT_FROM_ADDRESS,
     }
