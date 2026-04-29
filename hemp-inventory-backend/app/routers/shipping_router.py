@@ -929,9 +929,10 @@ async def shippo_tracking_webhook(request: Request, db: aiosqlite.Connection = D
     # Find the order by tracking number (check order_shipments first, then orders)
     shipment_row_id = None
     shipment_current_status: str | None = None
+    shipment_tracking_url: str | None = None
     lookup_order_id: int | None = None
     scur = await db.execute(
-        "SELECT id, order_id, tracking_status FROM order_shipments WHERE tracking_number = ?",
+        "SELECT id, order_id, tracking_status, tracking_url FROM order_shipments WHERE tracking_number = ?",
         (tracking_number,),
     )
     srow = await scur.fetchone()
@@ -939,6 +940,7 @@ async def shippo_tracking_webhook(request: Request, db: aiosqlite.Connection = D
         shipment_row_id = srow[0]
         lookup_order_id = srow[1]
         shipment_current_status = srow[2]
+        shipment_tracking_url = srow[3]
         # Update shipment-level tracking status
         if shipment_current_status != status_key:
             await db.execute(
@@ -1022,7 +1024,9 @@ async def shippo_tracking_webhook(request: Request, db: aiosqlite.Connection = D
         asyncio.create_task(
             _send_tracking_email(
                 smtp_settings, customer_email, first_name or "Customer",
-                order_number or "", tracking_number, tracking_url or "", status_key,
+                order_number or "", tracking_number,
+                (shipment_tracking_url if shipment_row_id and shipment_tracking_url else tracking_url) or "",
+                status_key,
             )
         )
 
