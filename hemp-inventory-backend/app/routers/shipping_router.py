@@ -972,6 +972,9 @@ async def shippo_tracking_webhook(request: Request, db: aiosqlite.Connection = D
     if current_status == status_key and (not shipment_row_id or shipment_current_status == status_key):
         return {"status": "ok", "detail": "no_change"}
 
+    # Preserve the actual webhook status for this specific shipment's email
+    email_status_key = status_key
+
     # Status ordering: only advance order-level status, never regress
     _STATUS_ORDER = {
         "label_created": 0, "in_transit": 1, "out_for_delivery": 2,
@@ -980,7 +983,8 @@ async def shippo_tracking_webhook(request: Request, db: aiosqlite.Connection = D
     new_order = _STATUS_ORDER.get(status_key, 1)
     cur_order = _STATUS_ORDER.get(current_status or "", -1)
 
-    # For split shipments, compute the minimum status across all shipment rows
+    # For split shipments, set order-level status to the minimum across all shipments
+    order_level_status = status_key
     if shipment_row_id:
         scur2 = await db.execute(
             "SELECT tracking_status FROM order_shipments WHERE order_id = ?",
@@ -990,17 +994,15 @@ async def shippo_tracking_webhook(request: Request, db: aiosqlite.Connection = D
         if shipment_statuses:
             min_status = min(shipment_statuses, key=lambda s: _STATUS_ORDER.get(s, 1))
             new_order = _STATUS_ORDER.get(min_status, 1)
-            status_key = min_status
+            order_level_status = min_status
 
     if new_order > cur_order:
         await db.execute(
             "UPDATE ecommerce_orders SET tracking_status = ? WHERE id = ?",
-            (status_key, order_id),
+            (order_level_status, order_id),
         )
-    else:
-        status_key = current_status or status_key
     # If delivered, check if ALL shipments are delivered before marking order delivered
-    if status_key == "delivered":
+    if order_level_status == "delivered":
         all_delivered = True
         if shipment_row_id:
             dcur = await db.execute(
@@ -1018,20 +1020,20 @@ async def shippo_tracking_webhook(request: Request, db: aiosqlite.Connection = D
             )
     await db.commit()
 
-    # Send email notification to customer
-    if customer_email and status_key in _STATUS_DISPLAY:
+    # Send email with the actual shipment status (not the aggregated order-level status)
+    if customer_email and email_status_key in _STATUS_DISPLAY:
         smtp_settings = await _get_smtp_settings(db)
         asyncio.create_task(
             _send_tracking_email(
                 smtp_settings, customer_email, first_name or "Customer",
                 order_number or "", tracking_number,
                 (shipment_tracking_url if shipment_row_id and shipment_tracking_url else tracking_url) or "",
-                status_key,
+                email_status_key,
             )
         )
 
-    print(f"[tracking] Order {order_number}: {current_status} -> {status_key} (tracking: {tracking_number})")
-    return {"status": "ok", "order": order_number, "new_status": status_key}
+    print(f"[tracking] Order {order_number}: {current_status} -> {order_level_status} (tracking: {tracking_number}, shipment status: {email_status_key})")
+    return {"status": "ok", "order": order_number, "new_status": order_level_status}
 
 
 async def register_shippo_tracking_webhook() -> None:

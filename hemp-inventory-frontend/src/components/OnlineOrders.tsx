@@ -272,9 +272,12 @@ export default function OnlineOrders() {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [page, setPage] = useState(1);
   const prevStatusFilter = useRef(statusFilter);
+  const prevSearch = useRef("");
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const PAGE_SIZE = 50;
   const [expandedOrder, setExpandedOrder] = useState<number | null>(null);
   const [updatingStatus, setUpdatingStatus] = useState<number | null>(null);
@@ -342,11 +345,12 @@ export default function OnlineOrders() {
     shipping_zip: "",
   });
 
-  const loadOrders = async (p: number = page) => {
+  const loadOrders = async (p: number = page, searchQuery: string = debouncedSearch) => {
     setLoading(true);
     try {
-      const params: { limit: number; offset: number; status?: string } = { limit: PAGE_SIZE, offset: (p - 1) * PAGE_SIZE };
+      const params: { limit: number; offset: number; status?: string; search?: string } = { limit: PAGE_SIZE, offset: (p - 1) * PAGE_SIZE };
       if (statusFilter !== "all") params.status = statusFilter;
+      if (searchQuery.trim()) params.search = searchQuery.trim();
       const res = await getOnlineOrders(params);
       setOrders(res.data.orders || []);
       setTotal(res.data.total || 0);
@@ -357,17 +361,28 @@ export default function OnlineOrders() {
     }
   };
 
+  // Debounce search input
   useEffect(() => {
-    // When status filter changes, always reset to page 1 and fetch
-    if (prevStatusFilter.current !== statusFilter) {
-      prevStatusFilter.current = statusFilter;
-      if (page !== 1) {
-        setPage(1); // This will re-trigger this effect with page=1
-        return;
-      }
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    searchTimer.current = setTimeout(() => {
+      setDebouncedSearch(search);
+    }, 400);
+    return () => { if (searchTimer.current) clearTimeout(searchTimer.current); };
+  }, [search]);
+
+  useEffect(() => {
+    // When status filter or search changes, reset to page 1
+    const filterChanged = prevStatusFilter.current !== statusFilter;
+    const searchChanged = prevSearch.current !== debouncedSearch;
+    if (filterChanged) prevStatusFilter.current = statusFilter;
+    if (searchChanged) prevSearch.current = debouncedSearch;
+
+    if ((filterChanged || searchChanged) && page !== 1) {
+      setPage(1);
+      return;
     }
-    loadOrders(page);
-  }, [page, statusFilter]);
+    loadOrders(page, debouncedSearch);
+  }, [page, statusFilter, debouncedSearch]);
 
   const totalPages = Math.ceil(total / PAGE_SIZE);
 
@@ -729,18 +744,6 @@ export default function OnlineOrders() {
     }
   };
 
-  const filteredOrders = orders.filter((o) => {
-    if (!search) return true;
-    const s = search.toLowerCase();
-    return (
-      o.order_number.toLowerCase().includes(s) ||
-      o.customer_first_name.toLowerCase().includes(s) ||
-      o.customer_last_name.toLowerCase().includes(s) ||
-      o.customer_email.toLowerCase().includes(s) ||
-      o.items.some((item) => item.product_name.toLowerCase().includes(s))
-    );
-  });
-
   const toggleSelectOrder = (orderId: number) => {
     setSelectedOrders((prev) => {
       const next = new Set(prev);
@@ -751,10 +754,10 @@ export default function OnlineOrders() {
   };
 
   const toggleSelectAll = () => {
-    if (selectedOrders.size === filteredOrders.length) {
+    if (selectedOrders.size === orders.length) {
       setSelectedOrders(new Set());
     } else {
-      setSelectedOrders(new Set(filteredOrders.map((o) => o.id)));
+      setSelectedOrders(new Set(orders.map((o) => o.id)));
     }
   };
 
@@ -783,7 +786,7 @@ export default function OnlineOrders() {
           {selectedOrders.size > 0 && (
             <button
               onClick={() => {
-                const ordersToPrint = filteredOrders.filter((o) => selectedOrders.has(o.id));
+                const ordersToPrint = orders.filter((o) => selectedOrders.has(o.id));
                 printMultipleOrders(ordersToPrint);
               }}
               className="flex items-center gap-2 px-4 py-2 bg-gray-700 text-white rounded-lg hover:bg-gray-800 transition-colors"
@@ -854,7 +857,7 @@ export default function OnlineOrders() {
       {/* Orders List */}
       {loading ? (
         <div className="text-center py-12 text-gray-500">Loading orders...</div>
-      ) : filteredOrders.length === 0 ? (
+      ) : orders.length === 0 ? (
         <div className="text-center py-12 bg-white rounded-lg border border-gray-200">
           <ShoppingCart className="w-12 h-12 text-gray-300 mx-auto mb-3" />
           <p className="text-gray-500">No orders found</p>
@@ -865,13 +868,13 @@ export default function OnlineOrders() {
           <div className="flex items-center gap-2 px-2">
             <input
               type="checkbox"
-              checked={filteredOrders.length > 0 && selectedOrders.size === filteredOrders.length}
+              checked={orders.length > 0 && selectedOrders.size === orders.length}
               onChange={toggleSelectAll}
               className="w-4 h-4 rounded border-gray-300 text-green-600 focus:ring-green-500 cursor-pointer"
             />
-            <span className="text-sm text-gray-500">Select All ({filteredOrders.length})</span>
+            <span className="text-sm text-gray-500">Select All ({orders.length})</span>
           </div>
-          {filteredOrders.map((order) => {
+          {orders.map((order) => {
             const statusInfo = getStatusInfo(order.payment_status);
             const StatusIcon = statusInfo.icon;
             const isExpanded = expandedOrder === order.id;
