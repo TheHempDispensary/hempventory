@@ -1688,6 +1688,11 @@ async def create_order(
                     order.total = order.subtotal - order.discount - order.volume_discount + order.shipping_cost + order.tax
                 else:
                     print(f"[order] Loyalty verified: customer {lrow[2]} {lrow[3]} (id={lrow[0]}) has {lrow[1]} pts, redeeming {loyalty_reward_row[2]} pts for '{loyalty_reward_row[1]}'")
+        else:
+            # loyalty_discount > 0 but missing reward_id or loyalty_number — reject the discount
+            print(f"[order] Loyalty discount ${order.loyalty_discount/100:.2f} requested without reward_id or loyalty_number, zeroing")
+            order.loyalty_discount = 0
+            order.total = order.subtotal - order.discount - order.volume_discount + order.shipping_cost + order.tax
 
     # Server-side enforcement: FIRST10 phone number check (prevent multi-email abuse)
     if order.promo_code and order.promo_code.upper() == "FIRST10" and order.customer.phone:
@@ -2019,7 +2024,7 @@ async def create_order(
                 loyalty_loc = "East"
             else:
                 loyalty_loc = "Online"
-            await db.execute(
+            update_cursor = await db.execute(
                 """UPDATE loyalty_customers
                    SET points_balance = points_balance - ?,
                        lifetime_redeemed = lifetime_redeemed + ?,
@@ -2027,18 +2032,22 @@ async def create_order(
                    WHERE id = ? AND points_balance >= ?""",
                 (points_to_deduct, points_to_deduct, loyalty_customer_id, points_to_deduct),
             )
-            await db.execute(
-                """INSERT INTO loyalty_transactions (customer_id, type, points, description, location_name)
-                   VALUES (?, 'redeem', ?, ?, ?)""",
-                (loyalty_customer_id, -points_to_deduct, f"Redeemed: {reward_name} (Order {order_number})", loyalty_loc),
-            )
-            await db.execute(
-                """INSERT INTO loyalty_redemptions (customer_id, reward_id, points_spent, location_name)
-                   VALUES (?, ?, ?, ?)""",
-                (loyalty_customer_id, order.loyalty_reward_id, points_to_deduct, loyalty_loc),
-            )
-            await db.commit()
-            print(f"[order] Loyalty points deducted: customer_id={loyalty_customer_id} points={points_to_deduct} reward='{reward_name}' order={order_number}")
+            if update_cursor.rowcount == 0:
+                print(f"[order] WARNING: Loyalty points deduction had no effect for customer {loyalty_customer_id} — possible race condition or insufficient balance at commit time")
+                print(f"[order] MANUAL FIX NEEDED: Verify loyalty_customer id={loyalty_customer_id} balance and deduct {points_to_deduct} pts if appropriate")
+            else:
+                await db.execute(
+                    """INSERT INTO loyalty_transactions (customer_id, type, points, description, location_name)
+                       VALUES (?, 'redeem', ?, ?, ?)""",
+                    (loyalty_customer_id, -points_to_deduct, f"Redeemed: {reward_name} (Order {order_number})", loyalty_loc),
+                )
+                await db.execute(
+                    """INSERT INTO loyalty_redemptions (customer_id, reward_id, points_spent, location_name)
+                       VALUES (?, ?, ?, ?)""",
+                    (loyalty_customer_id, order.loyalty_reward_id, points_to_deduct, loyalty_loc),
+                )
+                await db.commit()
+                print(f"[order] Loyalty points deducted: customer_id={loyalty_customer_id} points={points_to_deduct} reward='{reward_name}' order={order_number}")
         except Exception as loyalty_err:
             print(f"[order] WARNING: Failed to deduct loyalty points for {order_number}: {loyalty_err}")
             print(f"[order] MANUAL FIX NEEDED: Deduct {loyalty_reward_row[2]} pts from loyalty_customer id={loyalty_customer_id}")
