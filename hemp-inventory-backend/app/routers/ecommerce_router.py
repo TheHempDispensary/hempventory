@@ -1688,7 +1688,7 @@ async def create_order(
                     order.total = order.subtotal - order.discount - order.volume_discount + order.shipping_cost + order.tax
                 else:
                     # Enforce: loyalty discount cannot exceed the reward's actual value
-                    reward_value_cents = int(loyalty_reward_row[3] * 100)
+                    reward_value_cents = round(loyalty_reward_row[3] * 100)
                     if order.loyalty_discount > reward_value_cents:
                         print(f"[order] Loyalty discount capped to reward value: requested ${order.loyalty_discount/100:.2f}, reward value ${reward_value_cents/100:.2f}")
                         order.loyalty_discount = min(order.loyalty_discount, reward_value_cents)
