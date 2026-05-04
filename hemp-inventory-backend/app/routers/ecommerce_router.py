@@ -64,6 +64,7 @@ class CreateOrderRequest(BaseModel):
     notes: str = ""
     payment_token: str = ""
     loyalty_number: str = ""
+    loyalty_reward_id: Optional[int] = None
     promo_code: Optional[str] = None
     shipping_service: str = ""
     fulfillment_type: str = "shipping"  # "shipping", "pickup_west", "pickup_east"
@@ -1643,6 +1644,8 @@ async def create_order(
 
     # Server-side enforcement: Loyalty rewards capped to subtotal only (not tax),
     # and customer must pay at least $1.00 before tax/shipping.
+    loyalty_customer_id: Optional[int] = None
+    loyalty_reward_row: Optional[tuple] = None
     if order.loyalty_discount > 0:
         item_subtotal = sum(item.price * item.quantity for item in order.items)
         effective_subtotal = order.subtotal - order.discount - order.volume_discount
@@ -1653,6 +1656,38 @@ async def create_order(
             print(f"[order] Loyalty capped: requested ${order.loyalty_discount/100:.2f}, max allowed ${max_loyalty/100:.2f} (item_subtotal ${item_subtotal/100:.2f}, effective_subtotal ${effective_subtotal/100:.2f})")
             order.loyalty_discount = max_loyalty
             order.total = effective_subtotal - order.loyalty_discount + order.shipping_cost + order.tax
+
+        # Server-side verification: look up the loyalty customer and verify they have
+        # enough points for the selected reward before accepting the order.
+        if order.loyalty_reward_id and order.loyalty_number:
+            phone = order.loyalty_number.strip().replace("-", "").replace(" ", "").replace("(", "").replace(")", "")
+            lcur = await db.execute(
+                "SELECT id, points_balance, first_name, last_name FROM loyalty_customers WHERE phone = ?",
+                (phone,),
+            )
+            lrow = await lcur.fetchone()
+            if not lrow:
+                print(f"[order] Loyalty customer not found for phone {phone}, zeroing loyalty discount")
+                order.loyalty_discount = 0
+                order.total = order.subtotal - order.discount - order.volume_discount + order.shipping_cost + order.tax
+            else:
+                loyalty_customer_id = lrow[0]
+                # Verify the reward exists and customer has enough points
+                rcur = await db.execute(
+                    "SELECT id, name, points_required, reward_value FROM loyalty_rewards WHERE id = ? AND is_active = 1",
+                    (order.loyalty_reward_id,),
+                )
+                loyalty_reward_row = await rcur.fetchone()
+                if not loyalty_reward_row:
+                    print(f"[order] Loyalty reward {order.loyalty_reward_id} not found or inactive, zeroing loyalty discount")
+                    order.loyalty_discount = 0
+                    order.total = order.subtotal - order.discount - order.volume_discount + order.shipping_cost + order.tax
+                elif lrow[1] < loyalty_reward_row[2]:
+                    print(f"[order] Loyalty customer {lrow[2]} {lrow[3]} (id={lrow[0]}) has {lrow[1]} pts but needs {loyalty_reward_row[2]} for reward '{loyalty_reward_row[1]}', zeroing loyalty discount")
+                    order.loyalty_discount = 0
+                    order.total = order.subtotal - order.discount - order.volume_discount + order.shipping_cost + order.tax
+                else:
+                    print(f"[order] Loyalty verified: customer {lrow[2]} {lrow[3]} (id={lrow[0]}) has {lrow[1]} pts, redeeming {loyalty_reward_row[2]} pts for '{loyalty_reward_row[1]}'")
 
     # Server-side enforcement: FIRST10 phone number check (prevent multi-email abuse)
     if order.promo_code and order.promo_code.upper() == "FIRST10" and order.customer.phone:
@@ -1970,6 +2005,43 @@ async def create_order(
             print(f"[order] Discount usage logged: code={order.promo_code} customer={order.customer.email} order={order_number}")
         except Exception as usage_err:
             print(f"[order] Failed to log discount usage (non-critical): {usage_err}")
+
+    # Deduct loyalty points from the customer's account after order is saved
+    if db_save_ok and order.loyalty_discount > 0 and loyalty_customer_id and loyalty_reward_row:
+        try:
+            points_to_deduct = loyalty_reward_row[2]  # points_required
+            reward_name = loyalty_reward_row[1]
+            # Determine location name for transaction log
+            loyalty_loc = ""
+            if order.fulfillment_type == "pickup_west":
+                loyalty_loc = "West"
+            elif order.fulfillment_type == "pickup_east":
+                loyalty_loc = "East"
+            else:
+                loyalty_loc = "Online"
+            await db.execute(
+                """UPDATE loyalty_customers
+                   SET points_balance = points_balance - ?,
+                       lifetime_redeemed = lifetime_redeemed + ?,
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ? AND points_balance >= ?""",
+                (points_to_deduct, points_to_deduct, loyalty_customer_id, points_to_deduct),
+            )
+            await db.execute(
+                """INSERT INTO loyalty_transactions (customer_id, type, points, description, location_name)
+                   VALUES (?, 'redeem', ?, ?, ?)""",
+                (loyalty_customer_id, -points_to_deduct, f"Redeemed: {reward_name} (Order {order_number})", loyalty_loc),
+            )
+            await db.execute(
+                """INSERT INTO loyalty_redemptions (customer_id, reward_id, points_spent, location_name)
+                   VALUES (?, ?, ?, ?)""",
+                (loyalty_customer_id, order.loyalty_reward_id, points_to_deduct, loyalty_loc),
+            )
+            await db.commit()
+            print(f"[order] Loyalty points deducted: customer_id={loyalty_customer_id} points={points_to_deduct} reward='{reward_name}' order={order_number}")
+        except Exception as loyalty_err:
+            print(f"[order] WARNING: Failed to deduct loyalty points for {order_number}: {loyalty_err}")
+            print(f"[order] MANUAL FIX NEEDED: Deduct {loyalty_reward_row[2]} pts from loyalty_customer id={loyalty_customer_id}")
 
     # Fetch SMTP settings while DB is still open
     smtp_settings = await _get_smtp_settings(db)
