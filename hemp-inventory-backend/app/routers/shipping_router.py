@@ -110,13 +110,15 @@ class PurchaseLabelRequest(BaseModel):
 
 
 def _is_leaflife_item(sku: str, name: str) -> bool:
-    """Check if a single item is a LeafLife product."""
+    """Check if a single item is a LeafLife product by SKU prefix only.
+
+    Only the ``LF-`` SKU prefix is authoritative.  Name-based keyword matching
+    was removed because HQ carries its own products (e.g. "Smalls Flower")
+    whose names overlap with LeafLife keywords, causing incorrect return
+    addresses on shipping labels.
+    """
     if sku and isinstance(sku, str) and sku.upper().startswith("LF-"):
         return True
-    if name:
-        lower = name.lower()
-        if any(kw in lower for kw in LEAFLIFE_NAME_KEYWORDS):
-            return True
     return False
 
 
@@ -572,8 +574,8 @@ async def get_public_shipping_rates(body: PublicRatesRequest):
         "mass_unit": "lb",
     }
 
-    # Use LeafLife origin address if any products are LeafLife (check SKU first, fall back to name keywords)
-    is_leaflife = _has_leaflife_products_skus(body.product_skus) or _has_leaflife_products_names(body.product_names)
+    # Use LeafLife origin address only when SKU confirms LeafLife product (LF- prefix)
+    is_leaflife = _has_leaflife_products_skus(body.product_skus)
     from_address = LEAFLIFE_FROM_ADDRESS if is_leaflife else DEFAULT_FROM_ADDRESS
 
     shipment_data = {
