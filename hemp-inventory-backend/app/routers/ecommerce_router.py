@@ -1687,6 +1687,13 @@ async def create_order(
                     order.loyalty_discount = 0
                     order.total = order.subtotal - order.discount - order.volume_discount + order.shipping_cost + order.tax
                 else:
+                    # Enforce: loyalty discount cannot exceed the reward's actual value
+                    reward_value_cents = int(loyalty_reward_row[3] * 100)
+                    if order.loyalty_discount > reward_value_cents:
+                        print(f"[order] Loyalty discount capped to reward value: requested ${order.loyalty_discount/100:.2f}, reward value ${reward_value_cents/100:.2f}")
+                        order.loyalty_discount = min(order.loyalty_discount, reward_value_cents)
+                        effective_subtotal = order.subtotal - order.discount - order.volume_discount
+                        order.total = effective_subtotal - order.loyalty_discount + order.shipping_cost + order.tax
                     print(f"[order] Loyalty verified: customer {lrow[2]} {lrow[3]} (id={lrow[0]}) has {lrow[1]} pts, redeeming {loyalty_reward_row[2]} pts for '{loyalty_reward_row[1]}'")
         else:
             # loyalty_discount > 0 but missing reward_id or loyalty_number — reject the discount
