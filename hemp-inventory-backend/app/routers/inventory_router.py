@@ -1989,6 +1989,7 @@ class StockTransferRequest(BaseModel):
     to_location_id: int
     quantity: float
     transfer_group_id: Optional[str] = None
+    item_name: Optional[str] = None
 
 
 @router.post("/transfer-stock")
@@ -2028,6 +2029,13 @@ async def transfer_stock(
         if (item.get("sku") or item.get("id", "")) == req.sku:
             source_item = item
             break
+    # Fallback: match by name when SKU is a Clover ID (no user-assigned SKU)
+    if not source_item and req.item_name:
+        normalized_name = " ".join(req.item_name.split())
+        for item in from_items:
+            if not item.get("sku") and " ".join((item.get("name") or "").split()) == normalized_name:
+                source_item = item
+                break
 
     if not source_item:
         # Log failed lookup
@@ -2077,6 +2085,13 @@ async def transfer_stock(
         if (item.get("sku") or item.get("id", "")) == req.sku:
             dest_item = item
             break
+    # Fallback: match by name when SKU is a Clover ID (no user-assigned SKU)
+    if not dest_item and req.item_name:
+        normalized_name = " ".join(req.item_name.split())
+        for item in to_items:
+            if not item.get("sku") and " ".join((item.get("name") or "").split()) == normalized_name:
+                dest_item = item
+                break
 
     if not dest_item:
         try:
