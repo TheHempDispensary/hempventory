@@ -378,6 +378,18 @@ export const saveSchedule = (data: {
   notes?: string;
 }) => api.post("/api/timeclock/schedules", data);
 
+export const updateSchedule = (scheduleId: number, data: {
+  employee_id: number;
+  date: string;
+  start_time: string;
+  end_time: string;
+  location?: string;
+  notes?: string;
+}) => api.put(`/api/timeclock/schedules/${scheduleId}`, data);
+
+export const deleteScheduleById = (scheduleId: number) =>
+  api.delete(`/api/timeclock/schedules/${scheduleId}`);
+
 export const deleteScheduleByDate = (employeeId: number, date: string) =>
   api.delete(`/api/timeclock/schedules/employee/${employeeId}/date/${date}`);
 

@@ -14,7 +14,8 @@ import {
   syncEmployeesFromClover,
   getSchedules,
   saveSchedule,
-  deleteScheduleByDate,
+  updateSchedule,
+  deleteScheduleById,
   getTimeOffRequests,
   createTimeOffRequest,
   updateTimeOffRequest,
@@ -172,7 +173,7 @@ export default function TimeClock() {
 
   // Schedule state
   const [schedules, setSchedules] = useState<ScheduleItem[]>([]);
-  const [editingSchedule, setEditingSchedule] = useState<{ empId: number; date: string; start: string; end: string; location: string } | null>(null);
+  const [editingSchedule, setEditingSchedule] = useState<{ id?: number; empId: number; date: string; start: string; end: string; location: string } | null>(null);
   const [savingSchedule, setSavingSchedule] = useState(false);
 
   // Monthly calendar state
@@ -545,10 +546,14 @@ export default function TimeClock() {
     }
   }, [tab, loadSchedules, loadTimeOff, loadNotes, loadHours, loadShiftRequests]);
 
-  const handleSaveSchedule = async (empId: number, date: string, start: string, end: string, location: string) => {
+  const handleSaveSchedule = async (scheduleId: number | undefined, empId: number, date: string, start: string, end: string, location: string) => {
     setSavingSchedule(true);
     try {
-      await saveSchedule({ employee_id: empId, date, start_time: start, end_time: end, location: location || undefined });
+      if (scheduleId) {
+        await updateSchedule(scheduleId, { employee_id: empId, date, start_time: start, end_time: end, location: location || undefined });
+      } else {
+        await saveSchedule({ employee_id: empId, date, start_time: start, end_time: end, location: location || undefined });
+      }
       showToast("success", "Schedule saved");
       setEditingSchedule(null);
       await loadSchedules();
@@ -560,15 +565,15 @@ export default function TimeClock() {
     }
   };
 
-  const handleDeleteSchedule = async (empId: number, date: string) => {
+  const handleDeleteScheduleEntry = async (scheduleId: number) => {
     try {
-      await deleteScheduleByDate(empId, date);
-      showToast("success", "Schedule entry removed");
+      await deleteScheduleById(scheduleId);
+      showToast("success", "Shift removed");
       setEditingSchedule(null);
       await loadSchedules();
     } catch (err) {
       console.error(err);
-      showToast("error", "Failed to delete schedule");
+      showToast("error", "Failed to delete shift");
     }
   };
 
@@ -1420,8 +1425,12 @@ export default function TimeClock() {
         }
 
         // Build lookup maps — keyed by employee_id + date (YYYY-MM-DD)
-        const scheduleMap: Record<string, ScheduleItem> = {};
-        schedules.forEach(s => { scheduleMap[`${s.employee_id}-${s.date}`] = s; });
+        const scheduleMap: Record<string, ScheduleItem[]> = {};
+        schedules.forEach(s => {
+          const key = `${s.employee_id}-${s.date}`;
+          if (!scheduleMap[key]) scheduleMap[key] = [];
+          scheduleMap[key].push(s);
+        });
         const timeOffMap: Record<string, TimeOffItem> = {};
         timeOffRequests.forEach(t => { timeOffMap[`${t.employee_id}-${t.date}`] = t; });
         const notesMap: Record<string, ScheduleNote[]> = {};
@@ -1649,7 +1658,7 @@ export default function TimeClock() {
                               {days.map((d, i) => {
                                 const dow = d.getDay();
                                 const dateStr = d.toISOString().split("T")[0];
-                                const sched = scheduleMap[`${emp.id}-${dateStr}`];
+                                const shifts = scheduleMap[`${emp.id}-${dateStr}`] || [];
                                 const timeOff = timeOffMap[`${emp.id}-${dateStr}`];
                                 const isToday = dateStr === new Date().toISOString().split("T")[0];
                                 const isWeekend = dow === 0 || dow === 6;
@@ -1672,13 +1681,13 @@ export default function TimeClock() {
                                         <input type="time" value={editingSchedule.end} onChange={e => setEditingSchedule({ ...editingSchedule, end: e.target.value })}
                                           className="w-full px-1 py-0.5 border border-gray-300 rounded text-xs" />
                                         <input type="text" value={editingSchedule.location} onChange={e => setEditingSchedule({ ...editingSchedule, location: e.target.value })}
-                                          placeholder="Loc" className="w-full px-1 py-0.5 border border-gray-300 rounded text-xs" />
+                                          placeholder="Location" className="w-full px-1 py-0.5 border border-gray-300 rounded text-xs" />
                                         <div className="flex gap-0.5 justify-center pt-0.5">
                                           <button disabled={savingSchedule || !editingSchedule.start || !editingSchedule.end}
-                                            onClick={() => handleSaveSchedule(emp.id, dateStr, editingSchedule.start, editingSchedule.end, editingSchedule.location)}
+                                            onClick={() => handleSaveSchedule(editingSchedule.id, emp.id, dateStr, editingSchedule.start, editingSchedule.end, editingSchedule.location)}
                                             className="p-0.5 text-green-600 hover:bg-green-100 rounded disabled:opacity-50" title="Save"><Save className="w-3.5 h-3.5" /></button>
-                                          {sched && <button onClick={() => handleDeleteSchedule(emp.id, dateStr)}
-                                            className="p-0.5 text-red-600 hover:bg-red-100 rounded" title="Remove"><Trash2 className="w-3.5 h-3.5" /></button>}
+                                          {editingSchedule.id && <button onClick={() => handleDeleteScheduleEntry(editingSchedule.id!)}
+                                            className="p-0.5 text-red-600 hover:bg-red-100 rounded" title="Remove this shift"><Trash2 className="w-3.5 h-3.5" /></button>}
                                           <button onClick={() => setEditingSchedule(null)}
                                             className="p-0.5 text-gray-400 hover:bg-gray-100 rounded" title="Cancel"><X className="w-3.5 h-3.5" /></button>
                                         </div>
@@ -1687,13 +1696,24 @@ export default function TimeClock() {
                                   );
                                 }
 
-                                if (sched) {
+                                if (shifts.length > 0) {
                                   return (
-                                    <td key={i} className={`px-1 py-1 text-center border-r border-b border-gray-200 cursor-pointer hover:bg-blue-50 ${isToday ? "bg-green-50" : ""}`}
-                                      onClick={() => setEditingSchedule({ empId: emp.id, date: dateStr, start: sched.start_time, end: sched.end_time, location: sched.location || "" })}>
-                                      <div className="text-xs text-gray-800 leading-tight font-medium">{fmtTime12(sched.start_time)}</div>
-                                      <div className="text-xs text-gray-500 leading-tight">{fmtTime12(sched.end_time)}</div>
-                                      {sched.location && <div className="text-xs text-blue-600 leading-tight truncate" title={sched.location}>{sched.location}</div>}
+                                    <td key={i} className={`px-1 py-1 border-r border-b border-gray-200 ${isToday ? "bg-green-50" : ""}`}>
+                                      <div className="space-y-0.5">
+                                        {shifts.map(s => (
+                                          <div key={s.id}
+                                            className="cursor-pointer hover:bg-blue-50 rounded px-0.5 py-0.5 text-center"
+                                            onClick={() => setEditingSchedule({ id: s.id, empId: emp.id, date: dateStr, start: s.start_time, end: s.end_time, location: s.location || "" })}>
+                                            <div className="text-xs text-gray-800 leading-tight font-medium">{fmtTime12(s.start_time)}</div>
+                                            <div className="text-xs text-gray-500 leading-tight">{fmtTime12(s.end_time)}</div>
+                                            {s.location && <div className="text-xs text-blue-600 leading-tight truncate" title={s.location}>{s.location}</div>}
+                                          </div>
+                                        ))}
+                                        <button
+                                          onClick={() => setEditingSchedule({ empId: emp.id, date: dateStr, start: "09:00", end: "17:00", location: "" })}
+                                          className="w-full text-center text-xs text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded py-0.5"
+                                          title="Add another shift">+</button>
+                                      </div>
                                       {timeOff && timeOff.status === "pending" && (
                                         <span className="inline-block w-2 h-2 rounded-full bg-amber-400 mt-0.5" title="Pending time-off request" />
                                       )}
@@ -1762,14 +1782,14 @@ export default function TimeClock() {
                               // Sum hours for all employees on this date
                               let dayTotal = 0;
                               activeEmps.forEach(emp => {
-                                const sched = scheduleMap[`${emp.id}-${dateStr}`];
-                                if (sched) {
+                                const shifts = scheduleMap[`${emp.id}-${dateStr}`] || [];
+                                shifts.forEach(sched => {
                                   const [sh, sm] = sched.start_time.split(":").map(Number);
                                   const [eh, em] = sched.end_time.split(":").map(Number);
                                   let hrs = (eh + em / 60) - (sh + sm / 60);
-                                  if (hrs < 0) hrs += 24; // handle overnight shifts
+                                  if (hrs < 0) hrs += 24;
                                   dayTotal += hrs;
-                                }
+                                });
                               });
                               return (
                                 <td key={i} className="px-1 py-1 text-center border-r border-b border-gray-200 text-xs font-medium text-emerald-700">

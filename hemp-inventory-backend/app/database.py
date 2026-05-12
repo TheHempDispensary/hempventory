@@ -694,4 +694,40 @@ async def init_db():
                 ("$5 off any purchase", 100, "discount", 5.00, "Get $5 off when you earn 100 points")
             )
 
+        # Migration: remove UNIQUE(employee_id, date) from date_schedules
+        # to allow multiple shifts per employee per day.
+        try:
+            check = await db.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='date_schedules'"
+            )
+            row = await check.fetchone()
+            if row and "UNIQUE(employee_id, date)" in (row[0] or ""):
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS date_schedules_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        employee_id INTEGER NOT NULL,
+                        date TEXT NOT NULL,
+                        start_time TEXT NOT NULL,
+                        end_time TEXT NOT NULL,
+                        location TEXT,
+                        notes TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (employee_id) REFERENCES employees(id)
+                    )
+                """)
+                await db.execute("""
+                    INSERT INTO date_schedules_new
+                        (id, employee_id, date, start_time, end_time, location, notes, created_at, updated_at)
+                    SELECT id, employee_id, date, start_time, end_time, location, notes, created_at, updated_at
+                    FROM date_schedules
+                """)
+                await db.execute("DROP TABLE date_schedules")
+                await db.execute("ALTER TABLE date_schedules_new RENAME TO date_schedules")
+                await db.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_date_schedules_emp_date ON date_schedules(employee_id, date)"
+                )
+        except Exception as mig_err:
+            print(f"[db] date_schedules migration note: {mig_err}")
+
         await db.commit()

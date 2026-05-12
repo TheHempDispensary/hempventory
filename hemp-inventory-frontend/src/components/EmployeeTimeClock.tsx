@@ -410,8 +410,11 @@ export default function EmployeeTimeClock() {
   };
 
   // Build schedule lookup — keyed by date string (YYYY-MM-DD)
-  const scheduleMap: Record<string, ScheduleItem> = {};
-  schedule.forEach(s => { scheduleMap[s.date] = s; });
+  const scheduleMap: Record<string, ScheduleItem[]> = {};
+  schedule.forEach(s => {
+    if (!scheduleMap[s.date]) scheduleMap[s.date] = [];
+    scheduleMap[s.date].push(s);
+  });
   const timeOffMap: Record<string, TimeOffItem> = {};
   myTimeOff.forEach(t => { timeOffMap[t.date] = t; });
   const notesMap: Record<string, ScheduleNote[]> = {};
@@ -592,7 +595,7 @@ export default function EmployeeTimeClock() {
                     if (!day) return <div key={`empty-${i}`} className="border-b border-r border-gray-100 p-2 min-h-[5rem] bg-gray-50/50" />;
                     const dateStr = day.toISOString().split("T")[0];
                     const dow = day.getDay();
-                    const sched = scheduleMap[dateStr];
+                    const shifts = scheduleMap[dateStr] || [];
                     const timeOff = timeOffMap[dateStr];
                     const dayNotes = notesMap[dateStr];
                     const isToday = dateStr === new Date().toISOString().split("T")[0];
@@ -603,10 +606,14 @@ export default function EmployeeTimeClock() {
                         <div className={`text-xs font-bold mb-0.5 ${isToday ? "text-green-700" : "text-gray-900"}`}>{day.getDate()}</div>
                         {timeOff && timeOff.status === "approved" ? (
                           <div className="bg-red-100 text-red-700 rounded px-1 py-0.5 text-xs font-bold text-center">OFF</div>
-                        ) : sched ? (
+                        ) : shifts.length > 0 ? (
                           <div className="space-y-0.5">
-                            <div className="text-xs text-gray-800 font-medium">{fmtTime12(sched.start_time)}-{fmtTime12(sched.end_time)}</div>
-                            {sched.location && <div className="text-xs text-blue-600 truncate">{sched.location}</div>}
+                            {shifts.map(s => (
+                              <div key={s.id}>
+                                <div className="text-xs text-gray-800 font-medium">{fmtTime12(s.start_time)}-{fmtTime12(s.end_time)}</div>
+                                {s.location && <div className="text-xs text-blue-600 truncate">{s.location}</div>}
+                              </div>
+                            ))}
                           </div>
                         ) : (
                           <div className="text-xs text-gray-300">Off</div>
