@@ -1004,25 +1004,40 @@ async def save_schedule(
     user: dict = Depends(get_current_user),
     db: aiosqlite.Connection = Depends(get_db),
 ):
-    """Admin: Create or update a date-specific schedule entry (upserts by employee_id + date)."""
+    """Admin: Create a new schedule entry. Multiple shifts per employee per day are allowed."""
     # Verify employee exists
     cursor = await db.execute("SELECT id FROM employees WHERE id = ?", (entry.employee_id,))
     if not await cursor.fetchone():
         raise HTTPException(status_code=404, detail="Employee not found")
 
-    await db.execute(
+    cur = await db.execute(
         """INSERT INTO date_schedules (employee_id, date, start_time, end_time, location, notes, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-           ON CONFLICT(employee_id, date) DO UPDATE SET
-             start_time = excluded.start_time,
-             end_time = excluded.end_time,
-             location = excluded.location,
-             notes = excluded.notes,
-             updated_at = CURRENT_TIMESTAMP""",
+           VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
         (entry.employee_id, entry.date, entry.start_time, entry.end_time, entry.location, entry.notes),
     )
     await db.commit()
-    return {"status": "saved"}
+    return {"status": "saved", "id": cur.lastrowid}
+
+
+@router.put("/schedules/{schedule_id}")
+async def update_schedule(
+    schedule_id: int,
+    entry: ScheduleEntry,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Admin: Update a specific schedule entry by ID."""
+    cursor = await db.execute("SELECT id FROM date_schedules WHERE id = ?", (schedule_id,))
+    if not await cursor.fetchone():
+        raise HTTPException(status_code=404, detail="Schedule entry not found")
+
+    await db.execute(
+        """UPDATE date_schedules SET start_time = ?, end_time = ?, location = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?""",
+        (entry.start_time, entry.end_time, entry.location, entry.notes, schedule_id),
+    )
+    await db.commit()
+    return {"status": "updated"}
 
 
 @router.post("/schedules/bulk")
@@ -1044,13 +1059,7 @@ async def save_bulk_schedule(
     for date in entry.dates:
         await db.execute(
             """INSERT INTO date_schedules (employee_id, date, start_time, end_time, location, notes, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-               ON CONFLICT(employee_id, date) DO UPDATE SET
-                 start_time = excluded.start_time,
-                 end_time = excluded.end_time,
-                 location = excluded.location,
-                 notes = excluded.notes,
-                 updated_at = CURRENT_TIMESTAMP""",
+               VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
             (entry.employee_id, date, entry.start_time, entry.end_time, entry.location, entry.notes),
         )
         saved_count += 1
