@@ -2029,11 +2029,17 @@ async def transfer_stock(
         if (item.get("sku") or item.get("id", "")) == req.sku:
             source_item = item
             break
-    # Fallback: match by name when SKU is a Clover ID (no user-assigned SKU)
+    # Fallback: match by Clover item ID directly
+    if not source_item:
+        for item in from_items:
+            if item.get("id", "") == req.sku:
+                source_item = item
+                break
+    # Fallback: match by name (handles items with different Clover IDs per location)
     if not source_item and req.item_name:
         normalized_name = " ".join(req.item_name.split())
         for item in from_items:
-            if not item.get("sku") and " ".join((item.get("name") or "").split()) == normalized_name:
+            if " ".join((item.get("name") or "").split()) == normalized_name:
                 source_item = item
                 break
 
@@ -2085,11 +2091,17 @@ async def transfer_stock(
         if (item.get("sku") or item.get("id", "")) == req.sku:
             dest_item = item
             break
-    # Fallback: match by name when SKU is a Clover ID (no user-assigned SKU)
+    # Fallback: match by Clover item ID directly
+    if not dest_item:
+        for item in to_items:
+            if item.get("id", "") == req.sku:
+                dest_item = item
+                break
+    # Fallback: match by name (handles items with different Clover IDs per location)
     if not dest_item and req.item_name:
         normalized_name = " ".join(req.item_name.split())
         for item in to_items:
-            if not item.get("sku") and " ".join((item.get("name") or "").split()) == normalized_name:
+            if " ".join((item.get("name") or "").split()) == normalized_name:
                 dest_item = item
                 break
 
