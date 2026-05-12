@@ -1007,7 +1007,7 @@ export default function Inventory() {
         continue;
       }
       try {
-        const resp = await transferStock(item.sku, transferFromId, transferToId, qty, groupId);
+        const resp = await transferStock(item.sku, transferFromId, transferToId, qty, groupId, item.name);
         const d = resp.data;
         results.push({ name: d.item_name, status: `Transferred ${d.quantity}` });
       } catch (err) {
