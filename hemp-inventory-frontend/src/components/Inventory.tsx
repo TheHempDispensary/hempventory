@@ -1000,14 +1000,21 @@ export default function Inventory() {
     setTransferResults([]);
     const groupId = crypto.randomUUID();
     const results: { name: string; status: string }[] = [];
+    const fromLoc = locations.find(l => l.id === transferFromId);
+    const fromLocName = fromLoc?.name || "";
     for (const [, { item, quantity }] of transferItems) {
       const qty = parseFloat(quantity);
       if (!qty || qty <= 0) {
         results.push({ name: item.name, status: "Skipped (invalid quantity)" });
         continue;
       }
+      // Use the source location's Clover item ID when available, falling back to
+      // the display SKU. This fixes transfers for items merged by name across
+      // locations that have different Clover IDs at each merchant.
+      const locData = fromLocName ? item.locations[fromLocName] : undefined;
+      const transferSku = locData?.clover_item_id || item.sku;
       try {
-        const resp = await transferStock(item.sku, transferFromId, transferToId, qty, groupId, item.name);
+        const resp = await transferStock(transferSku, transferFromId, transferToId, qty, groupId, item.name);
         const d = resp.data;
         results.push({ name: d.item_name, status: `Transferred ${d.quantity}` });
       } catch (err) {
