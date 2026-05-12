@@ -1012,7 +1012,7 @@ export default function Inventory() {
       // the display SKU. This fixes transfers for items merged by name across
       // locations that have different Clover IDs at each merchant.
       const locData = fromLocName ? item.locations[fromLocName] : undefined;
-      const transferSku = locData?.clover_item_id || item.sku;
+      const transferSku = item.id.startsWith("name::") ? (locData?.clover_item_id || item.sku) : item.sku;
       try {
         const resp = await transferStock(transferSku, transferFromId, transferToId, qty, groupId, item.name);
         const d = resp.data;
