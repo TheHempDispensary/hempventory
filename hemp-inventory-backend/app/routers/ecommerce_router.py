@@ -1588,7 +1588,7 @@ async def _check_realtime_stock(items: List[OrderItem], fulfillment_type: str) -
 
                 clover_item_id = item.product_id
                 # Resolve the correct Clover item ID at the target location
-                if is_non_hq and location_lookup:
+                if is_non_hq and location_lookup and location_lookup["by_id"]:
                     local_item = _find_item_at_location(location_lookup, clover_item_id, item.sku, item.name)
                     if local_item:
                         clover_item_id = local_item["id"]
@@ -2197,7 +2197,7 @@ async def _deduct_stock_for_order(items: List[OrderItem], fulfillment_type: str 
                     continue
 
                 # Resolve the correct Clover item ID at the target location
-                if is_non_hq and location_lookup:
+                if is_non_hq and location_lookup and location_lookup["by_id"]:
                     local_item = _find_item_at_location(location_lookup, clover_item_id, item.sku, item.name)
                     if local_item:
                         clover_item_id = local_item["id"]
@@ -3125,7 +3125,7 @@ async def _restock_items(items: list, fulfillment_type: str = "shipping") -> Non
                 sku = item.get("sku", "")
 
                 # Resolve the correct Clover item ID at the target location
-                if is_non_hq and location_lookup:
+                if is_non_hq and location_lookup and location_lookup["by_id"]:
                     local_item = _find_item_at_location(location_lookup, clover_item_id, sku, name)
                     if local_item:
                         clover_item_id = local_item["id"]
