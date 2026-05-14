@@ -92,12 +92,12 @@ class CloverClient:
     async def update_item_stock(self, item_id: str, quantity: float) -> dict:
         """Update stock quantity for an item."""
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
+            resp = await self._request_with_retry(
+                client, "post",
                 f"{self.base_url}/item_stocks/{item_id}",
                 headers=self._headers(),
                 json={"quantity": quantity},
             )
-            resp.raise_for_status()
             return resp.json()
 
     async def get_categories(self) -> dict:

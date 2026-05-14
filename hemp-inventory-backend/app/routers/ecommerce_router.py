@@ -1548,7 +1548,8 @@ async def resync_volume_discounts_to_clover(db: aiosqlite.Connection = Depends(g
 
 
 async def _check_realtime_stock(items: List[OrderItem], fulfillment_type: str) -> list[str]:
-    """Check real-time Clover stock for order items. Returns list of out-of-stock item names."""
+    """Check real-time Clover stock for order items. Returns list of out-of-stock item names.
+    For pickup orders at East/West, resolves items by SKU/name since product_id is HQ's Clover ID."""
     # Determine which location to check based on fulfillment type
     if fulfillment_type == "pickup_west" and WEST_MERCHANT_ID and WEST_API_TOKEN:
         merchant_id = WEST_MERCHANT_ID
@@ -1567,17 +1568,39 @@ async def _check_realtime_stock(items: List[OrderItem], fulfillment_type: str) -
     base = f"{CLOVER_BASE_URL}/merchants/{merchant_id}"
     headers = {"Authorization": f"Bearer {api_token}"}
 
+    # For non-HQ locations, pre-fetch all items to resolve by SKU/name
+    is_non_hq = fulfillment_type in ("pickup_west", "pickup_east")
+    location_lookup = None
+    if is_non_hq:
+        try:
+            location_lookup = await _resolve_location_items(merchant_id, api_token)
+        except Exception as e:
+            print(f"[stock-check] Failed to resolve location items: {e}")
+
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             for item in items:
                 # Skip LeafLife items (shipped from supplier, not local stock)
                 if isinstance(item.sku, str) and item.sku.startswith("LF-"):
                     continue
-                if not item.product_id:
+                if not item.product_id and not item.sku and not item.name:
+                    continue
+
+                clover_item_id = item.product_id
+                # Resolve the correct Clover item ID at the target location
+                if is_non_hq and location_lookup and location_lookup["by_id"]:
+                    local_item = _find_item_at_location(location_lookup, clover_item_id, item.sku, item.name)
+                    if local_item:
+                        clover_item_id = local_item["id"]
+                    else:
+                        print(f"[stock-check] Could not find '{item.name}' (SKU: {item.sku}) at {location_label}")
+                        continue
+
+                if not clover_item_id:
                     continue
                 try:
                     resp = await client.get(
-                        f"{base}/item_stocks/{item.product_id}",
+                        f"{base}/item_stocks/{clover_item_id}",
                         headers=headers,
                     )
                     if resp.status_code == 200:
@@ -1591,7 +1614,7 @@ async def _check_realtime_stock(items: List[OrderItem], fulfillment_type: str) -
                         else:
                             print(f"[stock-check] {item.name} OK at {location_label}: {current_qty} >= {item.quantity}")
                     else:
-                        print(f"[stock-check] Could not verify stock for {item.name} ({item.product_id}): {resp.status_code}")
+                        print(f"[stock-check] Could not verify stock for {item.name} ({clover_item_id}): {resp.status_code}")
                 except Exception as e:
                     print(f"[stock-check] Error checking {item.name}: {e}")
     except Exception as e:
@@ -2084,13 +2107,69 @@ async def create_order(
     }
 
 
+async def _resolve_location_items(merchant_id: str, api_token: str) -> dict:
+    """Fetch all items from a Clover location and build lookup maps.
+    Returns {"by_id": {clover_id: item}, "by_sku": {sku: item}, "by_name": {normalized_name: item}}"""
+    by_id: dict[str, dict] = {}
+    by_sku: dict[str, dict] = {}
+    by_name: dict[str, dict] = {}
+    base = f"{CLOVER_BASE_URL}/merchants/{merchant_id}"
+    headers = {"Authorization": f"Bearer {api_token}"}
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            offset = 0
+            while True:
+                resp = await client.get(
+                    f"{base}/items",
+                    headers=headers,
+                    params={"expand": "itemStock", "limit": 1000, "offset": offset, "filter": "deleted=false"},
+                )
+                resp.raise_for_status()
+                elements = resp.json().get("elements", [])
+                for item in elements:
+                    item_id = item.get("id", "")
+                    sku = item.get("sku", "") or ""
+                    name = " ".join((item.get("name", "") or "").split())
+                    by_id[item_id] = item
+                    if sku:
+                        by_sku[sku] = item
+                    if name:
+                        by_name[name.upper()] = item
+                if len(elements) < 1000:
+                    break
+                offset += 1000
+    except Exception as e:
+        print(f"[resolve] Failed to fetch location items: {e}")
+    return {"by_id": by_id, "by_sku": by_sku, "by_name": by_name}
+
+
+def _find_item_at_location(lookup: dict, product_id: str, sku: str, name: str) -> Optional[dict]:
+    """Find an item at a location using multiple lookup strategies.
+    Tries: direct ID match, SKU match, then normalized name match."""
+    item = lookup["by_id"].get(product_id)
+    if item:
+        return item
+    if sku:
+        item = lookup["by_sku"].get(sku)
+        if item:
+            return item
+    if name:
+        normalized = " ".join(name.split()).upper()
+        item = lookup["by_name"].get(normalized)
+        if item:
+            return item
+    return None
+
+
 def _format_price(cents: int) -> str:
     """Format cents as dollar string."""
     return f"${cents / 100:.2f}"
 
 
 async def _deduct_stock_for_order(items: List[OrderItem], fulfillment_type: str = "shipping") -> None:
-    """Deduct stock from the correct Clover location based on fulfillment type."""
+    """Deduct stock from the correct Clover location based on fulfillment type.
+    For pickup orders at East/West, resolves items by SKU/name since the
+    product_id from the website is HQ's Clover item ID which differs per merchant."""
     try:
         if fulfillment_type == "pickup_west" and WEST_MERCHANT_ID and WEST_API_TOKEN:
             merchant_id = WEST_MERCHANT_ID
@@ -2104,15 +2183,33 @@ async def _deduct_stock_for_order(items: List[OrderItem], fulfillment_type: str 
         base = f"{CLOVER_BASE_URL}/merchants/{merchant_id}"
         headers = {"Authorization": f"Bearer {api_token}"}
 
+        # For non-HQ locations, pre-fetch all items to resolve by SKU/name
+        is_non_hq = fulfillment_type in ("pickup_west", "pickup_east")
+        location_lookup = None
+        if is_non_hq:
+            location_lookup = await _resolve_location_items(merchant_id, api_token)
+
         async with httpx.AsyncClient(timeout=30.0) as client:
             for item in items:
                 clover_item_id = item.product_id
+                if not clover_item_id and not item.sku and not item.name:
+                    print(f"[stock] Skipping stock deduction for '{item.name}' — no identifiers")
+                    continue
+
+                # Resolve the correct Clover item ID at the target location
+                if is_non_hq and location_lookup and location_lookup["by_id"]:
+                    local_item = _find_item_at_location(location_lookup, clover_item_id, item.sku, item.name)
+                    if local_item:
+                        clover_item_id = local_item["id"]
+                    else:
+                        print(f"[stock] Could not find '{item.name}' (SKU: {item.sku}) at target location")
+                        continue
+
                 if not clover_item_id:
                     print(f"[stock] Skipping stock deduction for '{item.name}' — no product_id")
                     continue
 
                 try:
-                    # Get current stock
                     resp = await client.get(
                         f"{base}/item_stocks/{clover_item_id}",
                         headers=headers,
@@ -2125,7 +2222,6 @@ async def _deduct_stock_for_order(items: List[OrderItem], fulfillment_type: str 
                     current_stock = stock_data.get("quantity", 0)
                     new_stock = max(0, current_stock - item.quantity)
 
-                    # Update stock
                     update_resp = await client.post(
                         f"{base}/item_stocks/{clover_item_id}",
                         headers={**headers, "Content-Type": "application/json"},
@@ -2138,7 +2234,6 @@ async def _deduct_stock_for_order(items: List[OrderItem], fulfillment_type: str 
                 except Exception as e:
                     print(f"[stock] Error deducting stock for '{item.name}': {e}")
 
-        # Invalidate product cache so website shows updated stock
         invalidate_product_cache()
         print(f"[stock] Stock deduction complete for {len(items)} item(s), cache invalidated")
     except Exception as e:
@@ -3000,7 +3095,9 @@ async def resend_order_confirmation(
 
 
 async def _restock_items(items: list, fulfillment_type: str = "shipping") -> None:
-    """Re-add stock to the correct Clover location when items are refunded (inverse of _deduct_stock_for_order)."""
+    """Re-add stock to the correct Clover location when items are refunded (inverse of _deduct_stock_for_order).
+    For pickup orders at East/West, resolves items by SKU/name since the
+    stored product_id is HQ's Clover item ID which differs per merchant."""
     try:
         if fulfillment_type == "pickup_west" and WEST_MERCHANT_ID and WEST_API_TOKEN:
             merchant_id = WEST_MERCHANT_ID
@@ -3014,11 +3111,28 @@ async def _restock_items(items: list, fulfillment_type: str = "shipping") -> Non
         base = f"{CLOVER_BASE_URL}/merchants/{merchant_id}"
         headers = {"Authorization": f"Bearer {api_token}"}
 
+        # For non-HQ locations, pre-fetch all items to resolve by SKU/name
+        is_non_hq = fulfillment_type in ("pickup_west", "pickup_east")
+        location_lookup = None
+        if is_non_hq:
+            location_lookup = await _resolve_location_items(merchant_id, api_token)
+
         async with httpx.AsyncClient(timeout=30.0) as client:
             for item in items:
                 clover_item_id = item.get("product_id", "")
                 qty = item.get("quantity", 1)
                 name = item.get("product_name", "unknown")
+                sku = item.get("sku", "")
+
+                # Resolve the correct Clover item ID at the target location
+                if is_non_hq and location_lookup and location_lookup["by_id"]:
+                    local_item = _find_item_at_location(location_lookup, clover_item_id, sku, name)
+                    if local_item:
+                        clover_item_id = local_item["id"]
+                    else:
+                        print(f"[restock] Could not find '{name}' (SKU: {sku}) at target location")
+                        continue
+
                 if not clover_item_id:
                     print(f"[restock] Skipping restock for '{name}' — no product_id")
                     continue
