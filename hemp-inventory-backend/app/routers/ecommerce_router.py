@@ -1765,8 +1765,38 @@ async def create_order(
             detail="Shipping cost is required for delivery orders. Please select a shipping rate and try again.",
         )
 
-    # Server-side enforcement: Local delivery orders must have the correct delivery fee.
+    # Server-side enforcement: Local delivery orders must have the correct delivery fee
+    # and the address must be within the delivery radius.
     if order.fulfillment_type == "local_delivery":
+        # Validate delivery radius server-side (prevent bypass of client-side check)
+        if order.shipping_address and order.shipping_address.address:
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as geo_client:
+                    full_addr = f"{order.shipping_address.address}, {order.shipping_address.city}, {order.shipping_address.state} {order.shipping_address.zip}"
+                    geo_resp = await geo_client.get(
+                        "https://nominatim.openstreetmap.org/search",
+                        params={"q": full_addr, "format": "json", "limit": "1"},
+                        headers={"Accept": "application/json", "User-Agent": "THD-Website/1.0 (support@thehempdispensary.com)"},
+                    )
+                    geo_resp.raise_for_status()
+                    geo_data = geo_resp.json()
+                    if geo_data:
+                        d_lat = float(geo_data[0]["lat"])
+                        d_lon = float(geo_data[0]["lon"])
+                        distance = _haversine_miles(HQ_LAT, HQ_LON, d_lat, d_lon)
+                        if distance > DELIVERY_RADIUS_MILES:
+                            print(f"[order] BLOCKED delivery order — address is {round(distance, 1)} miles from HQ (limit {DELIVERY_RADIUS_MILES})")
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"Sorry, your address is {round(distance, 1)} miles from our store. Local delivery is available within {DELIVERY_RADIUS_MILES} miles. Please select 'Ship To Me' instead.",
+                            )
+                    else:
+                        print(f"[order] WARNING: Could not geocode delivery address '{full_addr}' — allowing order to proceed")
+            except HTTPException:
+                raise
+            except Exception as geo_err:
+                print(f"[order] WARNING: Geocoding failed for delivery order — allowing order to proceed: {geo_err}")
+
         item_subtotal = sum(item.price * item.quantity for item in order.items)
         expected_fee = DELIVERY_FEE_DISCOUNTED if item_subtotal >= DELIVERY_DISCOUNT_THRESHOLD else DELIVERY_FEE_STANDARD
         if order.shipping_cost != expected_fee:
