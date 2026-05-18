@@ -10,6 +10,7 @@ import smtplib
 import asyncio
 import os
 import re
+import math
 from urllib.parse import quote as url_quote
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -67,7 +68,7 @@ class CreateOrderRequest(BaseModel):
     loyalty_reward_id: Optional[int] = None
     promo_code: Optional[str] = None
     shipping_service: str = ""
-    fulfillment_type: str = "shipping"  # "shipping", "pickup_west", "pickup_east"
+    fulfillment_type: str = "shipping"  # "shipping", "pickup_west", "pickup_east", "local_delivery"
 
 router = APIRouter(prefix="/api/ecommerce", tags=["ecommerce"])
 
@@ -83,6 +84,24 @@ WEST_MERCHANT_ID = os.environ.get("CLOVER_WEST_MERCHANT_ID", "")
 WEST_API_TOKEN = os.environ.get("CLOVER_WEST_API_TOKEN", "")
 EAST_MERCHANT_ID = os.environ.get("CLOVER_EAST_MERCHANT_ID", "")
 EAST_API_TOKEN = os.environ.get("CLOVER_EAST_API_TOKEN", "")
+
+# Local delivery constants
+HQ_LAT = 28.4786  # Spring Hill HQ latitude
+HQ_LON = -82.5277  # Spring Hill HQ longitude
+DELIVERY_RADIUS_MILES = 30
+DELIVERY_FEE_STANDARD = 1500  # $15.00 in cents
+DELIVERY_FEE_DISCOUNTED = 500  # $5.00 in cents
+DELIVERY_DISCOUNT_THRESHOLD = 15000  # $150.00 in cents — orders above this get $5 delivery
+
+
+def _haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Calculate distance in miles between two lat/lon points using Haversine formula."""
+    R = 3958.8  # Earth radius in miles
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
 
 # ── In-memory product cache ──────────────────────────────────────────────────
 _product_cache: dict = {}  # {"products": [...], "total": int, "categories": [...]}
@@ -1634,9 +1653,9 @@ async def create_order(
     clover_order_id = ""
     payment_status = "pending"
 
-    # Server-side enforcement: Block LeafLife items from pickup orders.
-    # LeafLife products ship from an out-of-state partner and are NEVER available for in-store pickup.
-    if order.fulfillment_type in ("pickup_west", "pickup_east"):
+    # Server-side enforcement: Block LeafLife items from pickup and local delivery orders.
+    # LeafLife products ship from an out-of-state partner and are NEVER available for in-store pickup or local delivery.
+    if order.fulfillment_type in ("pickup_west", "pickup_east", "local_delivery"):
         blocked_items = []
         for item in order.items:
             # LeafLife products (SKU starts with LF-) are shipping-only
@@ -1645,10 +1664,11 @@ async def create_order(
                 continue
         if blocked_items:
             names = ", ".join(blocked_items)
-            print(f"[order] BLOCKED pickup order containing shipping-only items: {names}")
+            method = "local delivery" if order.fulfillment_type == "local_delivery" else "in-store pickup"
+            print(f"[order] BLOCKED {method} order containing shipping-only items: {names}")
             raise HTTPException(
                 status_code=400,
-                detail=f"The following items are only available for shipping and cannot be picked up in store: {names}. Please switch to 'Ship To Me' to order these products.",
+                detail=f"The following items are only available for shipping and cannot be included in {method} orders: {names}. Please switch to 'Ship To Me' to order these products.",
             )
 
     # Server-side enforcement: Promo codes and loyalty rewards cannot be stacked together.
@@ -1744,6 +1764,45 @@ async def create_order(
             status_code=400,
             detail="Shipping cost is required for delivery orders. Please select a shipping rate and try again.",
         )
+
+    # Server-side enforcement: Local delivery orders must have the correct delivery fee
+    # and the address must be within the delivery radius.
+    if order.fulfillment_type == "local_delivery":
+        # Validate delivery radius server-side (prevent bypass of client-side check)
+        if order.shipping_address and order.shipping_address.address:
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as geo_client:
+                    full_addr = f"{order.shipping_address.address}, {order.shipping_address.city}, {order.shipping_address.state} {order.shipping_address.zip}"
+                    geo_resp = await geo_client.get(
+                        "https://nominatim.openstreetmap.org/search",
+                        params={"q": full_addr, "format": "json", "limit": "1"},
+                        headers={"Accept": "application/json", "User-Agent": "THD-Website/1.0 (support@thehempdispensary.com)"},
+                    )
+                    geo_resp.raise_for_status()
+                    geo_data = geo_resp.json()
+                    if geo_data:
+                        d_lat = float(geo_data[0]["lat"])
+                        d_lon = float(geo_data[0]["lon"])
+                        distance = _haversine_miles(HQ_LAT, HQ_LON, d_lat, d_lon)
+                        if distance > DELIVERY_RADIUS_MILES:
+                            print(f"[order] BLOCKED delivery order — address is {round(distance, 1)} miles from HQ (limit {DELIVERY_RADIUS_MILES})")
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"Sorry, your address is {round(distance, 1)} miles from our store. Local delivery is available within {DELIVERY_RADIUS_MILES} miles. Please select 'Ship To Me' instead.",
+                            )
+                    else:
+                        print(f"[order] WARNING: Could not geocode delivery address '{full_addr}' — allowing order to proceed")
+            except HTTPException:
+                raise
+            except Exception as geo_err:
+                print(f"[order] WARNING: Geocoding failed for delivery order — allowing order to proceed: {geo_err}")
+
+        item_subtotal = sum(item.price * item.quantity for item in order.items)
+        expected_fee = DELIVERY_FEE_DISCOUNTED if item_subtotal >= DELIVERY_DISCOUNT_THRESHOLD else DELIVERY_FEE_STANDARD
+        if order.shipping_cost != expected_fee:
+            print(f"[order] Correcting delivery fee: submitted={order.shipping_cost}, expected={expected_fee}")
+            order.shipping_cost = expected_fee
+            order.total = order.subtotal - order.discount - order.volume_discount - order.loyalty_discount + order.shipping_cost + order.tax
 
     # Real-time stock validation BEFORE charging the customer.
     # Prevents customers from ordering items that are out of stock (stale cache).
@@ -1987,6 +2046,8 @@ async def create_order(
                 loc_name = "West"
             elif order.fulfillment_type == "pickup_east":
                 loc_name = "East"
+            elif order.fulfillment_type == "local_delivery":
+                loc_name = "Local Delivery"
             elif order.fulfillment_type == "shipping":
                 loc_name = "Online / Shipping"
 
@@ -2046,6 +2107,8 @@ async def create_order(
                 loyalty_loc = "West"
             elif order.fulfillment_type == "pickup_east":
                 loyalty_loc = "East"
+            elif order.fulfillment_type == "local_delivery":
+                loyalty_loc = "Local Delivery"
             else:
                 loyalty_loc = "Online"
             update_cursor = await db.execute(
@@ -2321,6 +2384,7 @@ async def _send_order_emails(
             """
 
         is_pickup = order.fulfillment_type and order.fulfillment_type.startswith("pickup")
+        is_delivery = order.fulfillment_type == "local_delivery"
         if is_pickup:
             if order.fulfillment_type == "pickup_west":
                 shipping_label = "Pickup Location"
@@ -2328,12 +2392,21 @@ async def _send_order_emails(
             else:
                 shipping_label = "Pickup Location"
                 shipping_line = "The Hemp Dispensary — East<br>14312 Spring Hill Dr<br>Spring Hill, FL 34609"
+        elif is_delivery:
+            shipping_label = "Delivering To"
+            shipping_line = f"{order.shipping_address.address}"
+            if order.shipping_address.apartment:
+                shipping_line += f", {order.shipping_address.apartment}"
+            shipping_line += f"<br>{order.shipping_address.city}, {order.shipping_address.state} {order.shipping_address.zip}"
+            shipping_line += "<br><strong style='color: #059669;'>Estimated delivery within 42 hours</strong>"
         else:
             shipping_label = "Shipping To"
             shipping_line = f"{order.shipping_address.address}"
             if order.shipping_address.apartment:
                 shipping_line += f", {order.shipping_address.apartment}"
             shipping_line += f"<br>{order.shipping_address.city}, {order.shipping_address.state} {order.shipping_address.zip}"
+
+        cost_label = "Delivery Fee" if is_delivery else ("Pickup" if is_pickup else "Shipping")
 
         # --- Store notification email ---
         store_html = f"""
@@ -2396,7 +2469,7 @@ async def _send_order_emails(
                     {f'<tr><td style="padding: 8px 12px; color: #059669;">Volume Discount</td><td style="padding: 8px 12px; text-align: right; color: #059669;">-{_format_price(order.volume_discount)}</td></tr>' if order.volume_discount else ''}
                     {f'<tr><td style="padding: 8px 12px; color: #059669;">Loyalty Reward</td><td style="padding: 8px 12px; text-align: right; color: #059669;">-{_format_price(order.loyalty_discount)}</td></tr>' if order.loyalty_discount else ''}
                     <tr>
-                        <td style="padding: 8px 12px;">Shipping</td>
+                        <td style="padding: 8px 12px;">{cost_label}</td>
                         <td style="padding: 8px 12px; text-align: right;">{'Free' if order.shipping_cost == 0 else _format_price(order.shipping_cost)}</td>
                     </tr>
                     <tr>
@@ -2494,7 +2567,7 @@ async def _send_order_emails(
                     {f'<tr><td style="padding: 8px 12px; color: #059669;">Volume Discount</td><td style="padding: 8px 12px; text-align: right; color: #059669;">-{_format_price(order.volume_discount)}</td></tr>' if order.volume_discount else ''}
                     {f'<tr><td style="padding: 8px 12px; color: #059669;">Loyalty Reward</td><td style="padding: 8px 12px; text-align: right; color: #059669;">-{_format_price(order.loyalty_discount)}</td></tr>' if order.loyalty_discount else ''}
                     <tr>
-                        <td style="padding: 8px 12px;">Shipping</td>
+                        <td style="padding: 8px 12px;">{cost_label}</td>
                         <td style="padding: 8px 12px; text-align: right;">{'Free' if order.shipping_cost == 0 else _format_price(order.shipping_cost)}</td>
                     </tr>
                     <tr>
@@ -3397,6 +3470,51 @@ async def address_autocomplete(q: str):
             return results
     except Exception:
         return []
+
+
+# ─── Delivery Eligibility Check ────────────────────────────────────────
+@router.get("/delivery/check")
+async def check_delivery_eligibility(address: str, city: str, state: str, zip: str):
+    """Check if an address is within the local delivery radius (30 miles from HQ).
+    Returns delivery fee and eligibility status."""
+    full_address = f"{address}, {city}, {state} {zip}"
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={
+                    "q": full_address,
+                    "format": "json",
+                    "limit": "1",
+                },
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "THD-Website/1.0 (support@thehempdispensary.com)",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if not data:
+                return {"eligible": False, "reason": "Could not verify address. Please check your address and try again."}
+            lat = float(data[0]["lat"])
+            lon = float(data[0]["lon"])
+            distance = _haversine_miles(HQ_LAT, HQ_LON, lat, lon)
+            if distance > DELIVERY_RADIUS_MILES:
+                return {
+                    "eligible": False,
+                    "distance_miles": round(distance, 1),
+                    "reason": f"Sorry, your address is {round(distance, 1)} miles from our store. Local delivery is available within {DELIVERY_RADIUS_MILES} miles.",
+                }
+            return {
+                "eligible": True,
+                "distance_miles": round(distance, 1),
+                "fee_standard": DELIVERY_FEE_STANDARD,
+                "fee_discounted": DELIVERY_FEE_DISCOUNTED,
+                "discount_threshold": DELIVERY_DISCOUNT_THRESHOLD,
+            }
+    except Exception as e:
+        print(f"[delivery] Geocode error: {e}")
+        return {"eligible": False, "reason": "Could not verify delivery address. Please try again or select a different fulfillment method."}
 
 
 # ── Public Order Lookup (for customers) ─────────────────────────────────
