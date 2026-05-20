@@ -58,6 +58,7 @@ class CreateOrderRequest(BaseModel):
     subtotal: int = 0
     discount: int = 0
     volume_discount: int = 0
+    sale_discount: int = 0
     loyalty_discount: int = 0
     shipping_cost: int = 0
     tax: int = 0
@@ -1886,15 +1887,59 @@ async def create_order(
                             "unitQty": item.quantity * 1000,  # Clover uses millis for quantity
                         }
                         await client.post(line_item_url, headers=clover_order_headers, json=line_item_body)
+
+                    # Add discounts to the Clover order so its total matches the charge amount.
+                    # Without this, Clover may use the order total (sum of full-price line items)
+                    # instead of our specified charge amount, causing customers to be overcharged.
+                    total_discount = order.discount + order.volume_discount + order.loyalty_discount + order.sale_discount
+                    if total_discount > 0:
+                        discount_url = f"{clover_order_url}/{clover_order_id}/discounts"
+                        discount_parts = []
+                        if order.discount > 0:
+                            discount_parts.append(f"Promo -${order.discount/100:.2f}")
+                        if order.volume_discount > 0:
+                            discount_parts.append(f"Volume -${order.volume_discount/100:.2f}")
+                        if order.loyalty_discount > 0:
+                            discount_parts.append(f"Loyalty -${order.loyalty_discount/100:.2f}")
+                        if order.sale_discount > 0:
+                            discount_parts.append(f"Sale -${order.sale_discount/100:.2f}")
+                        discount_name = ", ".join(discount_parts) if discount_parts else "Online Discount"
+                        if len(discount_name) > 127:
+                            discount_name = discount_name[:124] + "..."
+                        discount_body = {
+                            "name": discount_name,
+                            "amount": -total_discount,  # Clover expects negative cents
+                        }
+                        disc_resp = await client.post(discount_url, headers=clover_order_headers, json=discount_body)
+                        if disc_resp.status_code == 200:
+                            print(f"[order] Added Clover order discount: {discount_name} ({-total_discount} cents)")
+                        else:
+                            print(f"[order] Failed to add Clover order discount: {disc_resp.status_code} {disc_resp.text}")
+
+                    # Add shipping/delivery fee as a line item if applicable
+                    if order.shipping_cost > 0:
+                        ship_line_url = f"{clover_order_url}/{clover_order_id}/line_items"
+                        ft = order.fulfillment_type or "shipping"
+                        ship_label = "Delivery Fee" if ft == "local_delivery" else f"Shipping ({order.shipping_service})" if order.shipping_service else "Shipping"
+                        ship_body = {"name": ship_label, "price": order.shipping_cost, "unitQty": 1000}
+                        await client.post(ship_line_url, headers=clover_order_headers, json=ship_body)
+
+                    # Add tax as a line item so Clover order total = charge amount
+                    if order.tax > 0:
+                        tax_line_url = f"{clover_order_url}/{clover_order_id}/line_items"
+                        tax_body = {"name": "Sales Tax", "price": order.tax, "unitQty": 1000}
+                        await client.post(tax_line_url, headers=clover_order_headers, json=tax_body)
+
                     # Associate charge with the Clover order
                     charge_data["orderId"] = clover_order_id
-                    print(f"[order] Created Clover order {clover_order_id} with {len(order.items)} line items")
+                    print(f"[order] Created Clover order {clover_order_id} with {len(order.items)} line items, discount={total_discount}, shipping={order.shipping_cost}, tax={order.tax}")
                 else:
                     print(f"[order] Failed to create Clover order: {order_resp.status_code} {order_resp.text}")
             except Exception as e:
                 print(f"[order] Clover order creation failed (charge will still proceed): {e}")
 
             try:
+                print(f"[order] Charging ${order.total/100:.2f} (subtotal=${order.subtotal/100:.2f} discount=${order.discount/100:.2f} vol_disc=${order.volume_discount/100:.2f} loyalty=${order.loyalty_discount/100:.2f} ship=${order.shipping_cost/100:.2f} tax=${order.tax/100:.2f}) orderId={charge_data.get('orderId', 'none')}")
                 resp = await client.post(
                     CLOVER_CHARGES_URL,
                     headers=charge_headers,
@@ -1905,6 +1950,7 @@ async def create_order(
                 if resp.status_code == 200 and charge_result.get("status") == "succeeded":
                     charge_id = charge_result.get("id", "")
                     payment_status = "paid"
+                    print(f"[order] Charge succeeded: id={charge_id} amount=${charge_result.get('amount', 0)/100:.2f}")
                 else:
                     raw_msg = charge_result.get("message") or charge_result.get("error", {}).get("message", "")
                     print(f"[order] Clover charge failed: status={resp.status_code} raw={raw_msg} result={charge_result}")
