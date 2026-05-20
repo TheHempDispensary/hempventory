@@ -1930,8 +1930,11 @@ async def create_order(
                         tax_body = {"name": "Sales Tax", "price": order.tax, "unitQty": 1000}
                         await client.post(tax_line_url, headers=clover_order_headers, json=tax_body)
 
-                    # Associate charge with the Clover order
-                    charge_data["orderId"] = clover_order_id
+                    # NOTE: Do NOT pass orderId to the charge. When orderId is present,
+                    # Clover overrides the charge amount with the Clover order total
+                    # (sum of line items), ignoring discounts. This caused customers to
+                    # be charged full price even when loyalty/promo discounts applied.
+                    # The Clover order is kept for record-keeping but not linked to payment.
                     print(f"[order] Created Clover order {clover_order_id} with {len(order.items)} line items, discount={total_discount}, shipping={order.shipping_cost}, tax={order.tax}")
                 else:
                     print(f"[order] Failed to create Clover order: {order_resp.status_code} {order_resp.text}")
@@ -1939,7 +1942,7 @@ async def create_order(
                 print(f"[order] Clover order creation failed (charge will still proceed): {e}")
 
             try:
-                print(f"[order] Charging ${order.total/100:.2f} (subtotal=${order.subtotal/100:.2f} discount=${order.discount/100:.2f} vol_disc=${order.volume_discount/100:.2f} loyalty=${order.loyalty_discount/100:.2f} ship=${order.shipping_cost/100:.2f} tax=${order.tax/100:.2f}) orderId={charge_data.get('orderId', 'none')}")
+                print(f"[order] Charging ${order.total/100:.2f} (subtotal=${order.subtotal/100:.2f} discount=${order.discount/100:.2f} vol_disc=${order.volume_discount/100:.2f} loyalty=${order.loyalty_discount/100:.2f} ship=${order.shipping_cost/100:.2f} tax=${order.tax/100:.2f})")
                 resp = await client.post(
                     CLOVER_CHARGES_URL,
                     headers=charge_headers,
