@@ -1982,77 +1982,19 @@ async def create_order(
     # Payment succeeded — create the order
     order_number = "HD-" + hex(int(time.time()))[2:].upper() + "-" + str(int(time.time() * 1000) % 10000)
 
-    # CRITICAL: DB save is wrapped in try/except so paid orders are NEVER lost silently.
-    # If the DB insert fails after payment, we log the full order details for manual recovery.
+    # CRITICAL: DB save with retry logic. SQLite can fail with "database is locked"
+    # when background sync tasks hold a write lock. We retry up to 3 times with backoff.
     order_id = 0
     db_save_ok = False
-    try:
-        cursor = await db.execute(
-            """INSERT INTO ecommerce_orders
-               (order_number, customer_first_name, customer_last_name, customer_email, customer_phone,
-                shipping_address, shipping_apartment, shipping_city, shipping_state, shipping_zip,
-                subtotal, discount, volume_discount, loyalty_discount, promo_code, shipping_cost, tax, total, notes, charge_id, payment_status, fulfillment_type, shipping_service, clover_order_id, source)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                order_number,
-                order.customer.first_name,
-                order.customer.last_name,
-                order.customer.email,
-                order.customer.phone,
-                order.shipping_address.address,
-                order.shipping_address.apartment,
-                order.shipping_address.city,
-                order.shipping_address.state,
-                order.shipping_address.zip,
-                order.subtotal,
-                order.discount,
-                order.volume_discount,
-                order.loyalty_discount,
-                order.promo_code or "",
-                order.shipping_cost,
-                order.tax,
-                order.total,
-                order.notes,
-                charge_id,
-                payment_status,
-                order.fulfillment_type,
-                order.shipping_service,
-                clover_order_id,
-                "website",
-            ),
-        )
-        order_id = cursor.lastrowid
-
-        for item in order.items:
-            await db.execute(
-                """INSERT INTO ecommerce_order_items (order_id, product_id, product_name, sku, price, quantity)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (order_id, item.product_id, item.name, item.sku, item.price, item.quantity),
-            )
-
-        await db.commit()
-        db_save_ok = True
-        print(f"[order] Order {order_number} saved to DB (id={order_id}, fulfillment={order.fulfillment_type}, total=${order.total/100:.2f})")
-    except Exception as db_err:
-        # CRITICAL ERROR: Payment was charged but order could not be saved to DB.
-        # Log EVERYTHING so the order can be manually recovered.
-        items_dump = "; ".join(f"{it.name} x{it.quantity} @${it.price/100:.2f} (SKU:{it.sku})" for it in order.items)
-        print(f"[ORDER LOST] DB SAVE FAILED for {order_number} — PAYMENT WAS CHARGED!")
-        print(f"[ORDER LOST] charge_id={charge_id} total=${order.total/100:.2f} fulfillment={order.fulfillment_type}")
-        print(f"[ORDER LOST] customer={order.customer.first_name} {order.customer.last_name} email={order.customer.email} phone={order.customer.phone}")
-        print(f"[ORDER LOST] items: {items_dump}")
-        print(f"[ORDER LOST] DB error: {db_err}")
-        # Try a simplified insert using only columns from the original CREATE TABLE schema.
-        # Excludes migration-added columns (discount, promo_code, volume_discount,
-        # loyalty_discount, shipping_service, fulfillment_type) so this can still succeed
-        # if a migration hasn't run yet — which is the most likely reason the primary insert failed.
+    max_retries = 3
+    for attempt in range(max_retries):
         try:
-            cursor2 = await db.execute(
+            cursor = await db.execute(
                 """INSERT INTO ecommerce_orders
                    (order_number, customer_first_name, customer_last_name, customer_email, customer_phone,
                     shipping_address, shipping_apartment, shipping_city, shipping_state, shipping_zip,
-                    subtotal, shipping_cost, tax, total, notes, charge_id, payment_status)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    subtotal, discount, volume_discount, loyalty_discount, promo_code, shipping_cost, tax, total, notes, charge_id, payment_status, fulfillment_type, shipping_service, clover_order_id, source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     order_number,
                     order.customer.first_name,
@@ -2065,26 +2007,91 @@ async def create_order(
                     order.shipping_address.state,
                     order.shipping_address.zip,
                     order.subtotal,
+                    order.discount,
+                    order.volume_discount,
+                    order.loyalty_discount,
+                    order.promo_code or "",
                     order.shipping_cost,
                     order.tax,
                     order.total,
                     order.notes,
                     charge_id,
                     payment_status,
+                    order.fulfillment_type,
+                    order.shipping_service,
+                    clover_order_id,
+                    "website",
                 ),
             )
-            order_id = cursor2.lastrowid
+            order_id = cursor.lastrowid
+
             for item in order.items:
                 await db.execute(
                     """INSERT INTO ecommerce_order_items (order_id, product_id, product_name, sku, price, quantity)
                        VALUES (?, ?, ?, ?, ?, ?)""",
                     (order_id, item.product_id, item.name, item.sku, item.price, item.quantity),
                 )
+
             await db.commit()
             db_save_ok = True
-            print(f"[ORDER RECOVERED] Saved with simplified insert: {order_number} (id={order_id})")
-        except Exception as retry_err:
-            print(f"[ORDER LOST] Retry also failed: {retry_err}")
+            if attempt > 0:
+                print(f"[order] Order {order_number} saved to DB after {attempt + 1} attempts (id={order_id})")
+            else:
+                print(f"[order] Order {order_number} saved to DB (id={order_id}, fulfillment={order.fulfillment_type}, total=${order.total/100:.2f})")
+            break
+        except Exception as db_err:
+            if attempt < max_retries - 1:
+                wait_secs = 0.5 * (2 ** attempt)
+                print(f"[order] DB save attempt {attempt + 1} failed for {order_number}: {db_err} — retrying in {wait_secs}s")
+                await asyncio.sleep(wait_secs)
+                continue
+            # All retries exhausted — log full order details for manual recovery
+            items_dump = "; ".join(f"{it.name} x{it.quantity} @${it.price/100:.2f} (SKU:{it.sku})" for it in order.items)
+            print(f"[ORDER LOST] DB SAVE FAILED for {order_number} — PAYMENT WAS CHARGED!")
+            print(f"[ORDER LOST] charge_id={charge_id} total=${order.total/100:.2f} fulfillment={order.fulfillment_type}")
+            print(f"[ORDER LOST] customer={order.customer.first_name} {order.customer.last_name} email={order.customer.email} phone={order.customer.phone}")
+            print(f"[ORDER LOST] items: {items_dump}")
+            print(f"[ORDER LOST] DB error: {db_err}")
+            # Try a simplified insert as last resort
+            try:
+                cursor2 = await db.execute(
+                    """INSERT INTO ecommerce_orders
+                       (order_number, customer_first_name, customer_last_name, customer_email, customer_phone,
+                        shipping_address, shipping_apartment, shipping_city, shipping_state, shipping_zip,
+                        subtotal, shipping_cost, tax, total, notes, charge_id, payment_status)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        order_number,
+                        order.customer.first_name,
+                        order.customer.last_name,
+                        order.customer.email,
+                        order.customer.phone,
+                        order.shipping_address.address,
+                        order.shipping_address.apartment,
+                        order.shipping_address.city,
+                        order.shipping_address.state,
+                        order.shipping_address.zip,
+                        order.subtotal,
+                        order.shipping_cost,
+                        order.tax,
+                        order.total,
+                        order.notes,
+                        charge_id,
+                        payment_status,
+                    ),
+                )
+                order_id = cursor2.lastrowid
+                for item in order.items:
+                    await db.execute(
+                        """INSERT INTO ecommerce_order_items (order_id, product_id, product_name, sku, price, quantity)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        (order_id, item.product_id, item.name, item.sku, item.price, item.quantity),
+                    )
+                await db.commit()
+                db_save_ok = True
+                print(f"[ORDER RECOVERED] Saved with simplified insert: {order_number} (id={order_id})")
+            except Exception as retry_err:
+                print(f"[ORDER LOST] Retry also failed: {retry_err}")
 
     # Log discount usage if a promo code was used
     if db_save_ok and order.promo_code:
