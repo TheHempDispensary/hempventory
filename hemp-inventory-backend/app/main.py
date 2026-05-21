@@ -20,11 +20,19 @@ import aiosqlite
 scheduler = AsyncIOScheduler()
 
 
+async def _connect_db():
+    """Create a database connection with WAL mode and busy timeout."""
+    db = await aiosqlite.connect(DB_PATH)
+    db.row_factory = aiosqlite.Row
+    await db.execute("PRAGMA busy_timeout = 5000")
+    await db.execute("PRAGMA journal_mode = WAL")
+    return db
+
+
 async def _scheduled_inventory_sync():
     """Background job: sync inventory from Clover and cache it."""
     try:
-        db = await aiosqlite.connect(DB_PATH)
-        db.row_factory = aiosqlite.Row
+        db = await _connect_db()
         try:
             await _do_sync(db)
             print("[auto-sync] Inventory synced successfully")
@@ -37,8 +45,7 @@ async def _scheduled_inventory_sync():
 async def _scheduled_loyalty_sync():
     """Background job: import new Clover customers and sync POS orders for loyalty points."""
     try:
-        db = await aiosqlite.connect(DB_PATH)
-        db.row_factory = aiosqlite.Row
+        db = await _connect_db()
         try:
             result = await _do_bulk_import_customers(db)
             print(f"[auto-sync] Loyalty customers imported: {result.get('imported', 0)} new, {result.get('skipped', 0)} skipped")
@@ -54,8 +61,7 @@ async def _scheduled_refund_sync():
     """Background job: sync refunds from Clover."""
     from app.routers.inventory_router import sync_refunds as _sync_refunds_endpoint
     try:
-        db = await aiosqlite.connect(DB_PATH)
-        db.row_factory = aiosqlite.Row
+        db = await _connect_db()
         try:
             from app.routers.inventory_router import _get_locations
             from app.clover_client import CloverClient
@@ -109,8 +115,7 @@ async def _scheduled_refund_sync():
 async def _scheduled_clover_order_sync():
     """Background job: import online orders placed through Clover's native ordering system."""
     try:
-        db = await aiosqlite.connect(DB_PATH)
-        db.row_factory = aiosqlite.Row
+        db = await _connect_db()
         try:
             result = await _sync_clover_online_orders(db)
             synced = result.get('synced', 0)
