@@ -1698,14 +1698,21 @@ async def create_order(
         # Server-side verification: look up the loyalty customer and verify they have
         # enough points for the selected reward before accepting the order.
         if order.loyalty_reward_id and order.loyalty_number:
-            phone = order.loyalty_number.strip().replace("-", "").replace(" ", "").replace("(", "").replace(")", "")
-            lcur = await db.execute(
-                "SELECT id, points_balance, first_name, last_name FROM loyalty_customers WHERE phone = ?",
-                (phone,),
-            )
+            loyalty_identifier = order.loyalty_number.strip()
+            if "@" in loyalty_identifier:
+                lcur = await db.execute(
+                    "SELECT id, points_balance, first_name, last_name FROM loyalty_customers WHERE email = ?",
+                    (loyalty_identifier,),
+                )
+            else:
+                phone = loyalty_identifier.replace("-", "").replace(" ", "").replace("(", "").replace(")", "")
+                lcur = await db.execute(
+                    "SELECT id, points_balance, first_name, last_name FROM loyalty_customers WHERE phone = ?",
+                    (phone,),
+                )
             lrow = await lcur.fetchone()
             if not lrow:
-                print(f"[order] Loyalty customer not found for phone {phone}, zeroing loyalty discount")
+                print(f"[order] Loyalty customer not found for '{loyalty_identifier}', zeroing loyalty discount")
                 order.loyalty_discount = 0
                 order.total = order.subtotal - order.discount - order.volume_discount + order.shipping_cost + order.tax
             else:
