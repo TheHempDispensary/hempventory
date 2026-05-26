@@ -361,6 +361,7 @@ export const myClockOut = () => api.post("/api/timeclock/my-clock-out");
 export const getMyClockStatus = () => api.get("/api/timeclock/my-status");
 export const getMyEntries = (params?: { start_date?: string; end_date?: string }) =>
   api.get("/api/timeclock/my-entries", { params });
+export const getMyPaystubs = () => api.get("/api/timeclock/my-paystubs");
 
 // Seed employees
 export const seedEmployees = () => api.post("/api/timeclock/seed-employees");

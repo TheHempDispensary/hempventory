@@ -142,7 +142,8 @@ export default function TimeClock() {
   // Timesheet filters (datetime-local values for time-precise filtering)
   const [startDate, setStartDate] = useState(() => {
     const d = new Date();
-    d.setDate(d.getDate() - d.getDay()); // Start of current week (Sunday)
+    const dow = d.getDay(); // 0=Sun
+    d.setDate(d.getDate() - (dow === 0 ? 6 : dow - 1)); // Start of current week (Monday)
     return d.toISOString().split("T")[0];
   });
   const [endDate, setEndDate] = useState(() => new Date().toISOString().split("T")[0]);
@@ -194,6 +195,7 @@ export default function TimeClock() {
   const [hoursView, setHoursView] = useState<"week" | "month">("week");
   const [weeklyHours, setWeeklyHours] = useState<ScheduleHours[]>([]);
   const [monthlyHours, setMonthlyHours] = useState<ScheduleHours[]>([]);
+  const [weekOffset, setWeekOffset] = useState(0);
   const [editingNoteId, setEditingNoteId] = useState<number | null>(null);
   const [editNoteText, setEditNoteText] = useState("");
 
@@ -504,6 +506,16 @@ export default function TimeClock() {
     }
   }, [getVisibleDateRange]);
 
+  const getWeekRange = useCallback((offset: number) => {
+    const now = new Date();
+    const dow = now.getDay(); // 0=Sun
+    const weekStart = new Date(now);
+    weekStart.setDate(now.getDate() - (dow === 0 ? 6 : dow - 1) + (offset * 7));
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekStart.getDate() + 6);
+    return { start: weekStart, end: weekEnd };
+  }, []);
+
   const loadHours = useCallback(async () => {
     try {
       // Load monthly hours (full visible range)
@@ -511,12 +523,8 @@ export default function TimeClock() {
       const monthRes = await getScheduleHours({ start_date: range.start_date, end_date: range.end_date });
       setMonthlyHours(monthRes.data);
 
-      // Load weekly hours (current week: Sunday to Saturday)
-      const now = new Date();
-      const weekStart = new Date(now);
-      weekStart.setDate(now.getDate() - now.getDay());
-      const weekEnd = new Date(weekStart);
-      weekEnd.setDate(weekStart.getDate() + 6);
+      // Load weekly hours (Monday to Sunday, offset-aware)
+      const { start: weekStart, end: weekEnd } = getWeekRange(weekOffset);
       const weekRes = await getScheduleHours({
         start_date: weekStart.toISOString().split("T")[0],
         end_date: weekEnd.toISOString().split("T")[0],
@@ -525,7 +533,7 @@ export default function TimeClock() {
     } catch (err) {
       console.error("Error loading schedule hours:", err);
     }
-  }, [getVisibleDateRange]);
+  }, [getVisibleDateRange, getWeekRange, weekOffset]);
 
   const loadShiftRequests = useCallback(async () => {
     try {
@@ -1597,15 +1605,34 @@ export default function TimeClock() {
                 <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
                   <div className="p-3 border-b border-gray-200 bg-emerald-50 flex items-center justify-between">
                     <h3 className="font-semibold text-emerald-800 text-sm flex items-center gap-2"><Clock className="w-4 h-4" />Scheduled Hours Summary</h3>
-                    <div className="flex items-center gap-1 bg-emerald-100 rounded-lg p-0.5">
-                      <button onClick={() => setHoursView("week")}
-                        className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${hoursView === "week" ? "bg-white text-emerald-800 shadow-sm" : "text-emerald-600 hover:text-emerald-800"}`}>
-                        This Week
-                      </button>
-                      <button onClick={() => setHoursView("month")}
-                        className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${hoursView === "month" ? "bg-white text-emerald-800 shadow-sm" : "text-emerald-600 hover:text-emerald-800"}`}>
-                        This Month
-                      </button>
+                    <div className="flex items-center gap-2">
+                      {hoursView === "week" && (
+                        <div className="flex items-center gap-1">
+                          <button onClick={() => setWeekOffset(weekOffset - 1)} className="p-1 rounded hover:bg-emerald-100 text-emerald-700" title="Previous week">
+                            <ChevronLeft className="w-4 h-4" />
+                          </button>
+                          <button onClick={() => setWeekOffset(0)} className={`px-2 py-0.5 text-xs font-medium rounded transition-colors ${weekOffset === 0 ? "text-emerald-800 font-bold" : "text-emerald-600 hover:text-emerald-800 hover:bg-emerald-100"}`}>
+                            {(() => {
+                              const { start, end } = getWeekRange(weekOffset);
+                              const fmt = (d: Date) => d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+                              return `${fmt(start)} – ${fmt(end)}`;
+                            })()}
+                          </button>
+                          <button onClick={() => setWeekOffset(weekOffset + 1)} className="p-1 rounded hover:bg-emerald-100 text-emerald-700" title="Next week">
+                            <ChevronRight className="w-4 h-4" />
+                          </button>
+                        </div>
+                      )}
+                      <div className="flex items-center gap-1 bg-emerald-100 rounded-lg p-0.5">
+                        <button onClick={() => { setHoursView("week"); setWeekOffset(0); }}
+                          className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${hoursView === "week" ? "bg-white text-emerald-800 shadow-sm" : "text-emerald-600 hover:text-emerald-800"}`}>
+                          Week
+                        </button>
+                        <button onClick={() => setHoursView("month")}
+                          className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${hoursView === "month" ? "bg-white text-emerald-800 shadow-sm" : "text-emerald-600 hover:text-emerald-800"}`}>
+                          Month
+                        </button>
+                      </div>
                     </div>
                   </div>
                   <div className="p-3">

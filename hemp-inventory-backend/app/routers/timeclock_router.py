@@ -950,6 +950,74 @@ async def get_my_entries(
     ]
 
 
+@router.get("/my-paystubs")
+async def get_my_paystubs(
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Get the logged-in employee's weekly pay summaries (Mon-Sun weeks)."""
+    if user.get("role") != "employee":
+        raise HTTPException(status_code=403, detail="Employee access only")
+    emp_id = user.get("employee_id")
+
+    # Get pay rate
+    emp_cur = await db.execute("SELECT pay_rate FROM employees WHERE id = ?", (emp_id,))
+    emp_row = await emp_cur.fetchone()
+    pay_rate = emp_row[0] if emp_row and emp_row[0] else 0
+
+    # Get all completed time entries
+    cursor = await db.execute(
+        """SELECT t.clock_in, t.clock_out, t.hours, COALESCE(t.tips, 0) as tips
+           FROM time_entries t WHERE t.employee_id = ? AND t.clock_out IS NOT NULL
+           ORDER BY t.clock_in DESC""",
+        (emp_id,),
+    )
+    rows = await cursor.fetchall()
+
+    from datetime import datetime, timedelta
+
+    weeks: dict = {}
+    for r in rows:
+        clock_in_str = r[0]
+        hours = r[2] or 0
+        tips = r[3] or 0
+        try:
+            dt = datetime.fromisoformat(clock_in_str.replace("Z", "+00:00"))
+        except Exception:
+            continue
+        # Monday-based week start
+        dow = dt.weekday()  # 0=Mon
+        week_start = (dt - timedelta(days=dow)).strftime("%Y-%m-%d")
+        week_end = (dt - timedelta(days=dow) + timedelta(days=6)).strftime("%Y-%m-%d")
+        key = week_start
+
+        if key not in weeks:
+            weeks[key] = {"week_start": week_start, "week_end": week_end, "total_hours": 0, "total_tips": 0, "entry_count": 0}
+        weeks[key]["total_hours"] += hours
+        weeks[key]["total_tips"] += tips
+        weeks[key]["entry_count"] += 1
+
+    result = []
+    for key in sorted(weeks.keys(), reverse=True):
+        w = weeks[key]
+        hrs = round(w["total_hours"], 2)
+        ot_hours = max(hrs - 40, 0)
+        reg_hours = hrs - ot_hours
+        gross = round(reg_hours * pay_rate + ot_hours * pay_rate * 1.5 + w["total_tips"], 2)
+        result.append({
+            "week_start": w["week_start"],
+            "week_end": w["week_end"],
+            "total_hours": hrs,
+            "regular_hours": round(reg_hours, 2),
+            "overtime_hours": round(ot_hours, 2),
+            "total_tips": round(w["total_tips"], 2),
+            "pay_rate": pay_rate,
+            "gross_pay": gross,
+            "entry_count": w["entry_count"],
+        })
+    return result
+
+
 # ---------- Schedules (Admin) ----------
 
 DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
