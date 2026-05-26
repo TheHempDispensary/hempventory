@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, Fragment } from "react";
-import { getMyClockStatus, myClockIn, myClockOut, getMyEntries, getMySchedule, getMyTimeOff, submitMyTimeOff, cancelMyTimeOff, getMyScheduleNotes, getMyProfile, getShiftRequests, createShiftPickupRequest, createShiftTradeRequest, deleteShiftRequest, getSchedules } from "../lib/api";
-import { ChevronLeft, ChevronRight, CalendarOff, MessageSquare, Plus, Trash2, RefreshCw } from "lucide-react";
+import { getMyClockStatus, myClockIn, myClockOut, getMyEntries, getMySchedule, getMyTimeOff, submitMyTimeOff, cancelMyTimeOff, getMyScheduleNotes, getMyProfile, getShiftRequests, createShiftPickupRequest, createShiftTradeRequest, deleteShiftRequest, getSchedules, getMyPaystubs } from "../lib/api";
+import { ChevronLeft, ChevronRight, CalendarOff, MessageSquare, Plus, Trash2, RefreshCw, DollarSign } from "lucide-react";
 
 interface ClockStatus {
   clocked_in: boolean;
@@ -49,7 +49,7 @@ export default function EmployeeTimeClock() {
   const [actionLoading, setActionLoading] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
-  const [tab, setTab] = useState<"clock" | "timesheet" | "schedule">("clock");
+  const [tab, setTab] = useState<"clock" | "timesheet" | "schedule" | "paystubs">("clock");
   const [schedule, setSchedule] = useState<ScheduleItem[]>([]);
   const [scheduleLoading, setScheduleLoading] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -102,6 +102,31 @@ export default function EmployeeTimeClock() {
   const [tradeMyScheduleId, setTradeMyScheduleId] = useState(0);
   const [tradeTargetScheduleId, setTradeTargetScheduleId] = useState(0);
   const [tradeMessage, setTradeMessage] = useState("");
+
+  interface PaystubItem {
+    week_start: string;
+    week_end: string;
+    total_hours: number;
+    regular_hours: number;
+    overtime_hours: number;
+    total_tips: number;
+    pay_rate: number;
+    gross_pay: number;
+    entry_count: number;
+  }
+  const [paystubs, setPaystubs] = useState<PaystubItem[]>([]);
+  const [paystubsLoading, setPaystubsLoading] = useState(false);
+
+  const fetchPaystubs = useCallback(async () => {
+    setPaystubsLoading(true);
+    try {
+      const res = await getMyPaystubs();
+      setPaystubs(res.data);
+    } catch {
+      // ignore
+    }
+    setPaystubsLoading(false);
+  }, []);
 
   const fetchProfile = useCallback(async () => {
     try {
@@ -210,7 +235,10 @@ export default function EmployeeTimeClock() {
       fetchMyShiftRequests();
       fetchAllSchedules();
     }
-  }, [tab, fetchSchedule, fetchTimeOff, fetchNotes, fetchMyShiftRequests, fetchAllSchedules]);
+    if (tab === "paystubs") {
+      fetchPaystubs();
+    }
+  }, [tab, fetchSchedule, fetchTimeOff, fetchNotes, fetchMyShiftRequests, fetchAllSchedules, fetchPaystubs]);
 
   // Live timer for elapsed time when clocked in
   useEffect(() => {
@@ -351,13 +379,15 @@ export default function EmployeeTimeClock() {
   const totalHoursRaw = entries.reduce((sum, e) => sum + (e.hours || 0), 0);
   const totalHours = Math.floor(totalHoursRaw * 100) / 100;
 
-  // Group entries by week (Sunday–Saturday) for weekly subtotals
+  // Group entries by week (Monday–Sunday) for weekly subtotals
   const getWeekStart = (iso: string) => {
     const d = new Date(iso);
     // Convert to EST for consistent week boundaries
     const est = new Date(d.toLocaleString("en-US", { timeZone: "America/New_York" }));
     const day = est.getDay(); // 0=Sun
-    est.setDate(est.getDate() - day);
+    // Monday-based week: Sunday (0) goes back 6 days, Mon (1) stays, Tue (2) goes back 1, etc.
+    const offset = day === 0 ? 6 : day - 1;
+    est.setDate(est.getDate() - offset);
     est.setHours(0, 0, 0, 0);
     return `${est.getFullYear()}-${String(est.getMonth() + 1).padStart(2, "0")}-${String(est.getDate()).padStart(2, "0")}`;
   };
@@ -454,6 +484,14 @@ export default function EmployeeTimeClock() {
           }`}
         >
           My Schedule
+        </button>
+        <button
+          onClick={() => setTab("paystubs")}
+          className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition-colors ${
+            tab === "paystubs" ? "bg-white shadow text-green-700" : "text-gray-500 hover:text-gray-700"
+          }`}
+        >
+          My Pay
         </button>
       </div>
 
@@ -875,6 +913,56 @@ export default function EmployeeTimeClock() {
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Paystubs Tab */}
+      {tab === "paystubs" && (
+        <div className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
+          <div className="p-4 border-b border-gray-200 bg-gray-50 flex items-center justify-between">
+            <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2"><DollarSign className="w-5 h-5 text-green-600" />My Pay Summary</h2>
+            <span className="text-xs text-gray-500">Weekly breakdown (Mon–Sun)</span>
+          </div>
+          {paystubsLoading ? (
+            <div className="p-8 text-center text-gray-400">Loading...</div>
+          ) : paystubs.length === 0 ? (
+            <div className="p-8 text-center text-gray-400">No pay records yet</div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead className="bg-gray-50 border-b border-gray-200">
+                  <tr>
+                    <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Week</th>
+                    <th className="text-right px-4 py-3 text-xs font-medium text-gray-500 uppercase">Hours</th>
+                    <th className="text-right px-4 py-3 text-xs font-medium text-gray-500 uppercase">OT</th>
+                    <th className="text-right px-4 py-3 text-xs font-medium text-gray-500 uppercase">Rate</th>
+                    <th className="text-right px-4 py-3 text-xs font-medium text-gray-500 uppercase">Tips</th>
+                    <th className="text-right px-4 py-3 text-xs font-medium text-gray-500 uppercase">Gross Pay</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {paystubs.map((p) => {
+                    const ws = new Date(p.week_start + "T12:00:00");
+                    const we = new Date(p.week_end + "T12:00:00");
+                    const fmt = (d: Date) => d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+                    return (
+                      <tr key={p.week_start} className="hover:bg-gray-50">
+                        <td className="px-4 py-3 text-sm text-gray-900">{fmt(ws)} – {fmt(we)}</td>
+                        <td className="px-4 py-3 text-sm text-right text-gray-900 font-medium">{p.total_hours}</td>
+                        <td className="px-4 py-3 text-sm text-right">{p.overtime_hours > 0 ? <span className="text-orange-600 font-medium">{p.overtime_hours}</span> : <span className="text-gray-400">0</span>}</td>
+                        <td className="px-4 py-3 text-sm text-right text-gray-600">${p.pay_rate.toFixed(2)}/hr</td>
+                        <td className="px-4 py-3 text-sm text-right">{p.total_tips > 0 ? <span className="text-green-600">${p.total_tips.toFixed(2)}</span> : <span className="text-gray-400">$0</span>}</td>
+                        <td className="px-4 py-3 text-sm text-right font-bold text-green-700">${p.gross_pay.toFixed(2)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <div className="p-3 border-t border-gray-200 bg-gray-50 text-xs text-gray-500">
+            Gross pay is an estimate before taxes and deductions. Overtime is calculated at 1.5x for hours over 40/week.
+          </div>
         </div>
       )}
     </div>
