@@ -16,6 +16,7 @@ import OnlineOrders from "./components/OnlineOrders";
 import Discounts from "./components/Discounts";
 import ProductScraper from "./components/ProductScraper";
 import Conversations from "./components/Conversations";
+import SmartPar from "./components/SmartPar";
 
 // Detect which domain we're on to separate login state
 function getAppMode(): "timeclock" | "inventory" {
@@ -185,6 +186,8 @@ function App() {
         return <ProductScraper onNavigate={setCurrentPage} />;
       case "conversations":
         return <Conversations />;
+      case "smart-par":
+        return <SmartPar />;
       default:
         return <Inventory />;
     }

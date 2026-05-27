@@ -2946,3 +2946,184 @@ async def get_inventory_changes(
     total = (await cursor2.fetchone())[0]
 
     return {"changes": changes, "total": total}
+
+
+# --------------- Smart PAR (sales-velocity reorder calculator) ---------------
+
+_smart_par_cache: dict = {"data": None, "updated_at": 0}
+_SMART_PAR_TTL = 3600  # 1 hour cache
+
+
+async def _fetch_all_clover_orders(client: CloverClient) -> list[dict]:
+    """Paginate through all Clover orders with lineItems expanded."""
+    all_orders: list[dict] = []
+    offset = 0
+    limit = 100
+    while True:
+        try:
+            data = await client.get_orders(
+                limit=limit,
+                offset=offset,
+                expand="lineItems",
+            )
+        except Exception as e:
+            print(f"Error fetching Clover orders at offset {offset}: {e}")
+            break
+        elements = data.get("elements", [])
+        all_orders.extend(elements)
+        if len(elements) < limit:
+            break
+        offset += limit
+        await asyncio.sleep(0.3)
+    return all_orders
+
+
+def _normalise_name(name: str) -> str:
+    """Lowercase, collapse whitespace, strip for fuzzy matching."""
+    return " ".join(name.lower().split())
+
+
+@router.get("/smart-par")
+async def smart_par(
+    months: int = 3,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Calculate recommended reorder quantities based on historical sales velocity.
+
+    Query params:
+        months – supply window (default 3).  Accepts 1-24.
+    """
+    months = max(1, min(months, 24))
+
+    # ----- 1. Get current inventory (from cache or fresh sync) -----
+    inv = await _do_sync(db)
+    items_list = inv.get("items", [])
+
+    # Build lookup: normalised name -> item info
+    product_lookup: dict[str, dict] = {}
+    for item in items_list:
+        norm = _normalise_name(item["name"])
+        total_stock = sum(
+            loc_data.get("stock", 0)
+            for loc_data in item.get("locations", {}).values()
+        )
+        product_lookup[norm] = {
+            "name": item["name"],
+            "sku": item["sku"],
+            "categories": item.get("categories", []),
+            "price": item.get("price", 0),
+            "total_stock": total_stock,
+            "locations": {
+                loc_name: loc_data.get("stock", 0)
+                for loc_name, loc_data in item.get("locations", {}).items()
+            },
+        }
+
+    # ----- 2. Gather sales data (check cache first) -----
+    now = time.time()
+    if _smart_par_cache["data"] and (now - _smart_par_cache["updated_at"]) < _SMART_PAR_TTL:
+        sales_by_product = _smart_par_cache["data"]["sales_by_product"]
+        earliest_ts = _smart_par_cache["data"]["earliest_ts"]
+        latest_ts = _smart_par_cache["data"]["latest_ts"]
+    else:
+        sales_by_product: dict[str, int] = {}  # normalised name -> total units
+        earliest_ts = float("inf")
+        latest_ts = 0.0
+
+        # 2a. Clover POS orders (all locations)
+        locations = await _get_locations(db)
+        for loc in locations:
+            merchant_id, api_token = loc[2], loc[3]
+            client = CloverClient(merchant_id, api_token)
+            orders = await _fetch_all_clover_orders(client)
+            for order in orders:
+                order_ts = order.get("createdTime", 0) / 1000  # ms -> s
+                if order_ts > 0:
+                    earliest_ts = min(earliest_ts, order_ts)
+                    latest_ts = max(latest_ts, order_ts)
+                line_items = (order.get("lineItems") or {}).get("elements", [])
+                for li in line_items:
+                    li_name = " ".join((li.get("name") or "").split())
+                    if not li_name:
+                        continue
+                    raw_qty = li.get("unitQty", 1000)
+                    qty = max(round(raw_qty / 1000), 1)
+                    norm = _normalise_name(li_name)
+                    sales_by_product[norm] = sales_by_product.get(norm, 0) + qty
+
+        # 2b. Ecommerce orders (website)
+        cursor = await db.execute(
+            """SELECT oi.product_name, oi.quantity, eo.created_at
+               FROM ecommerce_order_items oi
+               JOIN ecommerce_orders eo ON oi.order_id = eo.id
+               WHERE eo.status NOT IN ('cancelled', 'refunded')"""
+        )
+        rows = await cursor.fetchall()
+        for row in rows:
+            p_name, qty, created_at = row[0], row[1], row[2]
+            if not p_name:
+                continue
+            norm = _normalise_name(p_name)
+            sales_by_product[norm] = sales_by_product.get(norm, 0) + (qty or 1)
+            # Parse created_at for date range
+            if created_at:
+                try:
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+                    ts = dt.timestamp()
+                    earliest_ts = min(earliest_ts, ts)
+                    latest_ts = max(latest_ts, ts)
+                except Exception:
+                    pass
+
+        _smart_par_cache["data"] = {
+            "sales_by_product": sales_by_product,
+            "earliest_ts": earliest_ts,
+            "latest_ts": latest_ts,
+        }
+        _smart_par_cache["updated_at"] = now
+
+    # ----- 3. Compute velocity & PAR -----
+    if earliest_ts >= latest_ts or earliest_ts == float("inf"):
+        days_of_data = 1
+    else:
+        days_of_data = max((latest_ts - earliest_ts) / 86400, 1)
+
+    SAFETY_BUFFER = 1.2
+    results: list[dict] = []
+
+    for item in items_list:
+        norm = _normalise_name(item["name"])
+        units_sold = sales_by_product.get(norm, 0)
+        units_per_day = units_sold / days_of_data
+        units_per_month = units_per_day * 30.44  # avg days/month
+        par_level = round(units_per_month * months * SAFETY_BUFFER)
+
+        total_stock = sum(
+            loc_data.get("stock", 0)
+            for loc_data in item.get("locations", {}).values()
+        )
+
+        results.append({
+            "name": item["name"],
+            "sku": item["sku"],
+            "categories": item.get("categories", []),
+            "price": item.get("price", 0) / 100,  # cents -> dollars
+            "total_stock": total_stock,
+            "units_sold": units_sold,
+            "units_per_month": round(units_per_month, 1),
+            "par_level": par_level,
+            "order_qty": max(par_level - total_stock, 0),
+        })
+
+    return {
+        "products": results,
+        "meta": {
+            "months": months,
+            "days_of_data": round(days_of_data, 1),
+            "safety_buffer": SAFETY_BUFFER,
+            "total_products": len(results),
+            "total_units_sold": sum(r["units_sold"] for r in results),
+        },
+    }
