@@ -394,7 +394,9 @@ async def sync_inventory(
     db: aiosqlite.Connection = Depends(get_db),
 ):
     """Pull latest inventory from all Clover locations (full sync)."""
-    return await _do_sync(db)
+    result = await _do_sync(db)
+    invalidate_product_cache()
+    return result
 
 
 @router.get("/cached")
@@ -1038,6 +1040,7 @@ async def bulk_stock_update(
             results.append({"sku": upd.sku, "location": loc_name, "status": "error", "error": str(e)})
 
     await _invalidate_cache()
+    invalidate_product_cache()
     return {"results": results, "total_updated": sum(1 for r in results if r.get("status") == "updated")}
 
 
