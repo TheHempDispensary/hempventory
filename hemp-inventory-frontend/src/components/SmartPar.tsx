@@ -17,7 +17,6 @@ interface ParProduct {
 interface ParMeta {
   months: number;
   days_of_data: number;
-  safety_buffer: number;
   total_products: number;
   total_units_sold: number;
 }
@@ -216,7 +215,7 @@ export default function SmartPar() {
 
       {/* Meta Info */}
       {meta && !loading && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
             <p className="text-xs text-gray-500 uppercase tracking-wider">Products</p>
             <p className="text-2xl font-bold text-gray-900 mt-1">{meta.total_products}</p>
@@ -229,10 +228,7 @@ export default function SmartPar() {
             <p className="text-xs text-gray-500 uppercase tracking-wider">Days of Data</p>
             <p className="text-2xl font-bold text-gray-900 mt-1">{meta.days_of_data}</p>
           </div>
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-            <p className="text-xs text-gray-500 uppercase tracking-wider">Safety Buffer</p>
-            <p className="text-2xl font-bold text-gray-900 mt-1">{Math.round((meta.safety_buffer - 1) * 100)}%</p>
-          </div>
+
         </div>
       )}
 
@@ -347,7 +343,7 @@ export default function SmartPar() {
                 {sorted.map((p, i) => (
                   <tr key={`${p.sku}-${i}`} className="hover:bg-gray-50 transition-colors">
                     <td className="px-4 py-3">
-                      <div className="font-medium text-gray-900 max-w-xs truncate" title={p.name}>
+                      <div className="font-medium text-gray-900" title={p.name}>
                         {p.name}
                       </div>
                       <div className="text-xs text-gray-400">{p.sku}</div>
