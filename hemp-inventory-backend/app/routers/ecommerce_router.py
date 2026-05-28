@@ -109,7 +109,7 @@ _product_cache: dict = {}  # {"products": [...], "total": int, "categories": [..
 _product_cache_json: bytes = b""  # Pre-serialized JSON for the full /products response
 _cache_timestamp: float = 0.0
 _refresh_in_progress: bool = False
-CACHE_TTL = 600  # 10 minutes
+CACHE_TTL = 300  # 5 minutes
 
 
 DISK_CACHE_PATH = os.environ.get("DB_PATH", "").replace("app.db", "product_cache.json") or "/tmp/product_cache.json"
