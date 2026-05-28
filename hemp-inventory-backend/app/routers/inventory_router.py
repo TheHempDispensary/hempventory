@@ -3090,7 +3090,6 @@ async def smart_par(
     else:
         days_of_data = max((latest_ts - earliest_ts) / 86400, 1)
 
-    SAFETY_BUFFER = 1.2
     results: list[dict] = []
 
     for item in items_list:
@@ -3098,7 +3097,7 @@ async def smart_par(
         units_sold = sales_by_product.get(norm, 0)
         units_per_day = units_sold / days_of_data
         units_per_month = units_per_day * 30.44  # avg days/month
-        par_level = round(units_per_month * months * SAFETY_BUFFER)
+        par_level = round(units_per_month * months)
 
         total_stock = sum(
             loc_data.get("stock", 0)
@@ -3122,7 +3121,7 @@ async def smart_par(
         "meta": {
             "months": months,
             "days_of_data": round(days_of_data, 1),
-            "safety_buffer": SAFETY_BUFFER,
+            "safety_buffer": 1.0,
             "total_products": len(results),
             "total_units_sold": sum(r["units_sold"] for r in results),
         },
