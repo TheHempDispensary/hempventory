@@ -1612,6 +1612,18 @@ async def _check_realtime_stock(items: List[OrderItem], fulfillment_type: str) -
                     local_item = _find_item_at_location(location_lookup, clover_item_id, item.sku, item.name)
                     if local_item:
                         clover_item_id = local_item["id"]
+                        # Use the already-fetched itemStock data from resolve call
+                        # to avoid discrepancies with separate /item_stocks API call
+                        stock_info = local_item.get("itemStock", {})
+                        current_qty = stock_info.get("quantity", 0) if stock_info else 0
+                        if current_qty < item.quantity:
+                            out_of_stock.append(
+                                f"{item.name} (only {current_qty} in stock at {location_label}, you requested {item.quantity})"
+                            )
+                            print(f"[stock-check] {item.name} INSUFFICIENT at {location_label}: {current_qty} < {item.quantity}")
+                        else:
+                            print(f"[stock-check] {item.name} OK at {location_label}: {current_qty} >= {item.quantity}")
+                        continue
                     else:
                         print(f"[stock-check] Could not find '{item.name}' (SKU: {item.sku}) at {location_label}")
                         continue
