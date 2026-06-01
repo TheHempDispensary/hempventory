@@ -678,6 +678,23 @@ async def init_db():
             )
         """)
 
+        # Wholesale bundles table (grouped wholesale deals with flavor/variant selection)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS wholesale_bundles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                min_quantity INTEGER NOT NULL DEFAULT 1,
+                price_cents INTEGER NOT NULL DEFAULT 0,
+                product_skus TEXT NOT NULL DEFAULT '[]',
+                category_filter TEXT DEFAULT '',
+                is_active INTEGER DEFAULT 1,
+                image_url TEXT DEFAULT '',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Seed FIRST10 if promo_codes table is empty
         cursor = await db.execute("SELECT COUNT(*) FROM promo_codes")
         count = (await cursor.fetchone())[0]

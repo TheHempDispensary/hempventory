@@ -613,6 +613,34 @@ export const updateVolumeDiscount = (id: number, data: {
 export const deleteVolumeDiscount = (id: number) =>
   api.delete(`/api/ecommerce/volume-discounts/${id}`);
 
+// Wholesale Bundles
+export const getWholesaleBundles = () => api.get("/api/ecommerce/wholesale-bundles");
+
+export const createWholesaleBundle = (data: {
+  name: string;
+  description?: string;
+  min_quantity: number;
+  price_cents: number;
+  product_skus: string[];
+  category_filter?: string;
+  is_active?: boolean;
+  image_url?: string;
+}) => api.post("/api/ecommerce/wholesale-bundles", data);
+
+export const updateWholesaleBundle = (id: number, data: {
+  name?: string;
+  description?: string;
+  min_quantity?: number;
+  price_cents?: number;
+  product_skus?: string[];
+  category_filter?: string;
+  is_active?: boolean;
+  image_url?: string;
+}) => api.put(`/api/ecommerce/wholesale-bundles/${id}`, data);
+
+export const deleteWholesaleBundle = (id: number) =>
+  api.delete(`/api/ecommerce/wholesale-bundles/${id}`);
+
 // Product Attributes (effect & strength for online store)
 export const getProductAttributes = () => api.get("/api/inventory/product-attributes");
 

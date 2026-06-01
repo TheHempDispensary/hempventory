@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { Percent, Plus, Trash2, Edit3, ToggleLeft, ToggleRight, RefreshCw, AlertTriangle, Save, X, Calendar, ShoppingBag, Ban, Cloud, Tag, Package, Search, Eye, Clock, User, MapPin, Download } from "lucide-react";
-import { getPromos, createPromo, updatePromo, deletePromo, getVolumeDiscounts, createVolumeDiscount, updateVolumeDiscount, deleteVolumeDiscount, getDiscountUsage } from "../lib/api";
+import { getPromos, createPromo, updatePromo, deletePromo, getVolumeDiscounts, createVolumeDiscount, updateVolumeDiscount, deleteVolumeDiscount, getDiscountUsage, getWholesaleBundles, createWholesaleBundle, updateWholesaleBundle, deleteWholesaleBundle } from "../lib/api";
 import api from "../lib/api";
 
 interface PromoCode {
@@ -71,7 +71,31 @@ export default function Discounts() {
   const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
-  const [activeTab, setActiveTab] = useState<"promo" | "direct" | "volume">("promo");
+  const [activeTab, setActiveTab] = useState<"promo" | "direct" | "volume" | "bundle">("promo");
+
+  // Wholesale bundles
+  interface WholesaleBundle {
+    id: number;
+    name: string;
+    description: string;
+    min_quantity: number;
+    price_cents: number;
+    product_skus: string[];
+    category_filter: string;
+    is_active: boolean;
+    image_url: string;
+    created_at: string;
+    updated_at: string;
+  }
+  const [bundles, setBundles] = useState<WholesaleBundle[]>([]);
+  const [bundleName, setBundleName] = useState("");
+  const [bundleDesc, setBundleDesc] = useState("");
+  const [bundleMinQty, setBundleMinQty] = useState("1");
+  const [bundlePrice, setBundlePrice] = useState("");
+  const [bundleSkus, setBundleSkus] = useState<string[]>([]);
+  const [bundleProductSearch, setBundleProductSearch] = useState("");
+  const [bundleEditingId, setBundleEditingId] = useState<number | null>(null);
+  const [bundleDeleteConfirmId, setBundleDeleteConfirmId] = useState<number | null>(null);
 
   const [products, setProducts] = useState<CloverItem[]>([]);
   const [productSearch, setProductSearch] = useState("");
@@ -125,9 +149,10 @@ export default function Discounts() {
   const loadPromos = async () => {
     setLoading(true);
     try {
-      const [promoRes, vdRes] = await Promise.all([getPromos(), getVolumeDiscounts()]);
+      const [promoRes, vdRes, bundleRes] = await Promise.all([getPromos(), getVolumeDiscounts(), getWholesaleBundles()]);
       setPromos(promoRes.data);
       setVolumeDiscounts(vdRes.data);
+      setBundles(bundleRes.data || []);
     } catch {
       setError("Failed to load discounts");
     } finally {
@@ -166,6 +191,74 @@ export default function Discounts() {
     setVdDiscountType("fixed_total"); setVdDiscountValue(""); setVdLabel("");
     setVdSyncToClover(false); setVdEditingId(null);
   };
+
+  const resetBundleForm = () => {
+    setBundleName(""); setBundleDesc(""); setBundleMinQty("1"); setBundlePrice("");
+    setBundleSkus([]); setBundleProductSearch(""); setBundleEditingId(null);
+  };
+
+  const handleCreateBundle = async () => {
+    if (!bundleName.trim()) { setError("Bundle name is required"); return; }
+    const qty = parseInt(bundleMinQty) || 0;
+    if (qty < 1) { setError("Minimum quantity must be at least 1"); return; }
+    const price = Math.round((parseFloat(bundlePrice) || 0) * 100);
+    if (price <= 0) { setError("Price must be greater than 0"); return; }
+    if (bundleSkus.length === 0) { setError("Please add at least one product"); return; }
+    setError("");
+    try {
+      await createWholesaleBundle({
+        name: bundleName.trim(),
+        description: bundleDesc,
+        min_quantity: qty,
+        price_cents: price,
+        product_skus: bundleSkus,
+      });
+      setSuccess("Wholesale bundle created!"); setShowCreate(false); resetBundleForm();
+      setTimeout(() => setSuccess(""), 3000);
+      loadPromos();
+    } catch { setError("Failed to create wholesale bundle"); }
+  };
+
+  const startBundleEdit = (b: WholesaleBundle) => {
+    setBundleEditingId(b.id);
+    setBundleName(b.name);
+    setBundleDesc(b.description || "");
+    setBundleMinQty(String(b.min_quantity));
+    setBundlePrice((b.price_cents / 100).toFixed(2));
+    setBundleSkus(b.product_skus || []);
+  };
+
+  const handleUpdateBundle = async (id: number) => {
+    const qty = parseInt(bundleMinQty) || 0;
+    if (qty < 1) { setError("Minimum quantity must be at least 1"); return; }
+    const price = Math.round((parseFloat(bundlePrice) || 0) * 100);
+    if (price <= 0) { setError("Price must be greater than 0"); return; }
+    setError("");
+    try {
+      await updateWholesaleBundle(id, {
+        name: bundleName.trim(),
+        description: bundleDesc,
+        min_quantity: qty,
+        price_cents: price,
+        product_skus: bundleSkus,
+      });
+      setBundleEditingId(null); resetBundleForm();
+      setSuccess("Wholesale bundle updated!"); setTimeout(() => setSuccess(""), 3000);
+      loadPromos();
+    } catch { setError("Failed to update wholesale bundle"); }
+  };
+
+  const handleToggleBundleActive = async (b: WholesaleBundle) => {
+    try { await updateWholesaleBundle(b.id, { is_active: !b.is_active }); loadPromos(); }
+    catch { setError("Failed to update bundle"); }
+  };
+
+  const handleDeleteBundle = async (id: number) => {
+    try { await deleteWholesaleBundle(id); setBundleDeleteConfirmId(null); setSuccess("Bundle deleted"); setTimeout(() => setSuccess(""), 3000); loadPromos(); }
+    catch { setError("Failed to delete bundle"); }
+  };
+
+  const bundleFilteredProducts = products.filter((p) => bundleProductSearch.length >= 2 && p.name.toLowerCase().includes(bundleProductSearch.toLowerCase()) && !bundleSkus.includes(p.sku || p.id));
 
   const handleCreateVolumeDiscount = async () => {
     if (!vdSelectedProduct) { setError("Please select a product"); return; }
@@ -468,6 +561,10 @@ export default function Discounts() {
               className={"px-4 py-2 rounded-lg text-sm font-medium border transition-colors " + (activeTab === "volume" ? "bg-amber-600 text-white border-amber-600" : "bg-white text-gray-700 border-gray-300 hover:bg-gray-50")}>
               <Package className="w-4 h-4 inline mr-1" /> Volume Discount
             </button>
+            <button onClick={() => setActiveTab("bundle")}
+              className={"px-4 py-2 rounded-lg text-sm font-medium border transition-colors " + (activeTab === "bundle" ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-700 border-gray-300 hover:bg-gray-50")}>
+              <Package className="w-4 h-4 inline mr-1" /> Wholesale Bundle
+            </button>
           </div>
           {activeTab === "volume" && (
             <div>
@@ -551,7 +648,76 @@ export default function Discounts() {
               </div>
             </div>
           )}
-          {activeTab !== "volume" && (<>
+          {activeTab === "bundle" && (
+            <div>
+              <p className="text-xs text-gray-500 mb-4 -mt-2">Wholesale bundles group multiple products into one deal on the Bulk Bargains page. Customers pick flavors/variants to fill the minimum quantity.</p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="md:col-span-2">
+                  <label className="text-sm font-medium text-gray-700 block mb-1">Bundle Name</label>
+                  <input type="text" value={bundleName} onChange={(e) => setBundleName(e.target.value)}
+                    placeholder='e.g. "Vape Cartridges"' className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500" />
+                </div>
+                <div className="md:col-span-2">
+                  <label className="text-sm font-medium text-gray-700 block mb-1">Description (optional)</label>
+                  <input type="text" value={bundleDesc} onChange={(e) => setBundleDesc(e.target.value)}
+                    placeholder='e.g. "Mix and match your favorite flavors"' className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500" />
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-gray-700 block mb-1">Minimum Quantity (total across all flavors)</label>
+                  <input type="number" min="1" value={bundleMinQty} onChange={(e) => setBundleMinQty(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500" />
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-gray-700 block mb-1">Total Price ($)</label>
+                  <input type="number" step="0.01" value={bundlePrice} onChange={(e) => setBundlePrice(e.target.value)}
+                    placeholder="1000.00" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500" />
+                </div>
+                <div className="md:col-span-2">
+                  <label className="text-sm font-medium text-gray-700 block mb-1">Products in Bundle ({bundleSkus.length} selected)</label>
+                  {bundleSkus.length > 0 && (
+                    <div className="flex flex-wrap gap-2 mb-2">
+                      {bundleSkus.map((sku) => {
+                        const p = products.find((pr) => (pr.sku || pr.id) === sku);
+                        return (
+                          <span key={sku} className="inline-flex items-center gap-1 px-2 py-1 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-800">
+                            {p ? p.name : sku}
+                            <button onClick={() => setBundleSkus((prev) => prev.filter((s) => s !== sku))} className="text-red-400 hover:text-red-600"><X className="w-3 h-3" /></button>
+                          </span>
+                        );
+                      })}
+                    </div>
+                  )}
+                  <div className="relative">
+                    <div className="flex items-center gap-2 border border-gray-300 rounded-lg px-3 py-2">
+                      <Search className="w-4 h-4 text-gray-400" />
+                      <input type="text" value={bundleProductSearch} onChange={(e) => setBundleProductSearch(e.target.value)}
+                        placeholder="Search products to add..." className="flex-1 text-sm outline-none" />
+                    </div>
+                    {bundleProductSearch.length >= 2 && bundleFilteredProducts.length > 0 && (
+                      <div className="absolute z-10 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto">
+                        {bundleFilteredProducts.slice(0, 20).map((p) => (
+                          <button key={p.id + p.name} onClick={() => { setBundleSkus((prev) => [...prev, p.sku || p.id]); setBundleProductSearch(""); }}
+                            className="w-full text-left px-3 py-2 text-sm hover:bg-blue-50 border-b border-gray-100 last:border-b-0">
+                            <span className="font-medium">{p.name}</span>
+                            {p.sku && <span className="text-xs text-gray-500 ml-2">({p.sku})</span>}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <div className="mt-4 flex gap-2">
+                <button onClick={handleCreateBundle}
+                  className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm font-medium">
+                  <Plus className="w-4 h-4" /> Create Wholesale Bundle
+                </button>
+                <button onClick={() => { setShowCreate(false); resetBundleForm(); }}
+                  className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm font-medium">Cancel</button>
+              </div>
+            </div>
+          )}
+          {activeTab !== "volume" && activeTab !== "bundle" && (<>
           {newIsDirectDiscount && (
             <p className="text-xs text-gray-500 mb-4 -mt-2">Direct discounts are applied automatically to selected products. No promo code needed.</p>
           )}
@@ -974,6 +1140,105 @@ export default function Discounts() {
                     {vd.customer_label && <span className="text-gray-700 font-medium">{vd.customer_label}</span>}
                     {vd.clover_discount_id && <span className="text-blue-600"><Cloud className="w-3 h-3 inline" /> Clover synced</span>}
                     <span className="text-gray-400">Created: {formatDate(vd.created_at)}</span>
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {/* Wholesale Bundles List */}
+      {bundles.length > 0 && (
+        <div className="bg-white rounded-lg border border-gray-200 p-6">
+          <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+            <Package className="w-5 h-5 text-blue-600" /> Wholesale Bundles
+            <span className="text-sm font-normal text-gray-500">({bundles.length})</span>
+          </h3>
+          {bundles.map((b) => (
+            <div key={b.id} className="border border-gray-200 rounded-lg p-4 mb-3 last:mb-0">
+              {bundleEditingId === b.id ? (
+                <div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+                    <div className="md:col-span-2">
+                      <input type="text" value={bundleName} onChange={(e) => setBundleName(e.target.value)}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" placeholder="Bundle name" />
+                    </div>
+                    <div>
+                      <input type="number" min="1" value={bundleMinQty} onChange={(e) => setBundleMinQty(e.target.value)}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" placeholder="Min qty" />
+                    </div>
+                    <div>
+                      <input type="number" step="0.01" value={bundlePrice} onChange={(e) => setBundlePrice(e.target.value)}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" placeholder="Price ($)" />
+                    </div>
+                    <div className="md:col-span-2">
+                      <label className="text-xs text-gray-500 block mb-1">Products ({bundleSkus.length})</label>
+                      {bundleSkus.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mb-2">
+                          {bundleSkus.map((sku) => {
+                            const p = products.find((pr) => (pr.sku || pr.id) === sku);
+                            return (
+                              <span key={sku} className="inline-flex items-center gap-1 px-2 py-0.5 bg-blue-50 border border-blue-200 rounded text-xs text-blue-800">
+                                {p ? p.name : sku}
+                                <button onClick={() => setBundleSkus((prev) => prev.filter((s) => s !== sku))} className="text-red-400 hover:text-red-600"><X className="w-3 h-3" /></button>
+                              </span>
+                            );
+                          })}
+                        </div>
+                      )}
+                      <div className="relative">
+                        <input type="text" value={bundleProductSearch} onChange={(e) => setBundleProductSearch(e.target.value)}
+                          placeholder="Search to add products..." className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm" />
+                        {bundleProductSearch.length >= 2 && bundleFilteredProducts.length > 0 && (
+                          <div className="absolute z-10 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-36 overflow-y-auto">
+                            {bundleFilteredProducts.slice(0, 15).map((p) => (
+                              <button key={p.id} onClick={() => { setBundleSkus((prev) => [...prev, p.sku || p.id]); setBundleProductSearch(""); }}
+                                className="w-full text-left px-3 py-1.5 text-sm hover:bg-blue-50 border-b border-gray-100 last:border-b-0">{p.name}</button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={() => handleUpdateBundle(b.id)} className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700">
+                      <Save className="w-3 h-3" /> Save
+                    </button>
+                    <button onClick={() => { setBundleEditingId(null); resetBundleForm(); }} className="px-3 py-1.5 bg-gray-100 text-gray-700 rounded-lg text-sm hover:bg-gray-200">Cancel</button>
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <span className={`inline-block w-2.5 h-2.5 rounded-full ${b.is_active ? "bg-green-500" : "bg-gray-300"}`}></span>
+                      <div>
+                        <h4 className="font-semibold text-gray-900">{b.name}</h4>
+                        <p className="text-sm text-gray-600">{b.min_quantity} units for ${(b.price_cents / 100).toFixed(2)} — {b.product_skus.length} product{b.product_skus.length !== 1 ? "s" : ""}</p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <button onClick={() => handleToggleBundleActive(b)} className="p-1.5 rounded-lg hover:bg-gray-100" title={b.is_active ? "Deactivate" : "Activate"}>
+                        {b.is_active ? <ToggleRight className="w-5 h-5 text-green-600" /> : <ToggleLeft className="w-5 h-5 text-gray-400" />}
+                      </button>
+                      <button onClick={() => startBundleEdit(b)} className="p-1.5 text-blue-600 hover:bg-blue-50 rounded-lg"><Edit3 className="w-4 h-4" /></button>
+                      {bundleDeleteConfirmId === b.id ? (
+                        <div className="flex items-center gap-1">
+                          <button onClick={() => handleDeleteBundle(b.id)} className="px-2 py-1 text-xs bg-red-600 text-white rounded hover:bg-red-700">Delete</button>
+                          <button onClick={() => setBundleDeleteConfirmId(null)} className="px-2 py-1 text-xs bg-gray-100 text-gray-600 rounded hover:bg-gray-200">Cancel</button>
+                        </div>
+                      ) : (
+                        <button onClick={() => setBundleDeleteConfirmId(b.id)} className="p-1.5 text-red-600 hover:bg-red-50 rounded-lg"><Trash2 className="w-4 h-4" /></button>
+                      )}
+                    </div>
+                  </div>
+                  {b.description && <p className="text-xs text-gray-500 mt-1 ml-5">{b.description}</p>}
+                  <div className="mt-2 ml-5 flex flex-wrap gap-1">
+                    {b.product_skus.slice(0, 8).map((sku) => {
+                      const p = products.find((pr) => (pr.sku || pr.id) === sku);
+                      return <span key={sku} className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded">{p ? p.name : sku}</span>;
+                    })}
+                    {b.product_skus.length > 8 && <span className="text-xs text-gray-400">+{b.product_skus.length - 8} more</span>}
                   </div>
                 </div>
               )}
