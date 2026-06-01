@@ -4185,3 +4185,117 @@ async def update_wholesale_inquiry(inquiry_id: int, body: dict, db: aiosqlite.Co
     )
     await db.commit()
     return {"status": "updated"}
+
+
+# ─── Wholesale Bundles ───────────────────────────────────────────────
+
+class WholesaleBundleCreateRequest(BaseModel):
+    name: str
+    description: str = ""
+    min_quantity: int = 1
+    price_cents: int = 0
+    product_skus: List[str] = []
+    category_filter: str = ""
+    is_active: bool = True
+    image_url: str = ""
+
+
+class WholesaleBundleUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    min_quantity: Optional[int] = None
+    price_cents: Optional[int] = None
+    product_skus: Optional[List[str]] = None
+    category_filter: Optional[str] = None
+    is_active: Optional[bool] = None
+    image_url: Optional[str] = None
+
+
+@router.get("/wholesale-bundles")
+async def list_wholesale_bundles(db: aiosqlite.Connection = Depends(get_db)):
+    """Admin: List all wholesale bundles."""
+    cursor = await db.execute("SELECT * FROM wholesale_bundles ORDER BY created_at DESC")
+    rows = await cursor.fetchall()
+    results = []
+    for r in rows:
+        d = dict(r)
+        d["product_skus"] = json.loads(d["product_skus"]) if d.get("product_skus") else []
+        results.append(d)
+    return results
+
+
+@router.get("/wholesale-bundles/active")
+async def list_active_wholesale_bundles(db: aiosqlite.Connection = Depends(get_db)):
+    """Public: List active wholesale bundles (for website)."""
+    cursor = await db.execute("SELECT * FROM wholesale_bundles WHERE is_active = 1")
+    rows = await cursor.fetchall()
+    results = []
+    for r in rows:
+        d = dict(r)
+        d["product_skus"] = json.loads(d["product_skus"]) if d.get("product_skus") else []
+        results.append(d)
+    return results
+
+
+@router.post("/wholesale-bundles")
+async def create_wholesale_bundle(body: WholesaleBundleCreateRequest, db: aiosqlite.Connection = Depends(get_db)):
+    """Admin: Create a new wholesale bundle."""
+    if not body.name:
+        raise HTTPException(status_code=400, detail="Bundle name is required")
+    skus_json = json.dumps(body.product_skus)
+    cursor = await db.execute(
+        """INSERT INTO wholesale_bundles (name, description, min_quantity, price_cents, product_skus, category_filter, is_active, image_url)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (body.name, body.description, body.min_quantity, body.price_cents, skus_json,
+         body.category_filter, 1 if body.is_active else 0, body.image_url),
+    )
+    await db.commit()
+    return {"id": cursor.lastrowid, "status": "created"}
+
+
+@router.put("/wholesale-bundles/{bundle_id}")
+async def update_wholesale_bundle(bundle_id: int, body: WholesaleBundleUpdateRequest, db: aiosqlite.Connection = Depends(get_db)):
+    """Admin: Update a wholesale bundle."""
+    updates = []
+    params: list = []
+    if body.name is not None:
+        updates.append("name = ?")
+        params.append(body.name)
+    if body.description is not None:
+        updates.append("description = ?")
+        params.append(body.description)
+    if body.min_quantity is not None:
+        updates.append("min_quantity = ?")
+        params.append(body.min_quantity)
+    if body.price_cents is not None:
+        updates.append("price_cents = ?")
+        params.append(body.price_cents)
+    if body.product_skus is not None:
+        updates.append("product_skus = ?")
+        params.append(json.dumps(body.product_skus))
+    if body.category_filter is not None:
+        updates.append("category_filter = ?")
+        params.append(body.category_filter)
+    if body.is_active is not None:
+        updates.append("is_active = ?")
+        params.append(1 if body.is_active else 0)
+    if body.image_url is not None:
+        updates.append("image_url = ?")
+        params.append(body.image_url)
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    params.append(bundle_id)
+    await db.execute(
+        f"UPDATE wholesale_bundles SET {', '.join(updates)}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        params,
+    )
+    await db.commit()
+    return {"status": "updated"}
+
+
+@router.delete("/wholesale-bundles/{bundle_id}")
+async def delete_wholesale_bundle(bundle_id: int, db: aiosqlite.Connection = Depends(get_db)):
+    """Admin: Delete a wholesale bundle."""
+    await db.execute("DELETE FROM wholesale_bundles WHERE id = ?", (bundle_id,))
+    await db.commit()
+    return {"status": "deleted"}
