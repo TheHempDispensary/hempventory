@@ -11,6 +11,7 @@ import asyncio
 import os
 import re
 import math
+import html as html_mod
 from urllib.parse import quote as url_quote
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -4066,7 +4067,14 @@ async def create_wholesale_inquiry(body: WholesaleInquiryRequest, db: aiosqlite.
     await db.commit()
     inquiry_id = cursor.lastrowid
 
-    # Build and send email notification to store
+    # Build and send email notification to store — escape all user inputs
+    esc = html_mod.escape
+    safe_name = esc(body.customer_name)
+    safe_biz = esc(body.business_name)
+    safe_email = esc(body.email)
+    safe_phone = esc(body.phone)
+    safe_msg = esc(body.message)
+
     items_rows = ""
     total_value = 0
     for item in body.items:
@@ -4074,7 +4082,7 @@ async def create_wholesale_inquiry(body: WholesaleInquiryRequest, db: aiosqlite.
         total_value += line_total
         items_rows += f"""
         <tr>
-            <td style="padding:8px 12px;border-bottom:1px solid #eee;">{item.product_name}</td>
+            <td style="padding:8px 12px;border-bottom:1px solid #eee;">{esc(item.product_name)}</td>
             <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:center;">{item.quantity}</td>
             <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right;">${item.unit_price / 100:.2f}</td>
             <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right;">${item.wholesale_price / 100:.2f}</td>
@@ -4089,10 +4097,10 @@ async def create_wholesale_inquiry(body: WholesaleInquiryRequest, db: aiosqlite.
         <div style="padding:20px;background:#fff;">
             <h2 style="color:#231F20;margin-top:0;">Customer Information</h2>
             <table style="width:100%;margin-bottom:20px;">
-                <tr><td style="padding:4px 0;color:#666;">Name:</td><td style="padding:4px 0;font-weight:bold;">{body.customer_name}</td></tr>
-                {"<tr><td style='padding:4px 0;color:#666;'>Business:</td><td style='padding:4px 0;font-weight:bold;'>" + body.business_name + "</td></tr>" if body.business_name else ""}
-                <tr><td style="padding:4px 0;color:#666;">Email:</td><td style="padding:4px 0;"><a href="mailto:{body.email}">{body.email}</a></td></tr>
-                {"<tr><td style='padding:4px 0;color:#666;'>Phone:</td><td style='padding:4px 0;'><a href='tel:" + body.phone + "'>" + body.phone + "</a></td></tr>" if body.phone else ""}
+                <tr><td style="padding:4px 0;color:#666;">Name:</td><td style="padding:4px 0;font-weight:bold;">{safe_name}</td></tr>
+                {"<tr><td style='padding:4px 0;color:#666;'>Business:</td><td style='padding:4px 0;font-weight:bold;'>" + safe_biz + "</td></tr>" if body.business_name else ""}
+                <tr><td style="padding:4px 0;color:#666;">Email:</td><td style="padding:4px 0;"><a href="mailto:{safe_email}">{safe_email}</a></td></tr>
+                {"<tr><td style='padding:4px 0;color:#666;'>Phone:</td><td style='padding:4px 0;'><a href='tel:" + safe_phone + "'>" + safe_phone + "</a></td></tr>" if body.phone else ""}
             </table>
 
             <h2 style="color:#231F20;">Requested Items</h2>
@@ -4115,10 +4123,10 @@ async def create_wholesale_inquiry(body: WholesaleInquiryRequest, db: aiosqlite.
                 </tfoot>
             </table>
 
-            {"<h2 style='color:#231F20;'>Message</h2><p style='background:#f9f9f9;padding:12px;border-radius:8px;'>" + body.message + "</p>" if body.message else ""}
+            {"<h2 style='color:#231F20;'>Message</h2><p style='background:#f9f9f9;padding:12px;border-radius:8px;'>" + safe_msg + "</p>" if body.message else ""}
 
             <div style="margin-top:20px;padding:16px;background:#B3D335;border-radius:8px;text-align:center;">
-                <p style="margin:0;color:#231F20;font-weight:bold;">Reply to this customer at <a href="mailto:{body.email}">{body.email}</a> with an invoice.</p>
+                <p style="margin:0;color:#231F20;font-weight:bold;">Reply to this customer at <a href="mailto:{safe_email}">{safe_email}</a> with an invoice.</p>
             </div>
         </div>
         <div style="background:#231F20;padding:12px;text-align:center;">
@@ -4128,7 +4136,7 @@ async def create_wholesale_inquiry(body: WholesaleInquiryRequest, db: aiosqlite.
 
     try:
         smtp_settings = await _get_smtp_settings(db)
-        subject = f"Wholesale Inquiry #{inquiry_id} — {body.customer_name}" + (f" ({body.business_name})" if body.business_name else "")
+        subject = f"Wholesale Inquiry #{inquiry_id} — {safe_name}" + (f" ({safe_biz})" if body.business_name else "")
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, _send_smtp_email, smtp_settings, STORE_EMAIL, subject, html_body)
     except Exception as e:
