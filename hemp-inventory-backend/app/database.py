@@ -661,6 +661,23 @@ async def init_db():
             )
         """)
 
+        # Wholesale inquiries table (invoice-based wholesale orders)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS wholesale_inquiries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                customer_name TEXT NOT NULL,
+                business_name TEXT,
+                email TEXT NOT NULL,
+                phone TEXT,
+                items TEXT NOT NULL,
+                message TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                admin_notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Seed FIRST10 if promo_codes table is empty
         cursor = await db.execute("SELECT COUNT(*) FROM promo_codes")
         count = (await cursor.fetchone())[0]

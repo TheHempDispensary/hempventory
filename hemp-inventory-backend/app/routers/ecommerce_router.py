@@ -11,6 +11,7 @@ import asyncio
 import os
 import re
 import math
+import html as html_mod
 from urllib.parse import quote as url_quote
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -4027,3 +4028,152 @@ async def _send_clover_order_notification(
 
     except Exception as e:
         print(f"[clover-sync] Email error for {order_number}: {e}")
+
+
+# ─── Wholesale Inquiries ────────────────────────────────────────────
+
+class WholesaleInquiryItem(BaseModel):
+    product_name: str
+    sku: str = ""
+    quantity: int
+    unit_price: int = 0  # cents
+    wholesale_price: int = 0  # cents
+
+
+class WholesaleInquiryRequest(BaseModel):
+    customer_name: str
+    business_name: str = ""
+    email: str
+    phone: str = ""
+    items: List[WholesaleInquiryItem]
+    message: str = ""
+
+
+@router.post("/wholesale-inquiries")
+async def create_wholesale_inquiry(body: WholesaleInquiryRequest, db: aiosqlite.Connection = Depends(get_db)):
+    """Public: Submit a wholesale inquiry (stores in DB and sends email notification)."""
+    if not body.customer_name or not body.email:
+        raise HTTPException(status_code=400, detail="Name and email are required")
+    if not body.items or len(body.items) == 0:
+        raise HTTPException(status_code=400, detail="At least one item is required")
+
+    items_json = json.dumps([item.model_dump() for item in body.items])
+
+    cursor = await db.execute(
+        """INSERT INTO wholesale_inquiries (customer_name, business_name, email, phone, items, message, status)
+           VALUES (?, ?, ?, ?, ?, ?, 'pending')""",
+        (body.customer_name, body.business_name, body.email, body.phone, items_json, body.message),
+    )
+    await db.commit()
+    inquiry_id = cursor.lastrowid
+
+    # Build and send email notification to store — escape all user inputs
+    esc = html_mod.escape
+    safe_name = esc(body.customer_name)
+    safe_biz = esc(body.business_name)
+    safe_email = esc(body.email)
+    safe_phone = esc(body.phone)
+    safe_msg = esc(body.message)
+
+    items_rows = ""
+    total_value = 0
+    for item in body.items:
+        line_total = item.wholesale_price * item.quantity if item.wholesale_price else item.unit_price * item.quantity
+        total_value += line_total
+        items_rows += f"""
+        <tr>
+            <td style="padding:8px 12px;border-bottom:1px solid #eee;">{esc(item.product_name)}</td>
+            <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:center;">{item.quantity}</td>
+            <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right;">${item.unit_price / 100:.2f}</td>
+            <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right;">${item.wholesale_price / 100:.2f}</td>
+            <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right;font-weight:bold;">${line_total / 100:.2f}</td>
+        </tr>"""
+
+    html_body = f"""
+    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+        <div style="background:#231F20;padding:20px;text-align:center;">
+            <h1 style="color:#B3D335;margin:0;font-size:24px;">New Wholesale Inquiry #{inquiry_id}</h1>
+        </div>
+        <div style="padding:20px;background:#fff;">
+            <h2 style="color:#231F20;margin-top:0;">Customer Information</h2>
+            <table style="width:100%;margin-bottom:20px;">
+                <tr><td style="padding:4px 0;color:#666;">Name:</td><td style="padding:4px 0;font-weight:bold;">{safe_name}</td></tr>
+                {"<tr><td style='padding:4px 0;color:#666;'>Business:</td><td style='padding:4px 0;font-weight:bold;'>" + safe_biz + "</td></tr>" if body.business_name else ""}
+                <tr><td style="padding:4px 0;color:#666;">Email:</td><td style="padding:4px 0;"><a href="mailto:{safe_email}">{safe_email}</a></td></tr>
+                {"<tr><td style='padding:4px 0;color:#666;'>Phone:</td><td style='padding:4px 0;'><a href='tel:" + safe_phone + "'>" + safe_phone + "</a></td></tr>" if body.phone else ""}
+            </table>
+
+            <h2 style="color:#231F20;">Requested Items</h2>
+            <table style="width:100%;border-collapse:collapse;margin-bottom:20px;">
+                <thead>
+                    <tr style="background:#f5f5f5;">
+                        <th style="padding:8px 12px;text-align:left;">Product</th>
+                        <th style="padding:8px 12px;text-align:center;">Qty</th>
+                        <th style="padding:8px 12px;text-align:right;">Retail</th>
+                        <th style="padding:8px 12px;text-align:right;">Wholesale</th>
+                        <th style="padding:8px 12px;text-align:right;">Total</th>
+                    </tr>
+                </thead>
+                <tbody>{items_rows}</tbody>
+                <tfoot>
+                    <tr style="background:#f5f5f5;">
+                        <td colspan="4" style="padding:8px 12px;text-align:right;font-weight:bold;">Estimated Total:</td>
+                        <td style="padding:8px 12px;text-align:right;font-weight:bold;color:#126A44;">${total_value / 100:.2f}</td>
+                    </tr>
+                </tfoot>
+            </table>
+
+            {"<h2 style='color:#231F20;'>Message</h2><p style='background:#f9f9f9;padding:12px;border-radius:8px;'>" + safe_msg + "</p>" if body.message else ""}
+
+            <div style="margin-top:20px;padding:16px;background:#B3D335;border-radius:8px;text-align:center;">
+                <p style="margin:0;color:#231F20;font-weight:bold;">Reply to this customer at <a href="mailto:{safe_email}">{safe_email}</a> with an invoice.</p>
+            </div>
+        </div>
+        <div style="background:#231F20;padding:12px;text-align:center;">
+            <p style="color:#fff;margin:0;font-size:12px;">The Hemp Dispensary — Wholesale Inquiry System</p>
+        </div>
+    </div>"""
+
+    try:
+        smtp_settings = await _get_smtp_settings(db)
+        subject = f"Wholesale Inquiry #{inquiry_id} — {safe_name}" + (f" ({safe_biz})" if body.business_name else "")
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _send_smtp_email, smtp_settings, STORE_EMAIL, subject, html_body)
+    except Exception as e:
+        print(f"[wholesale] Failed to send notification email: {e}")
+
+    return {"id": inquiry_id, "status": "pending", "message": "Wholesale inquiry submitted successfully"}
+
+
+@router.get("/wholesale-inquiries")
+async def list_wholesale_inquiries(db: aiosqlite.Connection = Depends(get_db)):
+    """Admin: List all wholesale inquiries."""
+    cursor = await db.execute("SELECT * FROM wholesale_inquiries ORDER BY created_at DESC")
+    rows = await cursor.fetchall()
+    results = []
+    for r in rows:
+        d = dict(r)
+        d["items"] = json.loads(d["items"]) if d.get("items") else []
+        results.append(d)
+    return results
+
+
+@router.patch("/wholesale-inquiries/{inquiry_id}")
+async def update_wholesale_inquiry(inquiry_id: int, body: dict, db: aiosqlite.Connection = Depends(get_db)):
+    """Admin: Update inquiry status or notes."""
+    allowed = {"status", "admin_notes"}
+    updates = []
+    params: list = []
+    for key, val in body.items():
+        if key in allowed:
+            updates.append(f"{key} = ?")
+            params.append(val)
+    if not updates:
+        raise HTTPException(status_code=400, detail="No valid fields to update")
+    params.append(inquiry_id)
+    await db.execute(
+        f"UPDATE wholesale_inquiries SET {', '.join(updates)}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        params,
+    )
+    await db.commit()
+    return {"status": "updated"}
