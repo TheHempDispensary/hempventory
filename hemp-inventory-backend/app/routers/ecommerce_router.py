@@ -2783,12 +2783,16 @@ async def get_orders(
                    OR o.customer_email LIKE ? COLLATE NOCASE
                    OR o.order_number LIKE ? COLLATE NOCASE
                    OR o.tracking_number LIKE ? COLLATE NOCASE
+                   OR o.shipping_address LIKE ? COLLATE NOCASE
+                   OR o.shipping_city LIKE ? COLLATE NOCASE
+                   OR o.shipping_state LIKE ? COLLATE NOCASE
+                   OR o.shipping_zip LIKE ? COLLATE NOCASE
                    OR o.id IN (
                        SELECT oi.order_id FROM ecommerce_order_items oi
                        WHERE oi.product_name LIKE ? COLLATE NOCASE
                    ))"""
             )
-            params.extend([like, like, like, like, like, like])
+            params.extend([like, like, like, like, like, like, like, like, like, like])
 
     where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
@@ -2851,12 +2855,16 @@ async def get_orders(
                    OR o.customer_email LIKE ? COLLATE NOCASE
                    OR o.order_number LIKE ? COLLATE NOCASE
                    OR o.tracking_number LIKE ? COLLATE NOCASE
+                   OR o.shipping_address LIKE ? COLLATE NOCASE
+                   OR o.shipping_city LIKE ? COLLATE NOCASE
+                   OR o.shipping_state LIKE ? COLLATE NOCASE
+                   OR o.shipping_zip LIKE ? COLLATE NOCASE
                    OR o.id IN (
                        SELECT oi.order_id FROM ecommerce_order_items oi
                        WHERE oi.product_name LIKE ? COLLATE NOCASE
                    ))"""
             )
-            count_params.extend([like, like, like, like, like, like])
+            count_params.extend([like, like, like, like, like, like, like, like, like, like])
 
     count_where_sql = (" WHERE " + " AND ".join(count_where_clauses)) if count_where_clauses else ""
     count_query = f"SELECT COUNT(*) FROM ecommerce_orders o{count_where_sql}"
