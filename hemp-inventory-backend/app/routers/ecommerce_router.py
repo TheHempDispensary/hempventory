@@ -3657,6 +3657,27 @@ async def lookup_customer_orders(
     for row in rows:
         order = dict(zip(columns, row))
         order_id = order.pop("id")
+        # Derive a customer-friendly status from payment_status + tracking_status
+        # The `status` column is never updated, so we compute it here.
+        ps = (order.get("payment_status") or "pending").lower()
+        ts = (order.get("tracking_status") or "").lower()
+        if ps == "refunded":
+            display_status = "refunded"
+        elif ps == "cancelled":
+            display_status = "cancelled"
+        elif ts == "delivered" or ps == "delivered":
+            display_status = "delivered"
+        elif ts == "out_for_delivery":
+            display_status = "out_for_delivery"
+        elif ts == "in_transit":
+            display_status = "in_transit"
+        elif ps == "shipped" or ts == "label_created":
+            display_status = "shipped"
+        elif ps == "paid":
+            display_status = "confirmed"
+        else:
+            display_status = "pending"
+        order["status"] = display_status
         # Fetch items
         item_cursor = await db.execute(
             "SELECT product_name, sku, price, quantity FROM ecommerce_order_items WHERE order_id = ?",
