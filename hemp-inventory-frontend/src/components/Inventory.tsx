@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo, useCallback } from "react";
-import { syncInventory, getCachedInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, getTransferHistory, bulkAssignCategory, bulkAssignImages, syncRefunds, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup, bulkStockUpdate, addVariantsToItem, getInventoryChanges, getProductAttributes, updateProductAttributes, getImageGallery, uploadGalleryImage, getGalleryImageUrl, deleteGalleryImage } from "../lib/api";
-import { RefreshCw, Search, Plus, ChevronDown, ChevronUp, X, Save, Package, Trash2, CheckSquare, Square, Minus, Image, Download, Upload, Settings, ArrowRightLeft, Images, Layers, Tag, ChevronsLeft, ChevronsRight, ChevronLeft, ChevronRight, History, AlertCircle, CheckCircle2 } from "lucide-react";
+import { syncInventory, getCachedInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, getTransferHistory, bulkAssignCategory, bulkAssignImages, syncRefunds, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup, bulkStockUpdate, addVariantsToItem, getInventoryChanges, getProductAttributes, updateProductAttributes, getImageGallery, uploadGalleryImage, getGalleryImageUrl, deleteGalleryImage, bulkHideItems, bulkUnhideItems } from "../lib/api";
+import { RefreshCw, Search, Plus, ChevronDown, ChevronUp, X, Save, Package, Trash2, CheckSquare, Square, Minus, Image, Download, Upload, Settings, ArrowRightLeft, Images, Layers, Tag, ChevronsLeft, ChevronsRight, ChevronLeft, ChevronRight, History, AlertCircle, CheckCircle2, EyeOff, Eye } from "lucide-react";
 
 interface LocationStock {
   location_id: number;
@@ -35,6 +35,7 @@ interface InventoryItem {
   has_image?: boolean;
   item_group_name?: string;
   modified_time?: number;
+  is_hidden?: boolean;
 }
 
 interface LocationInfo {
@@ -113,6 +114,10 @@ export default function Inventory() {
   const [showBulkCategory, setShowBulkCategory] = useState(false);
   const [bulkCategoryName, setBulkCategoryName] = useState("");
   const [assigningCategory, setAssigningCategory] = useState(false);
+
+  // Hide/unhide state
+  const [showHidden, setShowHidden] = useState(false);
+  const [hidingItems, setHidingItems] = useState(false);
 
   // Edit modal state
   const [editItem, setEditItem] = useState<InventoryItem | null>(null);
@@ -296,8 +301,15 @@ export default function Inventory() {
     return Array.from(cats).sort();
   }, [items]);
 
+  const hiddenCount = useMemo(() => items.filter(i => i.is_hidden).length, [items]);
+
   const filteredItems = useMemo(() => {
     let filtered = [...items];
+
+    // Filter hidden items unless showHidden is on
+    if (!showHidden) {
+      filtered = filtered.filter((i) => !i.is_hidden);
+    }
 
     if (search) {
       const s = search.toLowerCase();
@@ -346,7 +358,7 @@ export default function Inventory() {
     });
 
     return filtered;
-  }, [items, search, categoryFilter, locationFilter, sortField, sortDir, sortLocation]);
+  }, [items, search, categoryFilter, locationFilter, sortField, sortDir, sortLocation, showHidden]);
 
   // Reset to page 1 when filters change
   useEffect(() => {
@@ -913,6 +925,42 @@ export default function Inventory() {
     }
   };
 
+  const handleBulkHide = async () => {
+    setHidingItems(true);
+    try {
+      const skusToHide = items.filter(i => selectedItems.has(i.id)).map(i => i.sku);
+      await bulkHideItems([...new Set(skusToHide)]);
+      setItems(prev => prev.map(i => selectedItems.has(i.id) ? { ...i, is_hidden: true } : i));
+      setSelectedItems(new Set());
+      setToast({ type: "success", text: `${skusToHide.length} item(s) hidden. Toggle "Show Hidden" to view them.` });
+      setTimeout(() => setToast(null), 5000);
+    } catch (err) {
+      console.error("Error hiding items:", err);
+      setToast({ type: "error", text: "Failed to hide items." });
+      setTimeout(() => setToast(null), 5000);
+    } finally {
+      setHidingItems(false);
+    }
+  };
+
+  const handleBulkUnhide = async () => {
+    setHidingItems(true);
+    try {
+      const skusToUnhide = items.filter(i => selectedItems.has(i.id)).map(i => i.sku);
+      await bulkUnhideItems([...new Set(skusToUnhide)]);
+      setItems(prev => prev.map(i => selectedItems.has(i.id) ? { ...i, is_hidden: false } : i));
+      setSelectedItems(new Set());
+      setToast({ type: "success", text: `${skusToUnhide.length} item(s) unhidden.` });
+      setTimeout(() => setToast(null), 5000);
+    } catch (err) {
+      console.error("Error unhiding items:", err);
+      setToast({ type: "error", text: "Failed to unhide items." });
+      setTimeout(() => setToast(null), 5000);
+    } finally {
+      setHidingItems(false);
+    }
+  };
+
   const [fixingPos, setFixingPos] = useState(false);
   const handleFixPos = async () => {
     if (!confirm("Fix POS Scanning: This will disable Auto-Manage and make ALL items visible/scannable at POS across all locations.\n\nThis fixes the issue where items with 0 stock can't be scanned.\n\nContinue?")) return;
@@ -1403,6 +1451,15 @@ export default function Inventory() {
           <option value="newest">Sort: Newest First</option>
           <option value="oldest">Sort: Oldest First</option>
         </select>
+        {hiddenCount > 0 && (
+          <button
+            onClick={() => setShowHidden(!showHidden)}
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${showHidden ? "bg-amber-100 text-amber-700 border border-amber-300" : "bg-gray-100 text-gray-600 border border-gray-300 hover:bg-gray-200"}`}
+          >
+            {showHidden ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
+            {showHidden ? `Showing ${hiddenCount} Hidden` : `${hiddenCount} Hidden`}
+          </button>
+        )}
       </div>
 
       {/* Add Item Modal */}
@@ -2879,6 +2936,30 @@ export default function Inventory() {
               <Tag className="w-3.5 h-3.5" />
               Assign Category
             </button>
+            {(() => {
+              const selected = items.filter(i => selectedItems.has(i.id));
+              const allHidden = selected.length > 0 && selected.every(i => i.is_hidden);
+              const someHidden = selected.some(i => i.is_hidden);
+              return allHidden ? (
+                <button
+                  onClick={handleBulkUnhide}
+                  disabled={hidingItems}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 text-white rounded-lg text-sm hover:bg-amber-700 disabled:opacity-50"
+                >
+                  <Eye className="w-3.5 h-3.5" />
+                  {hidingItems ? "Unhiding..." : "Unhide Selected"}
+                </button>
+              ) : (
+                <button
+                  onClick={handleBulkHide}
+                  disabled={hidingItems}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 text-white rounded-lg text-sm hover:bg-amber-700 disabled:opacity-50"
+                >
+                  <EyeOff className="w-3.5 h-3.5" />
+                  {hidingItems ? "Hiding..." : someHidden ? "Hide/Unhide Selected" : "Hide Selected"}
+                </button>
+              );
+            })()}
             <button
               onClick={() => setShowBulkConfirm(true)}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-lg text-sm hover:bg-red-700"
@@ -3067,7 +3148,7 @@ export default function Inventory() {
               {paginatedItems.map((item, idx) => (
                 <tr
                   key={`${item.sku}::${item.name}::${idx}`}
-                  className={`hover:bg-green-50 cursor-pointer transition-colors ${selectedItems.has(item.id) ? "bg-green-50/50" : ""}`}
+                  className={`hover:bg-green-50 cursor-pointer transition-colors ${selectedItems.has(item.id) ? "bg-green-50/50" : ""} ${item.is_hidden ? "opacity-50" : ""}`}
                   onClick={(e) => {
                     const target = e.target as HTMLElement;
                     if (target.closest("button") || target.closest("input") || target.tagName === "BUTTON" || target.tagName === "INPUT") return;
@@ -3100,6 +3181,11 @@ export default function Inventory() {
                         <p className="text-sm font-medium text-green-700 hover:text-green-800 underline decoration-green-200 hover:decoration-green-400" title={item.name}>
                           {item.name}
                         </p>
+                        {item.is_hidden && (
+                          <span className="text-[10px] text-amber-600 bg-amber-50 border border-amber-200 rounded px-1 py-0.5 mt-0.5 inline-block">
+                            <EyeOff className="w-3 h-3 inline mr-0.5 -mt-0.5" />Hidden
+                          </span>
+                        )}
                         {item.item_group_name && (
                           <span className="text-[10px] text-purple-600 bg-purple-50 border border-purple-200 rounded px-1 py-0.5 mt-0.5 inline-block">
                             Variant: {item.item_group_name}

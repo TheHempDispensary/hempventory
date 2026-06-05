@@ -277,6 +277,12 @@ async def _do_sync(db: aiosqlite.Connection) -> dict:
     for key, item_data in inventory.items():
         item_data["id"] = key  # composite key "sku::name"
 
+    # Mark items that are hidden from inventory view
+    cursor = await db.execute("SELECT sku FROM hidden_items")
+    hidden_skus = {row[0] for row in await cursor.fetchall()}
+    for _key, item_data in inventory.items():
+        item_data["is_hidden"] = item_data["sku"] in hidden_skus
+
     items_list = sorted(inventory.values(), key=lambda x: x["name"])
     result = {"items": items_list, "locations": location_list}
 
@@ -1085,6 +1091,40 @@ async def bulk_delete_items(
 
     await _remove_from_cache(req.skus)
     return {"results": all_results}
+
+
+class BulkHideRequest(BaseModel):
+    skus: list[str]
+
+
+@router.post("/items/bulk-hide")
+async def bulk_hide_items(
+    req: BulkHideRequest,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Hide items from the inventory view (keeps them for sales data)."""
+    hidden = 0
+    for sku in req.skus:
+        await db.execute(
+            "INSERT OR IGNORE INTO hidden_items (sku) VALUES (?)", (sku,)
+        )
+        hidden += 1
+    await db.commit()
+    return {"hidden": hidden, "skus": req.skus}
+
+
+@router.post("/items/bulk-unhide")
+async def bulk_unhide_items(
+    req: BulkHideRequest,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Unhide items so they appear in the inventory view again."""
+    for sku in req.skus:
+        await db.execute("DELETE FROM hidden_items WHERE sku = ?", (sku,))
+    await db.commit()
+    return {"unhidden": len(req.skus), "skus": req.skus}
 
 
 @router.delete("/items/{sku}")
