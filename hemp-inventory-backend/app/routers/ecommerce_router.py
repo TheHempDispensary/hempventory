@@ -307,11 +307,22 @@ async def _fetch_and_cache_products() -> dict:
             if row[4]:  # product_name
                 attrs_by_name[row[4].upper()] = {"effect": row[1], "strength": row[2], "product_type": row[3]}
 
+        # Load locally-hidden items
+        hidden_db = await aiosqlite.connect(DB_PATH)
+        try:
+            hcur = await hidden_db.execute("SELECT sku FROM hidden_items")
+            hidden_skus = {row[0] for row in await hcur.fetchall()}
+        finally:
+            await hidden_db.close()
+
         products = []
         categories_set: set = set()
 
         for item in all_items:
             if item.get("hidden", False):
+                continue
+            sku_or_id = item.get("sku", "") or item.get("id", "")
+            if sku_or_id in hidden_skus:
                 continue
 
             name = item.get("name", "")

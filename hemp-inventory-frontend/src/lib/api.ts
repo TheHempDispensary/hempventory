@@ -103,6 +103,12 @@ export const bulkDeleteItems = (skus: string[]) =>
 export const bulkAutoManage = (enable: boolean = true, skus?: string[]) =>
   api.post("/api/inventory/bulk-auto-manage", { enable, skus: skus || null });
 
+export const bulkHideItems = (skus: string[]) =>
+  api.post("/api/inventory/items/bulk-hide", { skus });
+
+export const bulkUnhideItems = (skus: string[]) =>
+  api.post("/api/inventory/items/bulk-unhide", { skus });
+
 export const pushItemToLocation = (sku: string, locationId: number, initialStock: number = 0) =>
   api.post(`/api/inventory/items/${sku}/push-to-location`, { location_id: locationId, initial_stock: initialStock });
 

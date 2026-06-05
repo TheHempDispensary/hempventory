@@ -695,6 +695,14 @@ async def init_db():
             )
         """)
 
+        # Hidden items table (items hidden from inventory view but kept for data)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS hidden_items (
+                sku TEXT PRIMARY KEY,
+                hidden_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Seed FIRST10 if promo_codes table is empty
         cursor = await db.execute("SELECT COUNT(*) FROM promo_codes")
         count = (await cursor.fetchone())[0]
