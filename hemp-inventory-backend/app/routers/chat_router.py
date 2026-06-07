@@ -22,11 +22,14 @@ MODEL = "claude-sonnet-4-20250514"
 # ── Inventory context cache (reuses ecommerce product cache) ─────────────
 _inventory_context: str = ""
 _inventory_context_ts: float = 0.0
-INVENTORY_CACHE_TTL = 1800  # 30 minutes
+INVENTORY_CACHE_TTL = 300  # 5 minutes — keeps Bud's stock data fresh
+
+
+SITE_BASE = "https://www.thehempdispensary.com"
 
 
 def _build_inventory_summary(products: list[dict]) -> str:
-    """Summarize products by category for Claude's system prompt."""
+    """Summarize products by category for Claude's system prompt, including direct links."""
     by_category: dict[str, list[dict]] = {}
     for p in products:
         if not p.get("available"):
@@ -44,11 +47,14 @@ def _build_inventory_summary(products: list[dict]) -> str:
             west = item.get("stock_west", 0)
             east = item.get("stock_east", 0)
             hq = item.get("stock_hq", 0)
+            slug = item.get("slug", "")
+            url = f"{SITE_BASE}/products/product/{slug}" if slug else ""
             if item.get("shipping_only"):
                 stock_note = "Ships from partner (1-3 days)"
             else:
                 stock_note = f"West: {west}, East: {east}, HQ/Warehouse: {hq}"
-            lines.append(f"- {item['name']} | {price} | {stock_note}")
+            link_part = f" | Link: {url}" if url else ""
+            lines.append(f"- {item['name']} | {price} | {stock_note}{link_part}")
     return "\n".join(lines)
 
 
@@ -99,6 +105,12 @@ PRODUCT RULES:
 - NEVER use the words "medicate", "medication", "dose", or "dosing" — use "enjoy", "experience", or "use" instead
 - If asked about drug testing: "Hemp products may contain trace THC. We recommend consulting your employer's policy."
 
+PRODUCT LINKS:
+- Each product in the inventory below includes a "Link:" field with its direct URL on thehempdispensary.com
+- ALWAYS include the direct product link when recommending or mentioning a product — this lets customers click directly to it
+- Format links naturally in your response, e.g. "Check out Crunch Berries (28g) for $120: https://www.thehempdispensary.com/products/product/crunch-berries-everyday-28-grams"
+- If a customer asks for links, always provide them — you have them in the inventory data below
+
 FULFILLMENT & INVENTORY LOGIC:
 The website has three fulfillment options customers can select:
 - Pick Up at Spring Hill West (shows West Store stock)
@@ -106,6 +118,12 @@ The website has three fulfillment options customers can select:
 - Ship To Me (shows HQ/warehouse stock only)
 
 The inventory data below shows stock levels for each location: West, East, and HQ/Warehouse.
+
+IMPORTANT: Before recommending any product, verify its stock is > 0 for the relevant fulfillment method:
+- If recommending for shipping: check HQ/Warehouse stock > 0
+- If recommending for pickup West: check West stock > 0
+- If recommending for pickup East: check East stock > 0
+- Do NOT recommend products with 0 stock for the customer's fulfillment method
 
 When a customer says a product shows out of stock:
 1. Check all three inventory numbers — East Stock, West Stock, and HQ Stock.
