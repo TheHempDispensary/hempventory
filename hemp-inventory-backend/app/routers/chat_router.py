@@ -148,11 +148,18 @@ ORDER TRACKING:
 - If they have a specific order number, tell them they can look it up on the Account page.
 - For shipping issues or if tracking shows a problem, direct them to customer service at 352-842-6185 or Support@TheHempDispensary.com.
 
+LEAD CAPTURE (IMPORTANT — this helps the team follow up):
+- After your FIRST helpful exchange (not your greeting), naturally ask for the customer's first name so you can personalize the conversation.
+  Example: "By the way, what's your name? I'd love to personalize your experience!"
+- Once you know their name and they show purchase intent OR ask a product question, ask for their phone number or email so the team can follow up with deals or answers.
+  Example: "Want me to have one of our team members text you about that? Just drop your phone number or email and we'll get back to you!"
+- If a customer asks to speak to a human, collect their phone or email FIRST, then provide store numbers:
+  "Absolutely! Drop your phone number or email and I'll make sure someone from our team reaches out. In the meantime you can also call our West Store at 352-340-5860 or East Store at 352-515-5370, or for shipping help call 352-842-6185 / email Support@TheHempDispensary.com."
+- Do NOT gate the conversation behind contact info — always be helpful first, then ask naturally
+- Do NOT ask for contact info in your very first greeting message
+- Once you have their info, thank them and continue helping — don't keep asking
+
 BEHAVIOR:
-- If a customer seems interested in buying, naturally ask for their name so you can personalize the experience
-- If they want to be contacted about deals, ask for their email
-- Do NOT gate the conversation behind name/email — ask naturally when relevant
-- If asked to speak to a human: "I'd love to connect you with our team! You can reach our West Store at 352-340-5860 or our East Store at 352-515-5370. For shipping orders or customer service, call 352-842-6185 or email Support@TheHempDispensary.com."
 - If you don't know something, say so honestly rather than guessing
 - Guide customers toward products based on their needs
 - Always be helpful even if they're just browsing
@@ -160,7 +167,7 @@ BEHAVIOR:
 RESPONSE FORMAT:
 You MUST respond with ONLY a valid JSON object — no text before or after it.
 Use this exact structure:
-{"message": "your response text here", "intent": "browsing", "customer_name": null, "customer_email": null}
+{"message": "your response text here", "intent": "browsing", "customer_name": null, "customer_email": null, "customer_phone": null}
 
 Rules:
 - The "message" field must contain ONLY your conversational response as plain text. Do NOT put JSON, code, or metadata inside the message field.
@@ -168,7 +175,8 @@ Rules:
 - "intent" should be "purchase" if the customer is actively looking to buy, otherwise "browsing"
 - "customer_name" should be the customer's name if they've shared it, otherwise null
 - "customer_email" should be the customer's email if they've shared it, otherwise null
-- ONLY include name/email when the customer explicitly provides them in their message
+- "customer_phone" should be the customer's phone number if they've shared it, otherwise null
+- ONLY include name/email/phone when the customer explicitly provides them in their message
 - Do NOT wrap the JSON in markdown code fences or add any explanation outside the JSON object"""
 
 
@@ -190,6 +198,7 @@ class ChatSessionSummary(BaseModel):
     session_id: str
     customer_name: Optional[str] = None
     customer_email: Optional[str] = None
+    customer_phone: Optional[str] = None
     page_url: Optional[str] = None
     device_type: Optional[str] = None
     intent: Optional[str] = None
@@ -267,6 +276,7 @@ async def send_message(
     intent = "browsing"
     customer_name = None
     customer_email = None
+    customer_phone = None
 
     # Try to extract JSON from Claude's response (may be wrapped in markdown code fences)
     json_text = raw_text.strip()
@@ -306,6 +316,7 @@ async def send_message(
         intent = parsed.get("intent", "browsing")
         customer_name = parsed.get("customer_name")
         customer_email = parsed.get("customer_email")
+        customer_phone = parsed.get("customer_phone")
     else:
         # Claude returned plain text — strip any trailing JSON fragments
         # Common failure: Claude writes the message as plain text, then appends a JSON object
@@ -314,7 +325,7 @@ async def send_message(
         if json_suffix:
             assistant_message = raw_text[:json_suffix.start()].strip()
         else:
-            assistant_message = re.sub(r'[,"\s]*"(intent|customer_name|customer_email)"\s*:.*$', '', raw_text, flags=re.DOTALL).strip()
+            assistant_message = re.sub(r'[,"\s]*"(intent|customer_name|customer_email|customer_phone)"\s*:.*$', '', raw_text, flags=re.DOTALL).strip()
 
     # Clean up literal backslash-n sequences that Claude sometimes embeds
     assistant_message = assistant_message.replace("\\n", "\n").replace("\\t", " ")
@@ -337,6 +348,9 @@ async def send_message(
     if customer_email:
         updates.append("customer_email = ?")
         params.append(customer_email)
+    if customer_phone:
+        updates.append("customer_phone = ?")
+        params.append(customer_phone)
     if req.page_url:
         updates.append("page_url = ?")
         params.append(req.page_url)
@@ -368,10 +382,10 @@ async def list_sessions(
 
     if search:
         where_clauses.append(
-            "(cs.customer_name LIKE ? OR cs.customer_email LIKE ? OR cs.session_id LIKE ? OR EXISTS (SELECT 1 FROM chat_messages cm2 WHERE cm2.session_id = cs.session_id AND cm2.content LIKE ?))"
+            "(cs.customer_name LIKE ? OR cs.customer_email LIKE ? OR cs.customer_phone LIKE ? OR cs.session_id LIKE ? OR EXISTS (SELECT 1 FROM chat_messages cm2 WHERE cm2.session_id = cs.session_id AND cm2.content LIKE ?))"
         )
         like = f"%{search}%"
-        params.extend([like, like, like, like])
+        params.extend([like, like, like, like, like])
 
     if intent:
         where_clauses.append("cs.intent = ?")
@@ -395,7 +409,7 @@ async def list_sessions(
 
     # Fetch sessions with first message and message count
     query = f"""
-        SELECT cs.session_id, cs.customer_name, cs.customer_email, cs.page_url,
+        SELECT cs.session_id, cs.customer_name, cs.customer_email, cs.customer_phone, cs.page_url,
                cs.device_type, cs.intent, cs.created_at, cs.updated_at,
                (SELECT COUNT(*) FROM chat_messages cm WHERE cm.session_id = cs.session_id) as msg_count,
                (SELECT cm.content FROM chat_messages cm WHERE cm.session_id = cs.session_id AND cm.role = 'user' ORDER BY cm.created_at ASC LIMIT 1) as first_msg
@@ -414,13 +428,14 @@ async def list_sessions(
             "session_id": row[0],
             "customer_name": row[1],
             "customer_email": row[2],
-            "page_url": row[3],
-            "device_type": row[4],
-            "intent": row[5],
-            "created_at": row[6],
-            "updated_at": row[7],
-            "message_count": row[8],
-            "first_message": row[9],
+            "customer_phone": row[3],
+            "page_url": row[4],
+            "device_type": row[5],
+            "intent": row[6],
+            "created_at": row[7],
+            "updated_at": row[8],
+            "message_count": row[9],
+            "first_message": row[10],
         })
 
     return {"sessions": sessions, "total": total}
@@ -435,7 +450,7 @@ async def get_session(
     """Admin endpoint: get full conversation transcript."""
     # Session info
     cursor = await db.execute(
-        "SELECT session_id, customer_name, customer_email, page_url, device_type, intent, created_at, updated_at FROM chat_sessions WHERE session_id = ?",
+        "SELECT session_id, customer_name, customer_email, customer_phone, page_url, device_type, intent, created_at, updated_at FROM chat_sessions WHERE session_id = ?",
         (session_id,),
     )
     session_row = await cursor.fetchone()
@@ -454,11 +469,12 @@ async def get_session(
             "session_id": session_row[0],
             "customer_name": session_row[1],
             "customer_email": session_row[2],
-            "page_url": session_row[3],
-            "device_type": session_row[4],
-            "intent": session_row[5],
-            "created_at": session_row[6],
-            "updated_at": session_row[7],
+            "customer_phone": session_row[3],
+            "page_url": session_row[4],
+            "device_type": session_row[5],
+            "intent": session_row[6],
+            "created_at": session_row[7],
+            "updated_at": session_row[8],
         },
         "messages": [
             {"role": row[0], "content": row[1], "created_at": row[2]}

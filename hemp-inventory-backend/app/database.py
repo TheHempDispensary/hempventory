@@ -545,6 +545,7 @@ async def init_db():
                 session_id TEXT NOT NULL UNIQUE,
                 customer_name TEXT,
                 customer_email TEXT,
+                customer_phone TEXT,
                 page_url TEXT,
                 device_type TEXT,
                 intent TEXT,
@@ -552,6 +553,12 @@ async def init_db():
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # Migration: add customer_phone column if missing
+        try:
+            await db.execute("ALTER TABLE chat_sessions ADD COLUMN customer_phone TEXT")
+        except Exception:
+            pass  # column already exists
 
         # Chat messages table
         await db.execute("""

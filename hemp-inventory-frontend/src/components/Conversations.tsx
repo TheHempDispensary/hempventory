@@ -1,11 +1,12 @@
 import { useState, useEffect } from "react";
 import { getChatSessions, getChatSession } from "../lib/api";
-import { Search, ArrowLeft, MessageCircle, User, Mail, ShoppingCart, Eye, Calendar, Filter } from "lucide-react";
+import { Search, ArrowLeft, MessageCircle, User, Mail, Phone, ShoppingCart, Eye, Calendar, Filter } from "lucide-react";
 
 interface ChatSession {
   session_id: string;
   customer_name: string | null;
   customer_email: string | null;
+  customer_phone: string | null;
   page_url: string | null;
   device_type: string | null;
   intent: string | null;
@@ -26,6 +27,7 @@ interface SessionDetail {
     session_id: string;
     customer_name: string | null;
     customer_email: string | null;
+    customer_phone: string | null;
     page_url: string | null;
     device_type: string | null;
     intent: string | null;
@@ -151,6 +153,10 @@ export default function Conversations() {
             <div>
               <p className="text-gray-500">Email</p>
               <p className="font-medium text-gray-900">{s.customer_email || "—"}</p>
+            </div>
+            <div>
+              <p className="text-gray-500">Phone</p>
+              <p className="font-medium text-gray-900">{s.customer_phone || "—"}</p>
             </div>
             <div>
               <p className="text-gray-500">Device</p>
@@ -301,6 +307,12 @@ export default function Conversations() {
                     <span className="text-xs text-gray-400 flex items-center gap-1">
                       <Mail className="w-3 h-3" />
                       {session.customer_email}
+                    </span>
+                  )}
+                  {session.customer_phone && (
+                    <span className="text-xs text-gray-400 flex items-center gap-1">
+                      <Phone className="w-3 h-3" />
+                      {session.customer_phone}
                     </span>
                   )}
                 </div>
