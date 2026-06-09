@@ -325,7 +325,7 @@ async def send_message(
         if json_suffix:
             assistant_message = raw_text[:json_suffix.start()].strip()
         else:
-            assistant_message = re.sub(r'[,"\s]*"(intent|customer_name|customer_email)"\s*:.*$', '', raw_text, flags=re.DOTALL).strip()
+            assistant_message = re.sub(r'[,"\s]*"(intent|customer_name|customer_email|customer_phone)"\s*:.*$', '', raw_text, flags=re.DOTALL).strip()
 
     # Clean up literal backslash-n sequences that Claude sometimes embeds
     assistant_message = assistant_message.replace("\\n", "\n").replace("\\t", " ")
