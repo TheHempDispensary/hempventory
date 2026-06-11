@@ -371,8 +371,8 @@ export default function Discounts() {
     else { setEditDiscountType("amount"); setEditDiscountValue(String((promo.discount_amount / 100).toFixed(2))); }
     setEditSingleUse(promo.single_use);
     setEditMaxUses(promo.max_uses > 0 ? String(promo.max_uses) : "");
-    setEditExpiresAt(promo.expires_at || "");
-    setEditStartsAt(promo.starts_at || "");
+    setEditExpiresAt(promo.expires_at ? (promo.expires_at.includes("T") ? promo.expires_at : promo.expires_at + "T23:59") : "");
+    setEditStartsAt(promo.starts_at ? (promo.starts_at.includes("T") ? promo.starts_at : promo.starts_at + "T00:00") : "");
     setEditAppliesTo((promo.applies_to === "specific" ? "specific" : "all") as "all" | "specific");
     setEditProductIds(promo.product_ids ? promo.product_ids.split(",").filter(Boolean) : []);
     setEditExcludeOtherCoupons(promo.exclude_from_other_coupons);
