@@ -198,6 +198,7 @@ async def init_db():
             ("loyalty_discount", "INTEGER DEFAULT 0"),
             ("clover_order_id", "TEXT"),
             ("source", "TEXT DEFAULT 'website'"),
+            ("sale_discount", "INTEGER DEFAULT 0"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE ecommerce_orders ADD COLUMN {col} {coldef}")
