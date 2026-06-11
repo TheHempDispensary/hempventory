@@ -371,8 +371,8 @@ export default function Discounts() {
     else { setEditDiscountType("amount"); setEditDiscountValue(String((promo.discount_amount / 100).toFixed(2))); }
     setEditSingleUse(promo.single_use);
     setEditMaxUses(promo.max_uses > 0 ? String(promo.max_uses) : "");
-    setEditExpiresAt(promo.expires_at || "");
-    setEditStartsAt(promo.starts_at || "");
+    setEditExpiresAt(promo.expires_at ? (promo.expires_at.includes("T") ? promo.expires_at : promo.expires_at + "T23:59") : "");
+    setEditStartsAt(promo.starts_at ? (promo.starts_at.includes("T") ? promo.starts_at : promo.starts_at + "T00:00") : "");
     setEditAppliesTo((promo.applies_to === "specific" ? "specific" : "all") as "all" | "specific");
     setEditProductIds(promo.product_ids ? promo.product_ids.split(",").filter(Boolean) : []);
     setEditExcludeOtherCoupons(promo.exclude_from_other_coupons);
@@ -424,8 +424,17 @@ export default function Discounts() {
   };
 
   const formatDate = (dateStr: string) => {
-    try { return new Date(dateStr).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); }
-    catch { return dateStr; }
+    try {
+      if (dateStr.includes("T")) {
+        const [datePart, timePart] = dateStr.split("T");
+        const [y, mo, dy] = datePart.split("-").map(Number);
+        const [hr, mn] = (timePart || "00:00").split(":").map(Number);
+        const d = new Date(y, mo - 1, dy, hr, mn);
+        return d.toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", hour12: true }) + " ET";
+      }
+      const [y, m, d] = dateStr.split("-").map(Number);
+      return new Date(y, m - 1, d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+    } catch { return dateStr; }
   };
 
   const formatDateTime = (dateStr: string) => {
@@ -756,17 +765,19 @@ export default function Discounts() {
             </>)}
             <div>
               <label className="text-sm font-medium text-gray-700 flex items-center gap-1 mb-1">
-                <Calendar className="w-3.5 h-3.5" /> Start Date (optional)
+                <Calendar className="w-3.5 h-3.5" /> Start Date & Time (optional)
               </label>
-              <input type="date" value={newStartsAt} onChange={(e) => setNewStartsAt(e.target.value)}
+              <input type="datetime-local" value={newStartsAt} onChange={(e) => setNewStartsAt(e.target.value)}
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500" />
+              <p className="text-xs text-gray-400 mt-0.5">Eastern Time</p>
             </div>
             <div>
               <label className="text-sm font-medium text-gray-700 flex items-center gap-1 mb-1">
-                <Calendar className="w-3.5 h-3.5" /> End Date (optional)
+                <Calendar className="w-3.5 h-3.5" /> End Date & Time (optional)
               </label>
-              <input type="date" value={newExpiresAt} onChange={(e) => setNewExpiresAt(e.target.value)}
+              <input type="datetime-local" value={newExpiresAt} onChange={(e) => setNewExpiresAt(e.target.value)}
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500" />
+              <p className="text-xs text-gray-400 mt-0.5">Eastern Time</p>
             </div>
           </div>
           <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -881,14 +892,16 @@ export default function Discounts() {
                       </label>
                     </div>
                     <div>
-                      <label className="text-sm font-medium text-gray-700 flex items-center gap-1 mb-1"><Calendar className="w-3.5 h-3.5" /> Start Date</label>
-                      <input type="date" value={editStartsAt} onChange={(e) => setEditStartsAt(e.target.value)}
+                      <label className="text-sm font-medium text-gray-700 flex items-center gap-1 mb-1"><Calendar className="w-3.5 h-3.5" /> Start Date & Time</label>
+                      <input type="datetime-local" value={editStartsAt} onChange={(e) => setEditStartsAt(e.target.value)}
                         className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm" />
+                      <p className="text-xs text-gray-400 mt-0.5">Eastern Time</p>
                     </div>
                     <div>
-                      <label className="text-sm font-medium text-gray-700 flex items-center gap-1 mb-1"><Calendar className="w-3.5 h-3.5" /> End Date</label>
-                      <input type="date" value={editExpiresAt} onChange={(e) => setEditExpiresAt(e.target.value)}
+                      <label className="text-sm font-medium text-gray-700 flex items-center gap-1 mb-1"><Calendar className="w-3.5 h-3.5" /> End Date & Time</label>
+                      <input type="datetime-local" value={editExpiresAt} onChange={(e) => setEditExpiresAt(e.target.value)}
                         className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm" />
+                      <p className="text-xs text-gray-400 mt-0.5">Eastern Time</p>
                     </div>
                     <div className="space-y-2 flex flex-col justify-end pb-1">
                       <label className="flex items-center gap-2 cursor-pointer">

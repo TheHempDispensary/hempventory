@@ -734,16 +734,17 @@ async def validate_promo(
     from datetime import datetime
     from zoneinfo import ZoneInfo
     eastern = ZoneInfo("America/New_York")
-    today = datetime.now(eastern).strftime("%Y-%m-%d")
+    now_eastern = datetime.now(eastern).strftime("%Y-%m-%dT%H:%M")
     sale_cursor = await db.execute(
         """SELECT discount_pct FROM promo_codes
            WHERE is_direct_discount = 1 AND is_active = 1
              AND starts_at IS NOT NULL AND starts_at != ''
              AND expires_at IS NOT NULL AND expires_at != ''
-             AND starts_at <= ? AND expires_at >= ?
+             AND (CASE WHEN LENGTH(starts_at) <= 10 THEN starts_at || 'T00:00' ELSE starts_at END) <= ?
+             AND (CASE WHEN LENGTH(expires_at) <= 10 THEN expires_at || 'T23:59' ELSE expires_at END) >= ?
            ORDER BY discount_pct DESC
            LIMIT 1""",
-        (today, today),
+        (now_eastern, now_eastern),
     )
     active_sale = await sale_cursor.fetchone()
     if active_sale:
@@ -755,12 +756,14 @@ async def validate_promo(
     if not promo:
         return {"valid": False, "reason": "Invalid promo code"}
 
-    # Check expiration
-    from datetime import datetime
+    # Check expiration (dates are stored in Eastern time)
+    now_et = datetime.now(eastern).strftime("%Y-%m-%dT%H:%M")
     if promo["expires_at"]:
         try:
-            exp = datetime.fromisoformat(promo["expires_at"])
-            if datetime.utcnow() > exp:
+            exp_str = promo["expires_at"]
+            if "T" not in exp_str:
+                exp_str += "T23:59"
+            if now_et > exp_str:
                 return {"valid": False, "reason": "This promo code has expired"}
         except Exception:
             pass
@@ -769,8 +772,10 @@ async def validate_promo(
     starts_at = promo["starts_at"] if "starts_at" in promo.keys() else None
     if starts_at:
         try:
-            start = datetime.fromisoformat(starts_at)
-            if datetime.utcnow() < start:
+            start_str = starts_at
+            if "T" not in start_str:
+                start_str += "T00:00"
+            if now_et < start_str:
                 return {"valid": False, "reason": "This promo code is not yet active"}
         except Exception:
             pass
@@ -834,12 +839,12 @@ async def list_brands():
 
 @router.get("/active-sale")
 async def active_sale(db: aiosqlite.Connection = Depends(get_db)):
-    """Public endpoint: Check if there is an active Direct Discount sale today (US Eastern)."""
+    """Public endpoint: Check if there is an active Direct Discount sale now (US Eastern)."""
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
     eastern = ZoneInfo("America/New_York")
-    today = datetime.now(eastern).strftime("%Y-%m-%d")
+    now_eastern = datetime.now(eastern).strftime("%Y-%m-%dT%H:%M")
 
     cursor = await db.execute(
         """SELECT discount_pct, excluded_brands, starts_at, expires_at
@@ -848,11 +853,11 @@ async def active_sale(db: aiosqlite.Connection = Depends(get_db)):
              AND is_active = 1
              AND starts_at IS NOT NULL AND starts_at != ''
              AND expires_at IS NOT NULL AND expires_at != ''
-             AND starts_at <= ?
-             AND expires_at >= ?
+             AND (CASE WHEN LENGTH(starts_at) <= 10 THEN starts_at || 'T00:00' ELSE starts_at END) <= ?
+             AND (CASE WHEN LENGTH(expires_at) <= 10 THEN expires_at || 'T23:59' ELSE expires_at END) >= ?
            ORDER BY discount_pct DESC
            LIMIT 1""",
-        (today, today),
+        (now_eastern, now_eastern),
     )
     row = await cursor.fetchone()
     if not row:
@@ -2024,8 +2029,8 @@ async def create_order(
                 """INSERT INTO ecommerce_orders
                    (order_number, customer_first_name, customer_last_name, customer_email, customer_phone,
                     shipping_address, shipping_apartment, shipping_city, shipping_state, shipping_zip,
-                    subtotal, discount, volume_discount, loyalty_discount, promo_code, shipping_cost, tax, total, notes, charge_id, payment_status, fulfillment_type, shipping_service, clover_order_id, source)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    subtotal, discount, volume_discount, sale_discount, loyalty_discount, promo_code, shipping_cost, tax, total, notes, charge_id, payment_status, fulfillment_type, shipping_service, clover_order_id, source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     order_number,
                     order.customer.first_name,
@@ -2040,6 +2045,7 @@ async def create_order(
                     order.subtotal,
                     order.discount,
                     order.volume_discount,
+                    order.sale_discount,
                     order.loyalty_discount,
                     order.promo_code or "",
                     order.shipping_cost,
@@ -2550,8 +2556,9 @@ async def _send_order_emails(
                 <table style="width: 100%; margin-top: 16px; background: white; border-radius: 8px; overflow: hidden;">
                     <tr>
                         <td style="padding: 8px 12px;">Subtotal</td>
-                        <td style="padding: 8px 12px; text-align: right;">{_format_price(order.subtotal)}</td>
+                        <td style="padding: 8px 12px; text-align: right;">{_format_price(order.subtotal + order.sale_discount) if order.sale_discount else _format_price(order.subtotal)}</td>
                     </tr>
+                    {f'<tr><td style="padding: 8px 12px; color: #059669;">Sale Discount</td><td style="padding: 8px 12px; text-align: right; color: #059669;">-{_format_price(order.sale_discount)}</td></tr>' if order.sale_discount else ''}
                     {f'<tr><td style="padding: 8px 12px; color: #059669;">Discount ({order.promo_code})</td><td style="padding: 8px 12px; text-align: right; color: #059669;">-{_format_price(order.discount)}</td></tr>' if order.discount else ''}
                     {f'<tr><td style="padding: 8px 12px; color: #059669;">Volume Discount</td><td style="padding: 8px 12px; text-align: right; color: #059669;">-{_format_price(order.volume_discount)}</td></tr>' if order.volume_discount else ''}
                     {f'<tr><td style="padding: 8px 12px; color: #059669;">Loyalty Reward</td><td style="padding: 8px 12px; text-align: right; color: #059669;">-{_format_price(order.loyalty_discount)}</td></tr>' if order.loyalty_discount else ''}
@@ -2648,8 +2655,9 @@ async def _send_order_emails(
                 <table style="width: 100%; margin-top: 16px; background: white; border-radius: 8px; overflow: hidden;">
                     <tr>
                         <td style="padding: 8px 12px;">Subtotal</td>
-                        <td style="padding: 8px 12px; text-align: right;">{_format_price(order.subtotal)}</td>
+                        <td style="padding: 8px 12px; text-align: right;">{_format_price(order.subtotal + order.sale_discount) if order.sale_discount else _format_price(order.subtotal)}</td>
                     </tr>
+                    {f'<tr><td style="padding: 8px 12px; color: #059669;">Sale Discount</td><td style="padding: 8px 12px; text-align: right; color: #059669;">-{_format_price(order.sale_discount)}</td></tr>' if order.sale_discount else ''}
                     {f'<tr><td style="padding: 8px 12px; color: #059669;">Discount ({order.promo_code})</td><td style="padding: 8px 12px; text-align: right; color: #059669;">-{_format_price(order.discount)}</td></tr>' if order.discount else ''}
                     {f'<tr><td style="padding: 8px 12px; color: #059669;">Volume Discount</td><td style="padding: 8px 12px; text-align: right; color: #059669;">-{_format_price(order.volume_discount)}</td></tr>' if order.volume_discount else ''}
                     {f'<tr><td style="padding: 8px 12px; color: #059669;">Loyalty Reward</td><td style="padding: 8px 12px; text-align: right; color: #059669;">-{_format_price(order.loyalty_discount)}</td></tr>' if order.loyalty_discount else ''}
