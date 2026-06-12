@@ -2019,6 +2019,44 @@ async def create_order(
             detail="Payment token is required.",
         )
 
+    # Server-side sale_discount verification: if the frontend sent 0 but there's
+    # an active sale, compute the discount from catalog prices vs order item prices.
+    if order.sale_discount == 0:
+        try:
+            from datetime import datetime as _dt
+            from zoneinfo import ZoneInfo as _ZI
+            _eastern = _ZI("America/New_York")
+            _now = _dt.now(_eastern).strftime("%Y-%m-%dT%H:%M")
+            _sc = await db.execute(
+                """SELECT discount_pct, applies_to, product_ids FROM promo_codes
+                   WHERE is_direct_discount = 1 AND is_active = 1
+                   AND starts_at IS NOT NULL AND starts_at != ''
+                   AND expires_at IS NOT NULL AND expires_at != ''
+                   AND (CASE WHEN LENGTH(starts_at) <= 10 THEN starts_at || 'T00:00' ELSE starts_at END) <= ?
+                   AND (CASE WHEN LENGTH(expires_at) <= 10 THEN expires_at || 'T23:59' ELSE expires_at END) >= ?
+                   ORDER BY discount_pct DESC LIMIT 1""",
+                (_now, _now),
+            )
+            _sale = await _sc.fetchone()
+            if _sale:
+                _pct = _sale["discount_pct"]
+                _applies = _sale["applies_to"] if "applies_to" in _sale.keys() else "all"
+                _pids = set(pid.strip() for pid in (_sale["product_ids"] or "").split(",") if pid.strip()) if _applies == "specific" else set()
+                _cached = await _get_cached_products()
+                _by_id = {p["id"]: p for p in _cached.get("products", [])}
+                _total_savings = 0
+                for _item in order.items:
+                    if _applies == "specific" and _pids and _item.product_id not in _pids:
+                        continue
+                    _prod = _by_id.get(_item.product_id)
+                    if _prod and _prod["price"] > _item.price:
+                        _total_savings += (_prod["price"] - _item.price) * _item.quantity
+                if _total_savings > 0:
+                    order.sale_discount = _total_savings
+                    print(f"[order] Server computed sale_discount=${_total_savings/100:.2f} (frontend sent 0)")
+        except Exception as _e:
+            print(f"[order] Sale discount verification failed (non-fatal): {_e}")
+
     # Payment succeeded — create the order
     order_number = "HD-" + hex(int(time.time()))[2:].upper() + "-" + str(int(time.time() * 1000) % 10000)
 
