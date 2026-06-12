@@ -77,6 +77,92 @@ async def _get_inventory_context() -> str:
         return _inventory_context or "(Inventory temporarily unavailable)"
 
 
+ORDER_NUMBER_PATTERN = re.compile(r"\bHD-[0-9A-Fa-f]+-\d+\b")
+
+
+async def _lookup_order(order_number: str, db: aiosqlite.Connection) -> str:
+    """Look up an order by order number and return a formatted summary for Bud."""
+    cursor = await db.execute(
+        """SELECT o.order_number, o.customer_first_name, o.customer_last_name,
+                  o.subtotal, o.shipping_cost, o.tax, o.total,
+                  o.fulfillment_type, o.shipping_service,
+                  o.tracking_number, o.tracking_url, o.tracking_status,
+                  o.payment_status, o.created_at, o.id
+           FROM ecommerce_orders o
+           WHERE o.order_number = ?
+           LIMIT 1""",
+        (order_number,),
+    )
+    row = await cursor.fetchone()
+    if not row:
+        return f"ORDER LOOKUP: No order found for {order_number}."
+
+    cols = [desc[0] for desc in cursor.description]
+    order = dict(zip(cols, row))
+    order_id = order.pop("id")
+
+    # Compute display status
+    ps = (order.get("payment_status") or "pending").lower()
+    ts = (order.get("tracking_status") or "").lower()
+    if ps == "refunded":
+        status = "Refunded"
+    elif ps == "cancelled":
+        status = "Cancelled"
+    elif ts == "delivered" or ps == "delivered":
+        status = "Delivered"
+    elif ts == "out_for_delivery":
+        status = "Out for Delivery"
+    elif ts == "in_transit":
+        status = "In Transit"
+    elif ps == "shipped" or ts == "label_created":
+        status = "Shipped"
+    elif ps == "paid":
+        status = "Confirmed (Processing)"
+    else:
+        status = "Pending"
+
+    # Fulfillment label
+    ft = order.get("fulfillment_type") or ""
+    if ft == "pickup_west":
+        fulfillment = "Pickup at West Store"
+    elif ft == "pickup_east":
+        fulfillment = "Pickup at East Store"
+    elif ft == "local_delivery":
+        fulfillment = "Local Delivery"
+    else:
+        fulfillment = "Shipping"
+
+    # Items
+    item_cursor = await db.execute(
+        "SELECT product_name, quantity, price FROM ecommerce_order_items WHERE order_id = ?",
+        (order_id,),
+    )
+    items = await item_cursor.fetchall()
+    item_lines = [f"  - {r[0]} x{r[1]} (${r[2] / 100:.2f} each)" for r in items]
+
+    tracking_number = order.get("tracking_number") or ""
+    tracking_url = order.get("tracking_url") or ""
+    total_cents = order.get("total") or 0
+
+    lines = [
+        f"ORDER LOOKUP RESULT for {order_number}:",
+        f"  Status: {status}",
+        f"  Fulfillment: {fulfillment}",
+        f"  Order Date: {order.get('created_at', 'N/A')}",
+        f"  Total: ${total_cents / 100:.2f}",
+        f"  Items:",
+    ]
+    lines.extend(item_lines)
+    if tracking_number:
+        lines.append(f"  Tracking Number: {tracking_number}")
+    if tracking_url:
+        lines.append(f"  Tracking Link: {tracking_url}")
+    if not tracking_number and status in ("Confirmed (Processing)", "Pending"):
+        lines.append("  Tracking: Not yet available — order is still being processed.")
+
+    return "\n".join(lines)
+
+
 SYSTEM_PROMPT = """You are Bud, the friendly and knowledgeable Virtual Budtender for The Hemp Dispensary (THD) in Spring Hill, Florida.
 
 PERSONALITY:
@@ -143,10 +229,16 @@ IDENTITY RULES:
 - Introduce yourself as: "Hey there! Welcome to The Hemp Dispensary! 👋 I'm Bud, your Virtual Budtender."
 
 ORDER TRACKING:
-- If a customer asks about their order status, tracking, or where their package is, tell them:
-  "You can check your order status and tracking info right from your account page! Just go to the Account page (click the user icon in the header), sign in with the email or phone you used when ordering, and you'll see all your orders with tracking details."
-- If they have a specific order number, tell them they can look it up on the Account page.
-- For shipping issues or if tracking shows a problem, direct them to customer service at 352-842-6185 or Support@TheHempDispensary.com.
+- If a customer asks about their order status, tracking, or shipping, ask them for their order number (it starts with "HD-" and was included in their confirmation email).
+- When the system provides an "ORDER LOOKUP RESULT" in your context, use that data to give the customer a helpful, friendly summary:
+  * Tell them the current status of their order (e.g. "Your order is confirmed and being processed!", "Great news — your order has shipped!")
+  * If there's a tracking link, share it with them so they can follow their package
+  * If there's a tracking number but no link, share the tracking number
+  * If the order is still being processed with no tracking yet, reassure them and give a timeline (most orders ship within 1-2 business days; THCA flower ships from a partner within 1-3 business days)
+  * Share what items are in their order so they can verify
+- If no order is found for the number they gave, let them know politely and suggest double-checking the number (it's in their confirmation email) or contacting customer service at 352-842-6185 or Support@TheHempDispensary.com.
+- For complex shipping issues (lost packages, wrong items, damage), direct them to customer service at 352-842-6185 or Support@TheHempDispensary.com.
+- Customers can also check their orders anytime from their account page (click the user icon in the header, sign in with email or phone).
 
 LEAD CAPTURE (IMPORTANT — this helps the team follow up):
 - After your FIRST helpful exchange (not your greeting), naturally ask for the customer's first name so you can personalize the conversation.
@@ -250,6 +342,21 @@ async def send_message(
     # Build system prompt with live inventory
     inventory_context = await _get_inventory_context()
     system = SYSTEM_PROMPT.replace("{INVENTORY_CONTEXT}", inventory_context)
+
+    # Check conversation for order numbers — look them up and inject context
+    # Scan current message + recent history so follow-up questions still have order data
+    all_user_text = req.message
+    for msg in messages[-6:]:
+        if msg["role"] == "user":
+            all_user_text += " " + msg["content"]
+    order_matches = list(dict.fromkeys(ORDER_NUMBER_PATTERN.findall(all_user_text)))
+    if order_matches:
+        order_contexts = []
+        for on in order_matches[:3]:
+            order_info = await _lookup_order(on.upper(), db)
+            order_contexts.append(order_info)
+        if order_contexts:
+            system += "\n\n" + "\n\n".join(order_contexts)
 
     # Call Claude
     try:
