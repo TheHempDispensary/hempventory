@@ -847,7 +847,7 @@ async def active_sale(db: aiosqlite.Connection = Depends(get_db)):
     now_eastern = datetime.now(eastern).strftime("%Y-%m-%dT%H:%M")
 
     cursor = await db.execute(
-        """SELECT discount_pct, excluded_brands, starts_at, expires_at
+        """SELECT discount_pct, excluded_brands, starts_at, expires_at, applies_to, product_ids
            FROM promo_codes
            WHERE is_direct_discount = 1
              AND is_active = 1
@@ -864,10 +864,14 @@ async def active_sale(db: aiosqlite.Connection = Depends(get_db)):
         return {"active": False}
 
     excluded = [b.strip() for b in (row["excluded_brands"] or "").split(",") if b.strip()]
+    applies_to = row["applies_to"] if "applies_to" in row.keys() else "all"
+    product_ids = [pid.strip() for pid in (row["product_ids"] or "").split(",") if pid.strip()] if applies_to == "specific" else []
     return {
         "active": True,
         "discount_percent": round(row["discount_pct"] * 100, 2),
         "excluded_brands": excluded,
+        "applies_to": applies_to,
+        "product_ids": product_ids,
         "start_date": row["starts_at"],
         "end_date": row["expires_at"],
     }
