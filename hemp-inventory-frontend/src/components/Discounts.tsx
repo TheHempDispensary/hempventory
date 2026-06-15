@@ -443,6 +443,21 @@ export default function Discounts() {
     return d.toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", hour12: true });
   };
 
+  const isExpired = (expiresAt: string | null): boolean => {
+    if (!expiresAt) return false;
+    let endDate: Date;
+    if (expiresAt.includes("T")) {
+      const [datePart, timePart] = expiresAt.split("T");
+      const [y, mo, dy] = datePart.split("-").map(Number);
+      const [hr, mn] = (timePart || "23:59").split(":").map(Number);
+      endDate = new Date(y, mo - 1, dy, hr, mn);
+    } else {
+      const [y, m, d] = expiresAt.split("-").map(Number);
+      endDate = new Date(y, m - 1, d, 23, 59);
+    }
+    return new Date() > endDate;
+  };
+
   const formatPrice = (cents: number) => {
     if (!cents) return "$0.00";
     return "$" + (cents / 100).toFixed(2);
@@ -963,9 +978,12 @@ export default function Discounts() {
                       <span className="text-sm font-medium text-gray-900">{formatDiscount(promo)}</span>
                       <button onClick={() => handleToggleActive(promo)} className="inline-flex items-center gap-1"
                         title={promo.is_active ? "Click to disable" : "Click to enable"}>
-                        {promo.is_active ? (
+                        {promo.is_active && !isExpired(promo.expires_at) ? (
                           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
                             <ToggleRight className="w-3.5 h-3.5" /> Active</span>
+                        ) : promo.is_active && isExpired(promo.expires_at) ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800">
+                            <Clock className="w-3.5 h-3.5" /> Expired</span>
                         ) : (
                           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">
                             <ToggleLeft className="w-3.5 h-3.5" /> Inactive</span>
