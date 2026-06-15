@@ -4,6 +4,7 @@ import os
 import re
 import time
 import json
+import asyncio
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -443,6 +444,19 @@ async def send_message(
         (req.session_id, assistant_message),
     )
 
+    # Check existing contact info BEFORE updating (to detect new leads)
+    prev_email = None
+    prev_phone = None
+    if customer_name and (customer_email or customer_phone):
+        notif_cursor = await db.execute(
+            "SELECT customer_email, customer_phone FROM chat_sessions WHERE session_id = ?",
+            (req.session_id,),
+        )
+        notif_row = await notif_cursor.fetchone()
+        if notif_row:
+            prev_email = notif_row[0]
+            prev_phone = notif_row[1]
+
     # Update session metadata
     updates = ["updated_at = CURRENT_TIMESTAMP"]
     params: list = []
@@ -469,7 +483,140 @@ async def send_message(
     )
     await db.commit()
 
+    # Send lead notification if new contact info was captured this turn
+    if customer_name and (customer_email or customer_phone):
+        new_contact = (
+            (customer_email and customer_email != prev_email) or
+            (customer_phone and customer_phone != prev_phone)
+        )
+        if new_contact:
+            smtp_settings = await _get_chat_smtp_settings(db)
+            first_msg = req.message
+            # Get the customer's first message for context
+            first_msg_cursor = await db.execute(
+                "SELECT content FROM chat_messages WHERE session_id = ? AND role = 'user' ORDER BY created_at ASC LIMIT 1",
+                (req.session_id,),
+            )
+            first_msg_row = await first_msg_cursor.fetchone()
+            if first_msg_row:
+                first_msg = first_msg_row[0]
+            asyncio.create_task(
+                _send_lead_notification(
+                    smtp_settings, customer_name, customer_email, customer_phone,
+                    first_msg, req.session_id, intent
+                )
+            )
+
     return ChatMessageResponse(message=assistant_message, intent=intent)
+
+
+# ── Lead Notification Helpers ────────────────────────────────────────────
+
+ADMIN_PANEL_URL = "https://inventory.thehempdispensary.com"
+LEAD_NOTIFY_EMAIL = "Support@TheHempDispensary.com"
+
+
+async def _get_chat_smtp_settings(db: aiosqlite.Connection) -> dict[str, str]:
+    """Get SMTP settings from database, falling back to env vars."""
+    smtp_settings: dict[str, str] = {}
+    for key in ["smtp_host", "smtp_port", "smtp_user", "smtp_password"]:
+        try:
+            cursor = await db.execute(
+                "SELECT value FROM settings WHERE key = ?", (key,)
+            )
+            row = await cursor.fetchone()
+            if row and row[0]:
+                smtp_settings[key] = row[0]
+        except Exception:
+            pass
+
+    if not smtp_settings.get("smtp_host"):
+        smtp_settings["smtp_host"] = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+    if not smtp_settings.get("smtp_port"):
+        smtp_settings["smtp_port"] = os.environ.get("SMTP_PORT", "587")
+    if not smtp_settings.get("smtp_user"):
+        smtp_settings["smtp_user"] = os.environ.get("SMTP_USER", "")
+    if not smtp_settings.get("smtp_password"):
+        smtp_settings["smtp_password"] = os.environ.get("SMTP_PASSWORD", "")
+    return smtp_settings
+
+
+async def _send_lead_notification(
+    smtp_settings: dict[str, str],
+    name: str,
+    email: Optional[str],
+    phone: Optional[str],
+    first_message: str,
+    session_id: str,
+    intent: str,
+) -> None:
+    """Send an email notification to the support team when Bud captures a new lead."""
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+
+    smtp_user = smtp_settings.get("smtp_user", "")
+    smtp_password = smtp_settings.get("smtp_password", "")
+    if not smtp_user or not smtp_password:
+        print("[chat] SMTP not configured, skipping lead notification")
+        return
+
+    contact_line = ""
+    if phone:
+        contact_line += f"<p><strong>Phone:</strong> {phone}</p>"
+    if email:
+        contact_line += f"<p><strong>Email:</strong> {email}</p>"
+
+    intent_label = "Looking to buy" if intent == "purchase" else "Browsing"
+
+    html_body = f"""
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <div style="background: #2d5016; color: white; padding: 20px; border-radius: 8px 8px 0 0;">
+            <h2 style="margin: 0;">New Lead from Bud 🌿</h2>
+            <p style="margin: 5px 0 0; opacity: 0.9;">A customer shared their contact info</p>
+        </div>
+        <div style="border: 1px solid #e0e0e0; border-top: none; padding: 20px; border-radius: 0 0 8px 8px;">
+            <h3 style="color: #2d5016; margin-top: 0;">Customer Info</h3>
+            <p><strong>Name:</strong> {name}</p>
+            {contact_line}
+            <p><strong>Intent:</strong> {intent_label}</p>
+
+            <h3 style="color: #2d5016;">What they asked about</h3>
+            <p style="background: #f5f5f5; padding: 12px; border-radius: 4px; font-style: italic;">
+                "{first_message[:300]}"
+            </p>
+
+            <div style="margin-top: 20px; padding-top: 15px; border-top: 1px solid #e0e0e0;">
+                <p style="color: #666; font-size: 13px;">
+                    View the full conversation in the
+                    <a href="{ADMIN_PANEL_URL}" style="color: #2d5016;">Admin Panel → Conversations</a>
+                </p>
+            </div>
+        </div>
+    </div>
+    """
+
+    subject = f"New Lead from Bud: {name}"
+    if phone:
+        subject += f" ({phone})"
+
+    smtp_host = smtp_settings.get("smtp_host", "smtp.gmail.com")
+    smtp_port = int(smtp_settings.get("smtp_port", "587"))
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = smtp_user
+    msg["To"] = LEAD_NOTIFY_EMAIL
+    msg.attach(MIMEText(html_body, "html"))
+
+    try:
+        with smtplib.SMTP(smtp_host, smtp_port) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_password)
+            server.sendmail(smtp_user, [LEAD_NOTIFY_EMAIL], msg.as_string())
+        print(f"[chat] Lead notification sent for {name} ({phone or email})")
+    except Exception as e:
+        print(f"[chat] Failed to send lead notification: {e}")
 
 
 @router.get("/sessions")
