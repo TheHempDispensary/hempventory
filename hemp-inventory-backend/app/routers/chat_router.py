@@ -551,6 +551,7 @@ async def _send_lead_notification(
     intent: str,
 ) -> None:
     """Send an email notification to the support team when Bud captures a new lead."""
+    import html as html_mod
     import smtplib
     from email.mime.text import MIMEText
     from email.mime.multipart import MIMEMultipart
@@ -561,11 +562,17 @@ async def _send_lead_notification(
         print("[chat] SMTP not configured, skipping lead notification")
         return
 
+    # Escape user-controlled values to prevent HTML injection
+    safe_name = html_mod.escape(name)
+    safe_phone = html_mod.escape(phone) if phone else ""
+    safe_email = html_mod.escape(email) if email else ""
+    safe_message = html_mod.escape(first_message[:300])
+
     contact_line = ""
-    if phone:
-        contact_line += f"<p><strong>Phone:</strong> {phone}</p>"
-    if email:
-        contact_line += f"<p><strong>Email:</strong> {email}</p>"
+    if safe_phone:
+        contact_line += f"<p><strong>Phone:</strong> {safe_phone}</p>"
+    if safe_email:
+        contact_line += f"<p><strong>Email:</strong> {safe_email}</p>"
 
     intent_label = "Looking to buy" if intent == "purchase" else "Browsing"
 
@@ -577,19 +584,19 @@ async def _send_lead_notification(
         </div>
         <div style="border: 1px solid #e0e0e0; border-top: none; padding: 20px; border-radius: 0 0 8px 8px;">
             <h3 style="color: #2d5016; margin-top: 0;">Customer Info</h3>
-            <p><strong>Name:</strong> {name}</p>
+            <p><strong>Name:</strong> {safe_name}</p>
             {contact_line}
             <p><strong>Intent:</strong> {intent_label}</p>
 
             <h3 style="color: #2d5016;">What they asked about</h3>
             <p style="background: #f5f5f5; padding: 12px; border-radius: 4px; font-style: italic;">
-                "{first_message[:300]}"
+                &ldquo;{safe_message}&rdquo;
             </p>
 
             <div style="margin-top: 20px; padding-top: 15px; border-top: 1px solid #e0e0e0;">
                 <p style="color: #666; font-size: 13px;">
                     View the full conversation in the
-                    <a href="{ADMIN_PANEL_URL}" style="color: #2d5016;">Admin Panel → Conversations</a>
+                    <a href="{ADMIN_PANEL_URL}" style="color: #2d5016;">Admin Panel &rarr; Conversations</a>
                 </p>
             </div>
         </div>
