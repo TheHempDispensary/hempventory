@@ -616,11 +616,15 @@ async def _send_lead_notification(
     msg["To"] = LEAD_NOTIFY_EMAIL
     msg.attach(MIMEText(html_body, "html"))
 
-    try:
+    def _do_send():
         with smtplib.SMTP(smtp_host, smtp_port) as server:
             server.starttls()
             server.login(smtp_user, smtp_password)
             server.sendmail(smtp_user, [LEAD_NOTIFY_EMAIL], msg.as_string())
+
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _do_send)
         print(f"[chat] Lead notification sent for {name} ({phone or email})")
     except Exception as e:
         print(f"[chat] Failed to send lead notification: {e}")
