@@ -1,15 +1,16 @@
-name: Deploy Backend to Fly.io
+name: Deploy
 
 on:
   push:
     branches: [main]
     paths:
       - "hemp-inventory-backend/**"
+      - "hemp-inventory-frontend/**"
       - ".github/workflows/deploy.yml"
 
 jobs:
-  deploy:
-    name: Deploy to Fly.io
+  deploy-backend:
+    name: Deploy Backend to Fly.io
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,3 +21,24 @@ jobs:
         working-directory: hemp-inventory-backend
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+  deploy-frontend:
+    name: Deploy Frontend to Netlify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - run: npm ci
+        working-directory: hemp-inventory-frontend
+
+      - run: npm run build
+        working-directory: hemp-inventory-frontend
+
+      - run: npx netlify-cli deploy --prod --dir=dist --site=${{ secrets.NETLIFY_SITE_ID }}
+        working-directory: hemp-inventory-frontend
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
