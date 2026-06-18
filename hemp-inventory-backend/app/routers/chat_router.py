@@ -18,7 +18,7 @@ from app.auth import get_current_user
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-MODEL = "claude-sonnet-4-20250514"
+MODEL = os.environ.get("CLAUDE_MODEL", "claude-opus-4-8")
 
 # ── Inventory context cache (reuses ecommerce product cache) ─────────────
 _inventory_context: str = ""
