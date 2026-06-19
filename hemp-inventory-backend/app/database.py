@@ -482,6 +482,10 @@ async def init_db():
             await db.execute("ALTER TABLE promo_codes ADD COLUMN excluded_brands TEXT DEFAULT ''")
         except Exception:
             pass
+        try:
+            await db.execute("ALTER TABLE promo_codes ADD COLUMN sync_to_clover INTEGER DEFAULT 0")
+        except Exception:
+            pass
         # Product descriptions table (stored locally since Clover API doesn't persist descriptions)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS product_descriptions (

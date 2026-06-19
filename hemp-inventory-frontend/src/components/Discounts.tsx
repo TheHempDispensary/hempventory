@@ -20,6 +20,7 @@ interface PromoCode {
   clover_discount_id: string;
   is_direct_discount: boolean;
   excluded_brands: string;
+  sync_to_clover: boolean;
   created_at: string;
 }
 
@@ -376,7 +377,7 @@ export default function Discounts() {
     setEditAppliesTo((promo.applies_to === "specific" ? "specific" : "all") as "all" | "specific");
     setEditProductIds(promo.product_ids ? promo.product_ids.split(",").filter(Boolean) : []);
     setEditExcludeOtherCoupons(promo.exclude_from_other_coupons);
-    setEditSyncToClover(!!promo.clover_discount_id);
+    setEditSyncToClover(!!promo.sync_to_clover || !!promo.clover_discount_id);
     setEditExcludedBrands(promo.excluded_brands ? promo.excluded_brands.split(",").filter(Boolean) : []);
   };
 
@@ -424,15 +425,20 @@ export default function Discounts() {
   };
 
   const formatDate = (dateStr: string) => {
+    if (!dateStr) return "";
     try {
       if (dateStr.includes("T")) {
         const [datePart, timePart] = dateStr.split("T");
         const [y, mo, dy] = datePart.split("-").map(Number);
         const [hr, mn] = (timePart || "00:00").split(":").map(Number);
         const d = new Date(y, mo - 1, dy, hr, mn);
+        if (isNaN(d.getTime())) return "";
         return d.toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", hour12: true }) + " ET";
       }
-      const [y, m, d] = dateStr.split("-").map(Number);
+      // Handle SQLite CURRENT_TIMESTAMP format: "2026-06-19 09:41:14"
+      const cleaned = dateStr.includes(" ") && !dateStr.includes("T") ? dateStr.split(" ")[0] : dateStr;
+      const [y, m, d] = cleaned.split("-").map(Number);
+      if (isNaN(y) || isNaN(m) || isNaN(d)) return "";
       return new Date(y, m - 1, d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
     } catch { return dateStr; }
   };
@@ -1034,7 +1040,7 @@ export default function Discounts() {
                     )}
                     {promo.exclude_from_other_coupons && <span className="text-orange-600"><Ban className="w-3 h-3 inline" /> Excludes other coupons</span>}
                     {promo.clover_discount_id && <span className="text-blue-600"><Cloud className="w-3 h-3 inline" /> Clover synced</span>}
-                    <span className="text-gray-400">Created: {formatDate(promo.created_at)}</span>
+                    {formatDate(promo.created_at) && <span className="text-gray-400">Created: {formatDate(promo.created_at)}</span>}
                   </div>
                 </div>
               )}
@@ -1170,7 +1176,7 @@ export default function Discounts() {
                     <span className="text-amber-600"><ShoppingBag className="w-3 h-3 inline" /> {vd.product_name}</span>
                     {vd.customer_label && <span className="text-gray-700 font-medium">{vd.customer_label}</span>}
                     {vd.clover_discount_id && <span className="text-blue-600"><Cloud className="w-3 h-3 inline" /> Clover synced</span>}
-                    <span className="text-gray-400">Created: {formatDate(vd.created_at)}</span>
+                    {formatDate(vd.created_at) && <span className="text-gray-400">Created: {formatDate(vd.created_at)}</span>}
                   </div>
                 </div>
               )}

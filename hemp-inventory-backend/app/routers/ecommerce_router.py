@@ -909,7 +909,8 @@ async def list_promos(db: aiosqlite.Connection = Depends(get_db)):
             "clover_discount_id": row["clover_discount_id"] if "clover_discount_id" in row.keys() else "",
             "is_direct_discount": bool(row["is_direct_discount"]) if "is_direct_discount" in row.keys() else False,
             "excluded_brands": row["excluded_brands"] if "excluded_brands" in row.keys() else "",
-            "created_at": row["created_at"],
+            "sync_to_clover": bool(row["sync_to_clover"]) if "sync_to_clover" in row.keys() else False,
+            "created_at": row["created_at"] or "",
         })
     return promos
 
@@ -1137,11 +1138,11 @@ async def create_promo(body: PromoCreateRequest, db: aiosqlite.Connection = Depe
     try:
         cursor = await db.execute(
             """INSERT INTO promo_codes (code, discount_pct, discount_amount, single_use, max_uses,
-               expires_at, starts_at, applies_to, product_ids, exclude_from_other_coupons, clover_discount_id, is_direct_discount, excluded_brands)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               expires_at, starts_at, applies_to, product_ids, exclude_from_other_coupons, clover_discount_id, is_direct_discount, excluded_brands, sync_to_clover)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (code, body.discount_pct, body.discount_amount, int(body.single_use), body.max_uses,
              body.expires_at, body.starts_at, body.applies_to, body.product_ids,
-             int(body.exclude_from_other_coupons), clover_discount_id, int(body.is_direct_discount), body.excluded_brands),
+             int(body.exclude_from_other_coupons), clover_discount_id, int(body.is_direct_discount), body.excluded_brands, int(body.sync_to_clover)),
         )
         await db.commit()
         promo_id = cursor.lastrowid
@@ -1232,7 +1233,10 @@ async def update_promo(promo_id: int, body: PromoUpdateRequest, db: aiosqlite.Co
     if body.excluded_brands is not None:
         updates.append("excluded_brands = ?")
         params.append(body.excluded_brands)
-    if not updates and body.sync_to_clover is None:
+    if body.sync_to_clover is not None:
+        updates.append("sync_to_clover = ?")
+        params.append(int(body.sync_to_clover))
+    if not updates:
         return {"status": "no changes"}
     if updates:
         params.append(promo_id)

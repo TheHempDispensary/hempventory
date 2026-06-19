@@ -79,6 +79,7 @@ async def _get_inventory_context() -> str:
 
 
 ORDER_NUMBER_PATTERN = re.compile(r"\bHD-[0-9A-Fa-f]+-\d+\b")
+LOYALTY_KEYWORDS = re.compile(r"\b(points?|rewards?|loyalty|redeem|balance)\b", re.IGNORECASE)
 
 
 async def _lookup_order(order_number: str, db: aiosqlite.Connection) -> str:
@@ -164,6 +165,67 @@ async def _lookup_order(order_number: str, db: aiosqlite.Connection) -> str:
     return "\n".join(lines)
 
 
+PHONE_PATTERN = re.compile(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}")
+EMAIL_PATTERN = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
+
+
+async def _lookup_loyalty(identifier: str, db: aiosqlite.Connection) -> str:
+    """Look up a customer's loyalty points by phone or email and return a formatted summary for Bud."""
+    identifier = identifier.strip()
+    is_email = "@" in identifier
+    if is_email:
+        param = identifier
+        cursor = await db.execute(
+            """SELECT id, first_name, last_name, phone, email, points_balance, lifetime_points
+               FROM loyalty_customers WHERE email = ?""",
+            (param,),
+        )
+    else:
+        # Strip non-digits for phone lookup
+        param = re.sub(r"\D", "", identifier)
+        cursor = await db.execute(
+            """SELECT id, first_name, last_name, phone, email, points_balance, lifetime_points
+               FROM loyalty_customers WHERE phone = ?""",
+            (param,),
+        )
+    row = await cursor.fetchone()
+    if not row:
+        return f"LOYALTY LOOKUP RESULT: No loyalty account found for {'email' if is_email else 'phone'} {identifier}. The customer may need to create an account at checkout."
+
+    cust_id, first_name, last_name, phone, email, points_balance, lifetime_points = row
+    name = f"{first_name} {last_name}".strip() or "Customer"
+
+    # Get available rewards
+    rw_cursor = await db.execute(
+        "SELECT name, points_required, reward_type, reward_value, description FROM loyalty_rewards WHERE is_active = 1 ORDER BY points_required ASC"
+    )
+    rewards = await rw_cursor.fetchall()
+
+    lines = [
+        f"LOYALTY LOOKUP RESULT for {name}:",
+        f"  Points Balance: {points_balance} points",
+        f"  Lifetime Points Earned: {lifetime_points}",
+    ]
+
+    if rewards:
+        lines.append("  Available Rewards:")
+        for r in rewards:
+            rname, pts_required, rtype, rvalue, desc = r
+            can_redeem = points_balance >= pts_required
+            status = "ELIGIBLE" if can_redeem else f"need {pts_required - points_balance} more"
+            if rtype == "percent_off":
+                discount_desc = f"{int(rvalue)}% off"
+            elif rtype == "fixed_amount":
+                discount_desc = f"${rvalue:.2f} off"
+            else:
+                discount_desc = desc or rname
+            lines.append(f"    - {rname}: {discount_desc} ({pts_required} pts) [{status}]")
+
+    lines.append("  How to Apply: At checkout, enter phone/email in the Loyalty section, then select a reward to apply it to the order.")
+
+    return "\n".join(lines)
+
+
 SYSTEM_PROMPT = """You are Bud, the friendly and knowledgeable Virtual Budtender for The Hemp Dispensary (THD) in Spring Hill, Florida.
 
 PERSONALITY:
@@ -240,6 +302,16 @@ ORDER TRACKING:
 - If no order is found for the number they gave, let them know politely and suggest double-checking the number (it's in their confirmation email) or contacting customer service at 352-842-6185 or Support@TheHempDispensary.com.
 - For complex shipping issues (lost packages, wrong items, damage), direct them to customer service at 352-842-6185 or Support@TheHempDispensary.com.
 - Customers can also check their orders anytime from their account page (click the user icon in the header, sign in with email or phone).
+
+LOYALTY POINTS:
+- THD has a loyalty program where customers earn points on purchases and redeem them for discounts.
+- If a customer asks about their points, rewards, loyalty balance, or how to apply/redeem points:
+  * Ask them for their phone number or email (the one they used when signing up for loyalty).
+  * When the system provides a "LOYALTY LOOKUP RESULT" in your context, use that data to tell them their balance, what rewards they've earned, and how to apply them.
+  * To apply points at checkout: In the checkout page, there's a "Loyalty" section where they enter their phone or email. Once verified, they'll see their point balance and available rewards. They just select a reward and it applies the discount to their order.
+  * Points cannot be combined with promo codes on the same order.
+  * If no loyalty account is found, let them know they can sign up at checkout — they'll automatically start earning points on their purchases.
+- Do NOT make up point balances — only share what the system provides in the LOYALTY LOOKUP RESULT.
 
 LEAD CAPTURE (IMPORTANT — this helps the team follow up):
 - After your FIRST helpful exchange (not your greeting), naturally ask for the customer's first name so you can personalize the conversation.
@@ -358,6 +430,28 @@ async def send_message(
             order_contexts.append(order_info)
         if order_contexts:
             system += "\n\n" + "\n\n".join(order_contexts)
+
+    # Check for loyalty-related questions — look up points if phone/email available
+    if LOYALTY_KEYWORDS.search(all_user_text):
+        # Try to find a phone or email in the conversation to look up
+        phones = PHONE_PATTERN.findall(all_user_text)
+        emails = EMAIL_PATTERN.findall(all_user_text)
+        # Also check if we already have contact info stored for this session
+        if not phones and not emails:
+            sess_cursor = await db.execute(
+                "SELECT customer_phone, customer_email FROM chat_sessions WHERE session_id = ?",
+                (req.session_id,),
+            )
+            sess_row = await sess_cursor.fetchone()
+            if sess_row:
+                if sess_row[0]:
+                    phones = [sess_row[0]]
+                if sess_row[1]:
+                    emails = [sess_row[1]]
+        identifier = phones[0] if phones else (emails[0] if emails else None)
+        if identifier:
+            loyalty_info = await _lookup_loyalty(identifier, db)
+            system += "\n\n" + loyalty_info
 
     # Call Claude
     try:
