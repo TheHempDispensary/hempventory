@@ -26,11 +26,14 @@ async def _fetch_orders_for_location(merchant_id: str, api_token: str, start_ms:
     offset = 0
     limit = 100
     while True:
-        filter_str = f"payType!=NULL&createdTime>={start_ms}&createdTime<={end_ms}"
         data = await client.get_orders(
             limit=limit,
             offset=offset,
-            filter_str=filter_str,
+            filters=[
+                "payType!=NULL",
+                f"createdTime>={start_ms}",
+                f"createdTime<={end_ms}",
+            ],
             expand="lineItems",
         )
         elements = data.get("elements", [])

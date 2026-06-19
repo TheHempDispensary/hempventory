@@ -116,18 +116,23 @@ class CloverClient:
         limit: int = 100,
         offset: int = 0,
         filter_str: Optional[str] = None,
+        filters: Optional[list] = None,
         expand: str = "lineItems,customers",
     ) -> dict:
         """Get orders for sales tracking."""
-        params: dict = {"limit": limit, "offset": offset, "expand": expand}
-        if filter_str:
-            params["filter"] = filter_str
+        # Clover requires each filter condition as a separate 'filter' query param
+        params_list: list = [("limit", limit), ("offset", offset), ("expand", expand)]
+        if filters:
+            for f in filters:
+                params_list.append(("filter", f))
+        elif filter_str:
+            params_list.append(("filter", filter_str))
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await self._request_with_retry(
                 client, "get",
                 f"{self.base_url}/orders",
                 headers=self._headers(),
-                params=params,
+                params=params_list,
             )
             return resp.json()
 
