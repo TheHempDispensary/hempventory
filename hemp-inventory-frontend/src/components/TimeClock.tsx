@@ -59,6 +59,7 @@ interface Employee {
   id: number;
   name: string;
   pin: string | null;
+  username: string | null;
   active: boolean;
   created_at: string;
   pay_rate: number | null;
@@ -135,9 +136,12 @@ export default function TimeClock() {
   const [showAddEmployee, setShowAddEmployee] = useState(false);
   const [newEmpName, setNewEmpName] = useState("");
   const [newEmpPin, setNewEmpPin] = useState("");
+  const [newEmpUsername, setNewEmpUsername] = useState("");
   const [editingEmp, setEditingEmp] = useState<number | null>(null);
   const [editEmpName, setEditEmpName] = useState("");
   const [editEmpPayRate, setEditEmpPayRate] = useState("");
+  const [editEmpPin, setEditEmpPin] = useState("");
+  const [editEmpUsername, setEditEmpUsername] = useState("");
 
   // Timesheet filters (datetime-local values for time-precise filtering)
   const [startDate, setStartDate] = useState(() => {
@@ -319,12 +323,27 @@ export default function TimeClock() {
 
   const handleAddEmployee = async () => {
     if (!newEmpName.trim()) return;
+    if (!newEmpPin.trim()) {
+      showToast("error", "PIN is required for clock-in access");
+      return;
+    }
+    // Auto-generate username if not provided: "Allison Smith" -> "ASmith"
+    let username = newEmpUsername.trim();
+    if (!username) {
+      const parts = newEmpName.trim().split(/\s+/);
+      if (parts.length >= 2) {
+        username = parts[0][0].toUpperCase() + parts[parts.length - 1].charAt(0).toUpperCase() + parts[parts.length - 1].slice(1);
+      } else {
+        username = parts[0];
+      }
+    }
     try {
-      await createEmployee({ name: newEmpName.trim(), pin: newEmpPin || undefined });
+      await createEmployee({ name: newEmpName.trim(), pin: newEmpPin, username });
       setNewEmpName("");
       setNewEmpPin("");
+      setNewEmpUsername("");
       setShowAddEmployee(false);
-      showToast("success", "Employee added");
+      showToast("success", "Employee added — they can now clock in with username & PIN");
       await loadEmployees();
     } catch (err) {
       console.error(err);
@@ -335,8 +354,10 @@ export default function TimeClock() {
   const handleSaveEditEmp = async (id: number) => {
     if (!editEmpName.trim()) return;
     try {
-      const data: { name: string; pay_rate?: number } = { name: editEmpName.trim() };
+      const data: { name: string; pay_rate?: number; pin?: string; username?: string } = { name: editEmpName.trim() };
       if (editEmpPayRate !== "") data.pay_rate = parseFloat(editEmpPayRate);
+      if (editEmpPin !== "") data.pin = editEmpPin;
+      if (editEmpUsername !== "") data.username = editEmpUsername;
       await updateEmployee(id, data);
       setEditingEmp(null);
       showToast("success", "Employee updated");
@@ -361,11 +382,12 @@ export default function TimeClock() {
     setSyncing(true);
     try {
       const res = await syncEmployeesFromClover();
-      const { imported, skipped, errors } = res.data;
+      const { imported, skipped, errors, note } = res.data;
       let msg = `Imported ${imported} employee(s)`;
       if (skipped > 0) msg += `, ${skipped} already existed`;
       if (errors.length > 0) msg += `. Errors: ${errors.map((e: { location: string; error: string }) => e.location).join(", ")}`;
       showToast(errors.length > 0 ? "error" : "success", msg);
+      if (note) showToast("success", note);
       await loadEmployees();
     } catch (err) {
       console.error(err);
@@ -1272,24 +1294,48 @@ export default function TimeClock() {
             </div>
           </div>
 
+          {/* Warning for employees without credentials */}
+          {employees.filter(e => e.active && (!e.pin || !e.username)).length > 0 && (
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+              <p className="text-sm text-amber-800 font-medium">
+                {employees.filter(e => e.active && (!e.pin || !e.username)).length} employee(s) cannot clock in — missing username or PIN.
+              </p>
+              <p className="text-xs text-amber-600 mt-1">
+                Click the edit (pencil) icon to set their username and PIN.
+                {" "}Clover does not sync PINs — they must be set here manually.
+              </p>
+            </div>
+          )}
+
           {/* Add Employee Form */}
           {showAddEmployee && (
             <div className="bg-white border border-green-200 rounded-lg p-4">
               <h3 className="text-sm font-semibold text-gray-900 mb-3">New Employee</h3>
-              <div className="flex gap-3 items-end">
-                <div className="flex-1">
+              <p className="text-xs text-gray-500 mb-3">Username and PIN are required so the employee can clock in.</p>
+              <div className="flex gap-3 items-end flex-wrap">
+                <div className="flex-1 min-w-[160px]">
                   <label className="block text-xs font-medium text-gray-600 mb-1">Name *</label>
                   <input
                     type="text"
                     value={newEmpName}
                     onChange={(e) => setNewEmpName(e.target.value)}
-                    placeholder="Employee name"
+                    placeholder="Allison Smith"
                     className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-green-500"
-                    onKeyDown={(e) => e.key === "Enter" && handleAddEmployee()}
                   />
                 </div>
                 <div className="w-32">
-                  <label className="block text-xs font-medium text-gray-600 mb-1">PIN (optional)</label>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Username</label>
+                  <input
+                    type="text"
+                    value={newEmpUsername}
+                    onChange={(e) => setNewEmpUsername(e.target.value)}
+                    placeholder={newEmpName.trim() ? (() => { const p = newEmpName.trim().split(/\s+/); return p.length >= 2 ? p[0][0].toUpperCase() + p[p.length-1].charAt(0).toUpperCase() + p[p.length-1].slice(1) : p[0]; })() : "ASmith"}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-green-500"
+                  />
+                  <span className="text-[10px] text-gray-400">Auto-generated if blank</span>
+                </div>
+                <div className="w-28">
+                  <label className="block text-xs font-medium text-gray-600 mb-1">PIN *</label>
                   <input
                     type="text"
                     value={newEmpPin}
@@ -1297,6 +1343,7 @@ export default function TimeClock() {
                     placeholder="1234"
                     maxLength={6}
                     className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-green-500"
+                    onKeyDown={(e) => e.key === "Enter" && handleAddEmployee()}
                   />
                 </div>
                 <button
@@ -1306,7 +1353,7 @@ export default function TimeClock() {
                   Add
                 </button>
                 <button
-                  onClick={() => { setShowAddEmployee(false); setNewEmpName(""); setNewEmpPin(""); }}
+                  onClick={() => { setShowAddEmployee(false); setNewEmpName(""); setNewEmpPin(""); setNewEmpUsername(""); }}
                   className="px-4 py-2 bg-gray-100 text-gray-600 text-sm rounded-lg hover:bg-gray-200"
                 >
                   Cancel
@@ -1321,6 +1368,7 @@ export default function TimeClock() {
               <thead>
                 <tr className="bg-gray-50 border-b border-gray-200">
                   <th className="text-left px-4 py-2 font-medium text-gray-600">Name</th>
+                  <th className="text-left px-4 py-2 font-medium text-gray-600">Username</th>
                   <th className="text-left px-4 py-2 font-medium text-gray-600">PIN</th>
                   <th className="text-right px-4 py-2 font-medium text-gray-600">Pay Rate</th>
                   <th className="text-center px-4 py-2 font-medium text-gray-600">Status</th>
@@ -1352,7 +1400,37 @@ export default function TimeClock() {
                         <span className="text-gray-900 font-medium">{emp.name}</span>
                       )}
                     </td>
-                    <td className="px-4 py-3 text-gray-500">{emp.pin || "---"}</td>
+                    <td className="px-4 py-3">
+                      {editingEmp === emp.id ? (
+                        <input
+                          type="text"
+                          value={editEmpUsername}
+                          onChange={(e) => setEditEmpUsername(e.target.value)}
+                          className="border border-gray-300 rounded px-2 py-1 text-sm w-24"
+                          placeholder="ASmith"
+                        />
+                      ) : (
+                        <span className={emp.username ? "text-gray-600" : "text-red-400 italic"}>
+                          {emp.username || "Not set"}
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      {editingEmp === emp.id ? (
+                        <input
+                          type="text"
+                          value={editEmpPin}
+                          onChange={(e) => setEditEmpPin(e.target.value)}
+                          className="border border-gray-300 rounded px-2 py-1 text-sm w-20"
+                          placeholder="1234"
+                          maxLength={6}
+                        />
+                      ) : (
+                        <span className={emp.pin ? "text-gray-500" : "text-red-400 italic"}>
+                          {emp.pin || "Not set"}
+                        </span>
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-right">
                       {editingEmp === emp.id ? (
                         <input
@@ -1385,7 +1463,7 @@ export default function TimeClock() {
                     <td className="px-4 py-3 text-right">
                       <div className="flex items-center justify-end gap-2">
                         <button
-                          onClick={() => { setEditingEmp(emp.id); setEditEmpName(emp.name); setEditEmpPayRate(emp.pay_rate !== null ? String(emp.pay_rate) : ""); }}
+                          onClick={() => { setEditingEmp(emp.id); setEditEmpName(emp.name); setEditEmpPayRate(emp.pay_rate !== null ? String(emp.pay_rate) : ""); setEditEmpPin(emp.pin || ""); setEditEmpUsername(emp.username || ""); }}
                           className="text-gray-400 hover:text-blue-600 transition-colors"
                           title="Edit employee"
                         >

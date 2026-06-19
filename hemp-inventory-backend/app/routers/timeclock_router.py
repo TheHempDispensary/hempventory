@@ -125,13 +125,29 @@ async def create_employee(
 ):
     if not emp.name.strip():
         raise HTTPException(status_code=400, detail="Name is required")
+    # Auto-generate username if not provided
+    username = emp.username
+    if not username:
+        parts = emp.name.strip().split()
+        if len(parts) >= 2:
+            username = parts[0][0].upper() + parts[-1].capitalize()
+        else:
+            username = parts[0]
+        # Ensure unique
+        cursor = await db.execute("SELECT LOWER(username) FROM employees WHERE username IS NOT NULL")
+        existing = {r[0] for r in await cursor.fetchall()}
+        base = username
+        counter = 1
+        while username.lower() in existing:
+            username = f"{base}{counter}"
+            counter += 1
     cursor = await db.execute(
         """INSERT INTO employees (name, nickname, phone, email, role, pay_type, pay_rate, pin, username, custom_id, active)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
-        (emp.name.strip(), emp.nickname, emp.phone, emp.email, emp.role, emp.pay_type, emp.pay_rate, emp.pin, emp.username, emp.custom_id),
+        (emp.name.strip(), emp.nickname, emp.phone, emp.email, emp.role, emp.pay_type, emp.pay_rate, emp.pin, username, emp.custom_id),
     )
     await db.commit()
-    return {"id": cursor.lastrowid, "name": emp.name.strip(), "active": True}
+    return {"id": cursor.lastrowid, "name": emp.name.strip(), "username": username, "active": True}
 
 
 @router.put("/employees/{employee_id}")
@@ -502,7 +518,9 @@ async def sync_employees_from_clover(
     user: dict = Depends(get_current_user),
     db: aiosqlite.Connection = Depends(get_db),
 ):
-    """Import employees from all Clover locations. Skips duplicates by name."""
+    """Import employees from all Clover locations. Skips duplicates by name.
+    Auto-generates usernames from names. PINs must be set manually (Clover doesn't expose them via API).
+    """
     locations = await _get_locations(db)
     if not locations:
         raise HTTPException(status_code=400, detail="No locations configured")
@@ -511,9 +529,11 @@ async def sync_employees_from_clover(
     skipped = 0
     errors = []
 
-    # Get existing employee names for dedup
+    # Get existing employee names and usernames for dedup
     cursor = await db.execute("SELECT LOWER(name) FROM employees")
     existing_names = {r[0] for r in await cursor.fetchall()}
+    cursor = await db.execute("SELECT LOWER(username) FROM employees WHERE username IS NOT NULL")
+    existing_usernames = {r[0] for r in await cursor.fetchall()}
 
     seen_names = set()
     for loc in locations:
@@ -530,16 +550,34 @@ async def sync_employees_from_clover(
                     skipped += 1
                     continue
                 seen_names.add(name_lower)
+                # Auto-generate username: "Allison Smith" -> "ASmith"
+                parts = name.split()
+                if len(parts) >= 2:
+                    username = parts[0][0].upper() + parts[-1].capitalize()
+                else:
+                    username = parts[0]
+                # Ensure unique
+                base_username = username
+                counter = 1
+                while username.lower() in existing_usernames:
+                    username = f"{base_username}{counter}"
+                    counter += 1
+                existing_usernames.add(username.lower())
                 await db.execute(
-                    "INSERT INTO employees (name, pin, active) VALUES (?, ?, 1)",
-                    (name, None),
+                    "INSERT INTO employees (name, username, pin, active) VALUES (?, ?, ?, 1)",
+                    (name, username, None),
                 )
                 imported += 1
         except Exception as e:
             errors.append({"location": loc_name, "error": str(e)})
 
     await db.commit()
-    return {"imported": imported, "skipped": skipped, "errors": errors}
+    return {
+        "imported": imported,
+        "skipped": skipped,
+        "errors": errors,
+        "note": "PINs must be set manually for new employees — Clover does not expose PINs via API." if imported > 0 else None,
+    }
 
 
 # ---------- Sync Tips from Clover ----------
