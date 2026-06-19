@@ -311,10 +311,10 @@ export const createItemGroup = (data: {
 // Time Clock
 export const getEmployees = () => api.get("/api/timeclock/employees");
 
-export const createEmployee = (data: { name: string; pin?: string }) =>
+export const createEmployee = (data: { name: string; pin?: string; username?: string }) =>
   api.post("/api/timeclock/employees", data);
 
-export const updateEmployee = (id: number, data: { name?: string; pin?: string; active?: boolean; pay_rate?: number }) =>
+export const updateEmployee = (id: number, data: { name?: string; pin?: string; username?: string; active?: boolean; pay_rate?: number }) =>
   api.put(`/api/timeclock/employees/${id}`, data);
 
 export const deleteEmployee = (id: number) =>
