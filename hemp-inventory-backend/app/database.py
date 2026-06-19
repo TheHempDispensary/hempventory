@@ -319,6 +319,15 @@ async def init_db():
         except Exception:
             pass  # Column already exists
 
+        # Dismissed employees blocklist (prevents Clover sync from re-importing deleted employees)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS dismissed_employee_names (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name_lower TEXT NOT NULL UNIQUE,
+                dismissed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Employee schedules table
         await db.execute("""
             CREATE TABLE IF NOT EXISTS employee_schedules (
