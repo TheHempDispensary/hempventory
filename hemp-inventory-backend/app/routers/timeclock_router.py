@@ -192,6 +192,15 @@ async def delete_employee(
     user: dict = Depends(get_current_user),
     db: aiosqlite.Connection = Depends(get_db),
 ):
+    # Get employee name before deleting so we can blocklist it from Clover re-import
+    cursor = await db.execute("SELECT name FROM employees WHERE id = ?", (employee_id,))
+    row = await cursor.fetchone()
+    if row:
+        name_lower = row[0].strip().lower()
+        await db.execute(
+            "INSERT OR IGNORE INTO dismissed_employee_names (name_lower) VALUES (?)",
+            (name_lower,),
+        )
     await db.execute("DELETE FROM time_entries WHERE employee_id = ?", (employee_id,))
     await db.execute("DELETE FROM employees WHERE id = ?", (employee_id,))
     await db.commit()
@@ -529,11 +538,13 @@ async def sync_employees_from_clover(
     skipped = 0
     errors = []
 
-    # Get existing employee names and usernames for dedup
+    # Get existing employee names, usernames, and dismissed names for dedup
     cursor = await db.execute("SELECT LOWER(name) FROM employees")
     existing_names = {r[0] for r in await cursor.fetchall()}
     cursor = await db.execute("SELECT LOWER(username) FROM employees WHERE username IS NOT NULL")
     existing_usernames = {r[0] for r in await cursor.fetchall()}
+    cursor = await db.execute("SELECT name_lower FROM dismissed_employee_names")
+    dismissed_names = {r[0] for r in await cursor.fetchall()}
 
     seen_names = set()
     for loc in locations:
@@ -546,7 +557,7 @@ async def sync_employees_from_clover(
                 if not name:
                     continue
                 name_lower = name.lower()
-                if name_lower in existing_names or name_lower in seen_names:
+                if name_lower in existing_names or name_lower in seen_names or name_lower in dismissed_names:
                     skipped += 1
                     continue
                 seen_names.add(name_lower)
