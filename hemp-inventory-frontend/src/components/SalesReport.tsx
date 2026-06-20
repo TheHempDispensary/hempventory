@@ -22,7 +22,7 @@ interface SalesData {
   by_location: Record<string, { revenue: number; orders: number; avg_order: number; error?: string }>;
   hourly: { hour: string; label: string; revenue: number; orders: number }[];
   daily: { date: string; label: string; revenue: number; orders: number }[];
-  top_items: { name: string; quantity: number; revenue: number }[];
+  top_items: { name: string; quantity: number; revenue: number; by_location?: Record<string, number> }[];
   recent_orders: { id: string; total: number; location: string; time: string; items: number }[];
 }
 
