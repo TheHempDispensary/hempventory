@@ -89,7 +89,7 @@ async def get_sales_report(
     by_location = {}
     by_hour = defaultdict(lambda: {"revenue": 0, "orders": 0})
     by_day = defaultdict(lambda: {"revenue": 0, "orders": 0})
-    by_item = defaultdict(lambda: {"name": "", "quantity": 0, "revenue": 0})
+    by_item = defaultdict(lambda: {"name": "", "quantity": 0, "revenue": 0, "by_location": defaultdict(int)})
     by_category = defaultdict(lambda: {"revenue": 0, "quantity": 0})
     recent_orders = []
 
@@ -139,6 +139,7 @@ async def get_sales_report(
                 by_item[item_key]["name"] = item_name
                 by_item[item_key]["quantity"] += item_qty
                 by_item[item_key]["revenue"] += item_price
+                by_item[item_key]["by_location"][loc_name] += item_qty
 
             # Recent orders (collect all, sort later)
             recent_orders.append({
@@ -161,7 +162,15 @@ async def get_sales_report(
     recent_orders = recent_orders[:50]
 
     # Sort top items by revenue
-    top_items = sorted(by_item.values(), key=lambda x: x["revenue"], reverse=True)[:25]
+    top_items_raw = sorted(by_item.values(), key=lambda x: x["revenue"], reverse=True)[:25]
+    top_items = []
+    for ti in top_items_raw:
+        top_items.append({
+            "name": ti["name"],
+            "quantity": ti["quantity"],
+            "revenue": ti["revenue"],
+            "by_location": dict(ti["by_location"]),
+        })
 
     # Sort categories by revenue
     # Note: Clover line items don't include category in order data,
