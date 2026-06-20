@@ -22,7 +22,7 @@ interface SalesData {
   by_location: Record<string, { revenue: number; orders: number; avg_order: number; error?: string }>;
   hourly: { hour: string; label: string; revenue: number; orders: number }[];
   daily: { date: string; label: string; revenue: number; orders: number }[];
-  top_items: { name: string; quantity: number; revenue: number }[];
+  top_items: { name: string; quantity: number; revenue: number; by_location?: Record<string, number> }[];
   recent_orders: { id: string; total: number; location: string; time: string; items: number }[];
 }
 
@@ -428,7 +428,17 @@ export default function SalesReport() {
                           {data.top_items.map((item, i) => (
                             <tr key={item.name} className="border-b border-gray-50 hover:bg-gray-50">
                               <td className="py-2 text-gray-400">{i + 1}</td>
-                              <td className="py-2 text-gray-900 font-medium max-w-xs truncate">{item.name}</td>
+                              <td className="py-2 text-gray-900 font-medium max-w-xs">
+                                <div className="truncate">{item.name}</div>
+                                {item.by_location && Object.keys(item.by_location).length > 0 && (
+                                  <div className="text-xs text-gray-400 mt-0.5">
+                                    {Object.entries(item.by_location as Record<string, number>)
+                                      .sort(([, a], [, b]) => b - a)
+                                      .map(([loc, qty]) => `${qty} at ${loc}`)
+                                      .join(" · ")}
+                                  </div>
+                                )}
+                              </td>
                               <td className="py-2 text-right text-gray-600">{item.quantity}</td>
                               <td className="py-2 text-right font-medium text-gray-900">{fmtMoney(item.revenue)}</td>
                               <td className="py-2 text-right text-gray-500">
