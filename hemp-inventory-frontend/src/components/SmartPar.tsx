@@ -8,6 +8,7 @@ interface ParProduct {
   categories: string[];
   price: number;
   total_stock: number;
+  stock_by_location: Record<string, number>;
   units_sold: number;
   units_per_month: number;
   par_level: number;
@@ -370,6 +371,16 @@ export default function SmartPar() {
                       >
                         {p.total_stock}
                       </span>
+                      {p.stock_by_location && Object.keys(p.stock_by_location).length > 0 && (
+                        <div className="text-xs text-gray-400 mt-0.5">
+                          {Object.entries(p.stock_by_location)
+                            .map(([loc, qty]) => {
+                              const short = loc.replace(" Location", "").replace("Hemp Dispensary ", "");
+                              return `${short}: ${qty}`;
+                            })
+                            .join(" · ")}
+                        </div>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-right text-gray-600">{p.units_sold}</td>
                     <td className="px-4 py-3 text-right text-gray-600">{p.units_per_month}</td>
