@@ -541,15 +541,17 @@ async def send_message(
     # Check existing contact info BEFORE updating (to detect new leads)
     prev_email = None
     prev_phone = None
-    if customer_name and (customer_email or customer_phone):
+    prev_name = None
+    if customer_email or customer_phone:
         notif_cursor = await db.execute(
-            "SELECT customer_email, customer_phone FROM chat_sessions WHERE session_id = ?",
+            "SELECT customer_name, customer_email, customer_phone FROM chat_sessions WHERE session_id = ?",
             (req.session_id,),
         )
         notif_row = await notif_cursor.fetchone()
         if notif_row:
-            prev_email = notif_row[0]
-            prev_phone = notif_row[1]
+            prev_name = notif_row[0]
+            prev_email = notif_row[1]
+            prev_phone = notif_row[2]
 
     # Update session metadata
     updates = ["updated_at = CURRENT_TIMESTAMP"]
@@ -578,12 +580,13 @@ async def send_message(
     await db.commit()
 
     # Send lead notification if new contact info was captured this turn
-    if customer_name and (customer_email or customer_phone):
+    if customer_email or customer_phone:
         new_contact = (
             (customer_email and customer_email != prev_email) or
             (customer_phone and customer_phone != prev_phone)
         )
         if new_contact:
+            lead_name = customer_name or prev_name or "Anonymous"
             smtp_settings = await _get_chat_smtp_settings(db)
             first_msg = req.message
             # Get the customer's first message for context
@@ -596,7 +599,7 @@ async def send_message(
                 first_msg = first_msg_row[0]
             asyncio.create_task(
                 _send_lead_notification(
-                    smtp_settings, customer_name, customer_email, customer_phone,
+                    smtp_settings, lead_name, customer_email, customer_phone,
                     first_msg, req.session_id, intent
                 )
             )
