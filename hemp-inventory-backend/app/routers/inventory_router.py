@@ -3147,12 +3147,18 @@ async def smart_par(
             for loc_data in item.get("locations", {}).values()
         )
 
+        stock_by_location = {
+            loc_name: loc_data.get("stock", 0)
+            for loc_name, loc_data in item.get("locations", {}).items()
+        }
+
         results.append({
             "name": item["name"],
             "sku": item["sku"],
             "categories": item.get("categories", []),
             "price": item.get("price", 0) / 100,  # cents -> dollars
             "total_stock": total_stock,
+            "stock_by_location": stock_by_location,
             "units_sold": units_sold,
             "units_per_month": round(units_per_month, 1),
             "par_level": par_level,
