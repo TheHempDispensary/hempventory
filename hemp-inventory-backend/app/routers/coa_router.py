@@ -186,6 +186,7 @@ async def run_coa_sync(db) -> dict:
         )
 
     await db.commit()
+    invalidate_product_cache()
     return {"synced_samples": len(samples), "synced_analytes": len(analytes)}
 
 
