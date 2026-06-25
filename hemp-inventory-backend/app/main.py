@@ -145,95 +145,9 @@ async def _scheduled_coa_sync():
     try:
         db = await _connect_db()
         try:
-            from app.acs_client import ACSLabClient
-            client = ACSLabClient()
-            results = await client.get_analyte_results()
-            alt_results = await client.get_analyte_results_alternate()
-            all_results = results + alt_results
-
-            samples: dict[str, dict] = {}
-            analytes: list[dict] = []
-            for r in all_results:
-                acc = r.get("sample_accession", "")
-                if not acc:
-                    continue
-                if acc not in samples:
-                    samples[acc] = {
-                        "sample_accession": acc,
-                        "order_number": r.get("number", ""),
-                        "batch_no": r.get("batch_no", ""),
-                        "business_name": r.get("business_name", ""),
-                        "product_name": r.get("product_name", ""),
-                        "product_type": r.get("product_type_name", ""),
-                        "consumption_type": r.get("consumption_type", ""),
-                        "description": r.get("description", ""),
-                        "test_purpose": r.get("test_purpose", ""),
-                        "sample_status": r.get("sample_status", ""),
-                        "order_date": r.get("order_date", ""),
-                        "test_start_date": r.get("test_start_date", ""),
-                        "coa_approved_date": r.get("coa_approved_date", ""),
-                        "postal_code": r.get("postal_code", ""),
-                        "extracted_from": r.get("extracted_from", ""),
-                    }
-                analyte_id = r.get("analyte_identifier", "")
-                panel_name = r.get("panel_name", "")
-                if analyte_id or panel_name:
-                    analytes.append({
-                        "sample_accession": acc,
-                        "panel_name": panel_name,
-                        "panel_identifier": r.get("panel_identifier", ""),
-                        "analyte_abbreviation": r.get("analyte_abbreviation", ""),
-                        "analyte_identifier": analyte_id,
-                        "concentration": r.get("concentration", 0),
-                        "conc_unit": r.get("conc_unit", ""),
-                        "result": r.get("result", ""),
-                        "result_unit": r.get("result_unit", ""),
-                        "analyte_remark": r.get("analyte_remark", ""),
-                        "panel_remark": r.get("panel_remark", ""),
-                    })
-
-            for s in samples.values():
-                await db.execute(
-                    """INSERT INTO coa_results
-                        (sample_accession, order_number, batch_no, business_name,
-                         product_name, product_type, consumption_type, description,
-                         test_purpose, sample_status, order_date, test_start_date,
-                         coa_approved_date, postal_code, extracted_from, synced_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                       ON CONFLICT(sample_accession) DO UPDATE SET
-                         sample_status=excluded.sample_status,
-                         coa_approved_date=excluded.coa_approved_date,
-                         synced_at=CURRENT_TIMESTAMP""",
-                    (
-                        s["sample_accession"], s["order_number"], s["batch_no"],
-                        s["business_name"], s["product_name"], s["product_type"],
-                        s["consumption_type"], s["description"], s["test_purpose"],
-                        s["sample_status"], s["order_date"], s["test_start_date"],
-                        s["coa_approved_date"], s["postal_code"], s["extracted_from"],
-                    ),
-                )
-            for a in analytes:
-                await db.execute(
-                    """INSERT INTO coa_analyte_results
-                        (sample_accession, panel_name, panel_identifier,
-                         analyte_abbreviation, analyte_identifier,
-                         concentration, conc_unit, result, result_unit,
-                         analyte_remark, panel_remark)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                       ON CONFLICT(sample_accession, analyte_identifier, panel_name) DO UPDATE SET
-                         concentration=excluded.concentration,
-                         result=excluded.result,
-                         analyte_remark=excluded.analyte_remark,
-                         panel_remark=excluded.panel_remark""",
-                    (
-                        a["sample_accession"], a["panel_name"], a["panel_identifier"],
-                        a["analyte_abbreviation"], a["analyte_identifier"],
-                        a["concentration"], a["conc_unit"], a["result"], a["result_unit"],
-                        a["analyte_remark"], a["panel_remark"],
-                    ),
-                )
-            await db.commit()
-            print(f"[auto-sync] COA synced: {len(samples)} samples, {len(analytes)} analytes")
+            from app.routers.coa_router import run_coa_sync
+            result = await run_coa_sync(db)
+            print(f"[auto-sync] COA synced: {result['synced_samples']} samples, {result['synced_analytes']} analytes")
         finally:
             await db.close()
     except Exception as e:

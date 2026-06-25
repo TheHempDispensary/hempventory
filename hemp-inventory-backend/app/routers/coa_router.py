@@ -19,9 +19,8 @@ def _get_acs_client() -> ACSLabClient:
 # ── Sync from ACS Lab ──────────────────────────────────────────────
 
 
-@router.post("/sync")
-async def sync_coa_results(db=Depends(get_db)):
-    """Pull all analyte results from ACS Lab (paginated) and cache locally."""
+async def run_coa_sync(db) -> dict:
+    """Shared sync logic used by both the HTTP endpoint and the background job."""
     client = _get_acs_client()
     all_results = await client.get_all_analyte_results_alternate()
 
@@ -156,6 +155,12 @@ async def sync_coa_results(db=Depends(get_db)):
 
     await db.commit()
     return {"synced_samples": len(samples), "synced_analytes": len(analytes)}
+
+
+@router.post("/sync")
+async def sync_coa_results(db=Depends(get_db)):
+    """Pull all analyte results from ACS Lab (paginated) and cache locally."""
+    return await run_coa_sync(db)
 
 
 # ── Read cached COA data ───────────────────────────────────────────

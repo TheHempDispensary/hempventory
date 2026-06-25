@@ -58,7 +58,10 @@ class ACSLabClient:
         sem: asyncio.Semaphore,
         url: str,
         page: int,
-    ) -> tuple[int, list[dict]]:
+    ) -> tuple[int, list[dict] | None]:
+        """Fetch a single page.  Returns ``(page, rows)`` on success or
+        ``(page, None)`` on transient failure so callers can distinguish
+        errors from a genuine empty response (end-of-data)."""
         async with sem:
             try:
                 resp = await self._request_with_retry(
@@ -71,7 +74,7 @@ class ACSLabClient:
                 return page, data if isinstance(data, list) else []
             except Exception:
                 log.warning("Failed to fetch page %d from %s", page, url)
-                return page, []
+                return page, None
 
     async def _identify_user_business(self, client: httpx.AsyncClient) -> str:
         """Determine the authenticated user's business from page 1 of alternate results."""
@@ -120,7 +123,13 @@ class ACSLabClient:
                 ]
                 results = await asyncio.gather(*tasks)
 
-                for _pg, rows in sorted(results, key=lambda x: x[0]):
+                # Collect pages that failed so we can retry them
+                failed_pages: list[int] = []
+
+                for pg, rows in sorted(results, key=lambda x: x[0]):
+                    if rows is None:
+                        failed_pages.append(pg)
+                        continue
                     if not rows:
                         done = True
                         break
@@ -129,6 +138,21 @@ class ACSLabClient:
                         done = True
                         break
                     all_results.extend(rows)
+
+                # Retry failed pages once before giving up
+                if failed_pages and not done:
+                    log.info("[acs] Retrying %d failed pages", len(failed_pages))
+                    retry_tasks = [
+                        self._fetch_page(client, sem, url, p)
+                        for p in failed_pages
+                    ]
+                    retry_results = await asyncio.gather(*retry_tasks)
+                    for pg, rows in sorted(retry_results, key=lambda x: x[0]):
+                        if rows is None or not rows:
+                            continue
+                        biz = rows[0].get("business_name", "")
+                        if biz == user_business:
+                            all_results.extend(rows)
 
                 page = batch_end
 
