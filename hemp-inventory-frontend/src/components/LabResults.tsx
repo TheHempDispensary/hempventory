@@ -26,6 +26,19 @@ import {
   Package,
 } from "lucide-react";
 
+interface CoaProduct {
+  description: string;
+  batch_no: string;
+  business_name: string;
+  product_type: string;
+  order_number: string;
+  sample_status: string;
+  coa_approved_date: string;
+  sample_count: number;
+  first_accession: string;
+  linked_skus: string | null;
+}
+
 interface CoaSample {
   id: number;
   sample_accession: string;
@@ -97,7 +110,7 @@ function remarkBadge(remark: string): string {
 export default function LabResults() {
   const [connected, setConnected] = useState<boolean | null>(null);
   const [acsUser, setAcsUser] = useState("");
-  const [samples, setSamples] = useState<CoaSample[]>([]);
+  const [products, setProducts] = useState<CoaProduct[]>([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [search, setSearch] = useState("");
@@ -134,12 +147,12 @@ export default function LabResults() {
     }
   }, []);
 
-  const loadSamples = useCallback(async () => {
+  const loadProducts = useCallback(async () => {
     try {
       const resp = await getCoaSamples();
-      setSamples(resp.data);
+      setProducts(resp.data);
     } catch {
-      setSamples([]);
+      setProducts([]);
     } finally {
       setLoading(false);
     }
@@ -147,8 +160,8 @@ export default function LabResults() {
 
   useEffect(() => {
     loadStatus();
-    loadSamples();
-  }, [loadStatus, loadSamples]);
+    loadProducts();
+  }, [loadStatus, loadProducts]);
 
   const handleSync = async () => {
     setSyncing(true);
@@ -156,7 +169,7 @@ export default function LabResults() {
       const resp = await syncCoaResults();
       const { synced_samples, synced_analytes } = resp.data;
       showToast("success", `Synced ${synced_samples} samples, ${synced_analytes} analyte results`);
-      await loadSamples();
+      await loadProducts();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Sync failed";
       showToast("error", msg);
@@ -208,7 +221,7 @@ export default function LabResults() {
       setDetailLinkedSkus((prev) => [...prev, sku]);
       showToast("success", `Linked ${sku} to ${selectedAccession}`);
       setShowLinkModal(false);
-      await loadSamples();
+      await loadProducts();
     } catch {
       showToast("error", "Failed to link SKU");
     } finally {
@@ -222,7 +235,7 @@ export default function LabResults() {
       await unlinkSkuFromCoa(sku, selectedAccession);
       setDetailLinkedSkus((prev) => prev.filter((s) => s !== sku));
       showToast("success", `Unlinked ${sku}`);
-      await loadSamples();
+      await loadProducts();
     } catch {
       showToast("error", "Failed to unlink SKU");
     }
@@ -237,16 +250,16 @@ export default function LabResults() {
     });
   };
 
-  const filteredSamples = samples.filter((s) => {
+  const filteredProducts = products.filter((p) => {
     if (!search) return true;
     const q = search.toLowerCase();
     return (
-      s.sample_accession.toLowerCase().includes(q) ||
-      (s.description || "").toLowerCase().includes(q) ||
-      (s.batch_no || "").toLowerCase().includes(q) ||
-      (s.order_number || "").toLowerCase().includes(q) ||
-      (s.business_name || "").toLowerCase().includes(q) ||
-      (s.linked_skus || "").toLowerCase().includes(q)
+      (p.description || "").toLowerCase().includes(q) ||
+      (p.batch_no || "").toLowerCase().includes(q) ||
+      (p.order_number || "").toLowerCase().includes(q) ||
+      (p.business_name || "").toLowerCase().includes(q) ||
+      (p.first_accession || "").toLowerCase().includes(q) ||
+      (p.linked_skus || "").toLowerCase().includes(q)
     );
   });
 
@@ -621,19 +634,19 @@ export default function LabResults() {
         />
       </div>
 
-      {/* Samples list */}
+      {/* Products list */}
       {loading ? (
         <div className="flex items-center justify-center py-20">
           <RefreshCw className="w-6 h-6 text-gray-400 animate-spin" />
         </div>
-      ) : filteredSamples.length === 0 ? (
+      ) : filteredProducts.length === 0 ? (
         <div className="bg-white rounded-xl border border-gray-200 p-12 text-center">
           <FlaskConical className="w-12 h-12 text-gray-300 mx-auto mb-4" />
           <h3 className="text-lg font-medium text-gray-900 mb-2">
-            {samples.length === 0 ? "No Lab Results Yet" : "No Matching Results"}
+            {products.length === 0 ? "No Lab Results Yet" : "No Matching Results"}
           </h3>
           <p className="text-sm text-gray-500 max-w-md mx-auto">
-            {samples.length === 0
+            {products.length === 0
               ? "Click \"Sync from ACS Lab\" to pull your Certificate of Analysis results from ACS Laboratory."
               : "Try a different search term."}
           </p>
@@ -644,44 +657,48 @@ export default function LabResults() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="bg-gray-50 text-gray-500 text-left border-b border-gray-200">
-                  <th className="px-6 py-3 font-medium">Accession</th>
                   <th className="px-6 py-3 font-medium">Description</th>
+                  <th className="px-6 py-3 font-medium">Business</th>
                   <th className="px-6 py-3 font-medium">Batch</th>
+                  <th className="px-6 py-3 font-medium">Samples</th>
                   <th className="px-6 py-3 font-medium">Status</th>
                   <th className="px-6 py-3 font-medium">COA Date</th>
                   <th className="px-6 py-3 font-medium">Linked SKUs</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {filteredSamples.map((s) => (
+                {filteredProducts.map((p) => (
                   <tr
-                    key={s.sample_accession}
-                    onClick={() => loadDetail(s.sample_accession)}
+                    key={`${p.description}-${p.batch_no}`}
+                    onClick={() => loadDetail(p.first_accession)}
                     className="hover:bg-green-50/50 cursor-pointer transition-colors"
                   >
-                    <td className="px-6 py-4">
-                      <span className="font-mono font-medium text-green-700">
-                        {s.sample_accession}
-                      </span>
-                    </td>
                     <td className="px-6 py-4 text-gray-700 max-w-xs truncate">
-                      {s.description || s.product_name || "—"}
+                      {p.description || "—"}
+                    </td>
+                    <td className="px-6 py-4 text-gray-600 text-xs">
+                      {p.business_name || "—"}
                     </td>
                     <td className="px-6 py-4 font-mono text-gray-600 text-xs">
-                      {s.batch_no || "—"}
+                      {p.batch_no || "—"}
                     </td>
                     <td className="px-6 py-4">
-                      <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${statusColor(s.sample_status)}`}>
-                        {s.sample_status || "—"}
+                      <span className="inline-block px-2 py-0.5 bg-blue-50 text-blue-700 text-xs font-medium rounded">
+                        {p.sample_count}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4">
+                      <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${statusColor(p.sample_status)}`}>
+                        {p.sample_status || "—"}
                       </span>
                     </td>
                     <td className="px-6 py-4 text-gray-600">
-                      {formatDate(s.coa_approved_date)}
+                      {formatDate(p.coa_approved_date)}
                     </td>
                     <td className="px-6 py-4">
-                      {s.linked_skus ? (
+                      {p.linked_skus ? (
                         <div className="flex flex-wrap gap-1">
-                          {s.linked_skus.split(",").map((sku) => (
+                          {p.linked_skus.split(",").map((sku) => (
                             <span
                               key={sku}
                               className="inline-block px-2 py-0.5 bg-green-50 text-green-700 text-xs font-medium rounded border border-green-200"

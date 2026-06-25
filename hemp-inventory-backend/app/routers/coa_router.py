@@ -22,7 +22,7 @@ def _get_acs_client() -> ACSLabClient:
 async def run_coa_sync(db) -> dict:
     """Shared sync logic used by both the HTTP endpoint and the background job."""
     client = _get_acs_client()
-    all_results = await client.get_all_analyte_results_alternate()
+    all_results = await client.get_all_analyte_results()
 
     if not all_results:
         return {"synced_samples": 0, "synced_analytes": 0}
@@ -70,28 +70,6 @@ async def run_coa_sync(db) -> dict:
                 "analyte_remark": r.get("analyte_remark", ""),
                 "panel_remark": r.get("panel_remark", ""),
             })
-
-        # Extract inline homogeneity THC/CBD from alternate-format fields
-        for suffix, label in [
-            ("thc", "Total Active THC"),
-            ("cbd", "Total Active CBD"),
-        ]:
-            prefix = f"homogeneity_total_active_{suffix}"
-            h_result = r.get(f"{prefix}_result", "")
-            if h_result and h_result != "0.00":
-                analytes.append({
-                    "sample_accession": acc,
-                    "panel_name": "Homogeneity",
-                    "panel_identifier": "",
-                    "analyte_abbreviation": "",
-                    "analyte_identifier": label,
-                    "concentration": r.get(f"{prefix}_concentration", 0),
-                    "conc_unit": r.get(f"{prefix}_conc_unit", ""),
-                    "result": h_result,
-                    "result_unit": r.get(f"{prefix}_result_unit", ""),
-                    "analyte_remark": r.get(f"{prefix}_analyte_remark", ""),
-                    "panel_remark": "",
-                })
 
     # Upsert samples
     for s in samples.values():
@@ -167,16 +145,42 @@ async def sync_coa_results(db=Depends(get_db)):
 
 
 @router.get("/samples")
-async def list_coa_samples(db=Depends(get_db)):
-    """List all cached COA samples."""
-    cursor = await db.execute(
-        """SELECT cr.*,
-                  GROUP_CONCAT(DISTINCT csl.sku) as linked_skus
-           FROM coa_results cr
-           LEFT JOIN coa_sku_links csl ON cr.sample_accession = csl.sample_accession
-           GROUP BY cr.sample_accession
-           ORDER BY cr.coa_approved_date DESC"""
-    )
+async def list_coa_samples(db=Depends(get_db), view: str = "products"):
+    """List cached COA data.
+
+    ``view=products`` (default) groups accessions by description+batch so
+    that homogeneity sub-samples appear as one row with a sample count.
+    ``view=accessions`` returns every individual accession.
+    """
+    if view == "products":
+        cursor = await db.execute(
+            """SELECT
+                    cr.description,
+                    cr.batch_no,
+                    cr.business_name,
+                    cr.product_type,
+                    cr.order_number,
+                    cr.sample_status,
+                    MAX(cr.coa_approved_date) AS coa_approved_date,
+                    COUNT(DISTINCT cr.sample_accession) AS sample_count,
+                    MIN(cr.sample_accession) AS first_accession,
+                    GROUP_CONCAT(DISTINCT csl.sku) AS linked_skus
+               FROM coa_results cr
+               LEFT JOIN coa_sku_links csl
+                 ON cr.sample_accession = csl.sample_accession
+               GROUP BY cr.description, cr.batch_no
+               ORDER BY cr.coa_approved_date DESC"""
+        )
+    else:
+        cursor = await db.execute(
+            """SELECT cr.*,
+                      GROUP_CONCAT(DISTINCT csl.sku) AS linked_skus
+               FROM coa_results cr
+               LEFT JOIN coa_sku_links csl
+                 ON cr.sample_accession = csl.sample_accession
+               GROUP BY cr.sample_accession
+               ORDER BY cr.coa_approved_date DESC"""
+        )
     rows = await cursor.fetchall()
     return [dict(r) for r in rows]
 

@@ -76,56 +76,28 @@ class ACSLabClient:
                 log.warning("Failed to fetch page %d from %s", page, url)
                 return page, None
 
-    async def _identify_user_business(self, client: httpx.AsyncClient) -> str:
-        """Determine the authenticated user's business from page 1 of alternate results."""
-        url = f"{self.base_url}/admin/clientdashboard/get-analyte-results-alternate"
-        resp = await self._request_with_retry(
-            client, "get", f"{url}?page=1", headers=self._headers()
-        )
-        data = resp.json()
-        if isinstance(data, list) and data:
-            return data[0].get("business_name", "")
-        return ""
+    async def get_all_analyte_results(self, max_pages: int = 5000) -> list[dict]:
+        """Fetch analyte results across all pages using concurrent requests.
 
-    async def get_all_analyte_results_alternate(
-        self,
-        on_progress: object = None,
-    ) -> list[dict]:
-        """Fetch all pages of alternate analyte results for the authenticated
-        user's business using concurrent requests.
-
-        The alternate endpoint returns 1 sample per page and is scoped so that
-        the authenticated user's business appears first.  We page forward until
-        we hit a different business (or an empty page).
-
-        ``on_progress`` is an optional ``async callable(fetched, total_est)``
-        invoked after each batch so callers can report progress.
+        The main endpoint returns 10 analyte rows per page with full test data.
+        We paginate up to ``max_pages`` (default 5000 = ~500 unique products).
         """
-        url = f"{self.base_url}/admin/clientdashboard/get-analyte-results-alternate"
+        url = f"{self.base_url}/admin/clientdashboard/get-analyte-results"
         sem = asyncio.Semaphore(CONCURRENCY)
         all_results: list[dict] = []
 
         async with httpx.AsyncClient(timeout=PAGE_TIMEOUT) as client:
-            user_business = await self._identify_user_business(client)
-            if not user_business:
-                log.warning("Could not determine user business; fetching page-1 only")
-                return await self._get_single_page(client, url)
-
-            log.info("[acs] User business identified as %r", user_business)
-
             page = 1
             done = False
-            while not done:
-                batch_end = page + CONCURRENCY
+            while not done and page <= max_pages:
+                batch_end = min(page + CONCURRENCY, max_pages + 1)
                 tasks = [
                     self._fetch_page(client, sem, url, p)
                     for p in range(page, batch_end)
                 ]
                 results = await asyncio.gather(*tasks)
 
-                # Collect pages that failed so we can retry them
                 failed_pages: list[int] = []
-
                 for pg, rows in sorted(results, key=lambda x: x[0]):
                     if rows is None:
                         failed_pages.append(pg)
@@ -133,13 +105,8 @@ class ACSLabClient:
                     if not rows:
                         done = True
                         break
-                    biz = rows[0].get("business_name", "")
-                    if biz != user_business:
-                        done = True
-                        break
                     all_results.extend(rows)
 
-                # Retry failed pages once before giving up
                 if failed_pages and not done:
                     log.info("[acs] Retrying %d failed pages", len(failed_pages))
                     retry_tasks = [
@@ -148,24 +115,17 @@ class ACSLabClient:
                     ]
                     retry_results = await asyncio.gather(*retry_tasks)
                     for pg, rows in sorted(retry_results, key=lambda x: x[0]):
-                        if rows is None or not rows:
-                            continue
-                        biz = rows[0].get("business_name", "")
-                        if biz == user_business:
+                        if rows is not None and rows:
                             all_results.extend(rows)
 
                 page = batch_end
-
-                if on_progress:
-                    await on_progress(len(all_results), page)
-
                 log.info(
-                    "[acs] Fetched %d results so far (through page %d)",
+                    "[acs] Fetched %d analyte rows (through page %d)",
                     len(all_results),
                     page - 1,
                 )
 
-        log.info("[acs] Total alternate results fetched: %d", len(all_results))
+        log.info("[acs] Total analyte rows fetched: %d", len(all_results))
         return all_results
 
     async def _get_single_page(
