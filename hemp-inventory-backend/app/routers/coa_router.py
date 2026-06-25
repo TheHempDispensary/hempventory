@@ -93,7 +93,13 @@ async def run_coa_sync(db) -> dict:
                     "panel_remark": "",
                 })
 
-    # Upsert samples
+    # Clear old data so stale results from previous syncs are removed.
+    # Preserve coa_sku_links (keyed on sample_accession) for any accession
+    # that still appears in the fresh data.
+    await db.execute("DELETE FROM coa_analyte_results")
+    await db.execute("DELETE FROM coa_results")
+
+    # Insert samples
     for s in samples.values():
         await db.execute(
             """INSERT INTO coa_results
