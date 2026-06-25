@@ -167,16 +167,42 @@ async def sync_coa_results(db=Depends(get_db)):
 
 
 @router.get("/samples")
-async def list_coa_samples(db=Depends(get_db)):
-    """List all cached COA samples."""
-    cursor = await db.execute(
-        """SELECT cr.*,
-                  GROUP_CONCAT(DISTINCT csl.sku) as linked_skus
-           FROM coa_results cr
-           LEFT JOIN coa_sku_links csl ON cr.sample_accession = csl.sample_accession
-           GROUP BY cr.sample_accession
-           ORDER BY cr.coa_approved_date DESC"""
-    )
+async def list_coa_samples(db=Depends(get_db), view: str = "products"):
+    """List cached COA data.
+
+    ``view=products`` (default) groups accessions by description+batch so
+    that homogeneity sub-samples appear as one row with a sample count.
+    ``view=accessions`` returns every individual accession.
+    """
+    if view == "products":
+        cursor = await db.execute(
+            """SELECT
+                    cr.description,
+                    cr.batch_no,
+                    cr.business_name,
+                    cr.product_type,
+                    cr.order_number,
+                    cr.sample_status,
+                    MAX(cr.coa_approved_date) AS coa_approved_date,
+                    COUNT(DISTINCT cr.sample_accession) AS sample_count,
+                    MIN(cr.sample_accession) AS first_accession,
+                    GROUP_CONCAT(DISTINCT csl.sku) AS linked_skus
+               FROM coa_results cr
+               LEFT JOIN coa_sku_links csl
+                 ON cr.sample_accession = csl.sample_accession
+               GROUP BY cr.description, cr.batch_no
+               ORDER BY coa_approved_date DESC"""
+        )
+    else:
+        cursor = await db.execute(
+            """SELECT cr.*,
+                      GROUP_CONCAT(DISTINCT csl.sku) AS linked_skus
+               FROM coa_results cr
+               LEFT JOIN coa_sku_links csl
+                 ON cr.sample_accession = csl.sample_accession
+               GROUP BY cr.sample_accession
+               ORDER BY cr.coa_approved_date DESC"""
+        )
     rows = await cursor.fetchall()
     return [dict(r) for r in rows]
 
