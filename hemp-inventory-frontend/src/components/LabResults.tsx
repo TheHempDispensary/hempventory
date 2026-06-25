@@ -658,7 +658,6 @@ export default function LabResults() {
               <thead>
                 <tr className="bg-gray-50 text-gray-500 text-left border-b border-gray-200">
                   <th className="px-6 py-3 font-medium">Description</th>
-                  <th className="px-6 py-3 font-medium">Business</th>
                   <th className="px-6 py-3 font-medium">Batch</th>
                   <th className="px-6 py-3 font-medium">Samples</th>
                   <th className="px-6 py-3 font-medium">Status</th>
@@ -675,9 +674,6 @@ export default function LabResults() {
                   >
                     <td className="px-6 py-4 text-gray-700 max-w-xs truncate">
                       {p.description || "—"}
-                    </td>
-                    <td className="px-6 py-4 text-gray-600 text-xs">
-                      {p.business_name || "—"}
                     </td>
                     <td className="px-6 py-4 font-mono text-gray-600 text-xs">
                       {p.batch_no || "—"}

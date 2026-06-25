@@ -22,7 +22,7 @@ def _get_acs_client() -> ACSLabClient:
 async def run_coa_sync(db) -> dict:
     """Shared sync logic used by both the HTTP endpoint and the background job."""
     client = _get_acs_client()
-    all_results = await client.get_all_analyte_results()
+    all_results = await client.get_all_analyte_results_alternate()
 
     if not all_results:
         return {"synced_samples": 0, "synced_analytes": 0}
@@ -70,6 +70,28 @@ async def run_coa_sync(db) -> dict:
                 "analyte_remark": r.get("analyte_remark", ""),
                 "panel_remark": r.get("panel_remark", ""),
             })
+
+        # Extract inline homogeneity THC/CBD from alternate-format fields
+        for suffix, label in [
+            ("thc", "Total Active THC"),
+            ("cbd", "Total Active CBD"),
+        ]:
+            prefix = f"homogeneity_total_active_{suffix}"
+            h_result = r.get(f"{prefix}_result", "")
+            if h_result and h_result != "0.00":
+                analytes.append({
+                    "sample_accession": acc,
+                    "panel_name": "Homogeneity",
+                    "panel_identifier": "",
+                    "analyte_abbreviation": "",
+                    "analyte_identifier": label,
+                    "concentration": r.get(f"{prefix}_concentration", 0),
+                    "conc_unit": r.get(f"{prefix}_conc_unit", ""),
+                    "result": h_result,
+                    "result_unit": r.get(f"{prefix}_result_unit", ""),
+                    "analyte_remark": r.get(f"{prefix}_analyte_remark", ""),
+                    "panel_remark": "",
+                })
 
     # Upsert samples
     for s in samples.values():
