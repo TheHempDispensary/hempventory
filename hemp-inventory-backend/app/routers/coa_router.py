@@ -20,39 +20,56 @@ def _get_acs_client() -> ACSLabClient:
 
 
 async def run_coa_sync(db) -> dict:
-    """Shared sync logic used by both the HTTP endpoint and the background job."""
-    client = _get_acs_client()
-    all_results = await client.get_all_analyte_results_alternate()
+    """Shared sync logic used by both the HTTP endpoint and the background job.
 
-    if not all_results:
+    Uses the ``/all`` endpoint (batch-level, 359 records) for the sample
+    listing, and the alternate analyte endpoint for detailed test results.
+    """
+    client = _get_acs_client()
+
+    # 1. Fetch all samples from /all endpoint (batch-level records)
+    all_sample_records = await client.get_all_samples()
+    if not all_sample_records:
         return {"synced_samples": 0, "synced_analytes": 0}
 
     samples: dict[str, dict] = {}
+    for r in all_sample_records:
+        acc = r.get("sample_accession", "")
+        if not acc:
+            continue
+        samples[acc] = {
+            "sample_accession": acc,
+            "order_number": r.get("number", ""),
+            "batch_no": r.get("batch_no", ""),
+            "business_name": "",
+            "product_name": r.get("product_name", ""),
+            "product_type": r.get("product_type_name", ""),
+            "consumption_type": "",
+            "description": r.get("description", ""),
+            "test_purpose": r.get("test_purpose", ""),
+            "sample_status": r.get("sample_status", ""),
+            "order_date": r.get("order_date", ""),
+            "test_start_date": r.get("test_start_date", ""),
+            "coa_approved_date": r.get("coa_approved_date", ""),
+            "postal_code": "",
+            "extracted_from": r.get("extracted_from", ""),
+        }
+
+    # 2. Fetch analyte results from the alternate endpoint
+    all_analyte_rows = await client.get_all_analyte_results_alternate()
     analytes: list[dict] = []
 
-    for r in all_results:
+    for r in all_analyte_rows:
         acc = r.get("sample_accession", "")
         if not acc:
             continue
 
-        if acc not in samples:
-            samples[acc] = {
-                "sample_accession": acc,
-                "order_number": r.get("number", ""),
-                "batch_no": r.get("batch_no", ""),
-                "business_name": r.get("business_name", ""),
-                "product_name": r.get("product_name", ""),
-                "product_type": r.get("product_type_name", ""),
-                "consumption_type": r.get("consumption_type", ""),
-                "description": r.get("description", ""),
-                "test_purpose": r.get("test_purpose", ""),
-                "sample_status": r.get("sample_status", ""),
-                "order_date": r.get("order_date", ""),
-                "test_start_date": r.get("test_start_date", ""),
-                "coa_approved_date": r.get("coa_approved_date", ""),
-                "postal_code": r.get("postal_code", ""),
-                "extracted_from": r.get("extracted_from", ""),
-            }
+        # Back-fill any sample fields from the analyte data if we have them
+        if acc in samples and not samples[acc]["business_name"]:
+            samples[acc]["business_name"] = r.get("business_name", "")
+            samples[acc]["product_type"] = r.get("product_type_name", "") or samples[acc]["product_type"]
+            samples[acc]["consumption_type"] = r.get("consumption_type", "")
+            samples[acc]["postal_code"] = r.get("postal_code", "")
 
         analyte_id = r.get("analyte_identifier", "")
         panel_name = r.get("panel_name", "")
