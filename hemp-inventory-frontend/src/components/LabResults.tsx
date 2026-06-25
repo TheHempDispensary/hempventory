@@ -6,7 +6,7 @@ import {
   getCoaSample,
   linkSkuToCoa,
   unlinkSkuFromCoa,
-  getCachedInventory,
+  getEcommerceProducts,
 } from "../lib/api";
 import {
   RefreshCw,
@@ -200,11 +200,12 @@ export default function LabResults() {
     setShowLinkModal(true);
     setLinkSearch("");
     try {
-      const resp = await getCachedInventory();
-      const items: InventoryItem[] = (resp.data.items || []).map(
-        (item: { sku: string; name: string }) => ({
-          sku: item.sku,
-          name: item.name,
+      const resp = await getEcommerceProducts();
+      const products = resp.data.products || [];
+      const items: InventoryItem[] = products.map(
+        (p: { sku: string; name: string }) => ({
+          sku: p.sku,
+          name: p.name,
         })
       );
       setInventoryItems(items);

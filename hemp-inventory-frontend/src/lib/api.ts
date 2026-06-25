@@ -695,4 +695,7 @@ export const linkSkuToCoa = (sku: string, sampleAccession: string) =>
 export const unlinkSkuFromCoa = (sku: string, sampleAccession: string) =>
   api.delete("/api/coa/link", { params: { sku, sample_accession: sampleAccession } });
 
+// Ecommerce products (public, HQ catalog)
+export const getEcommerceProducts = () => api.get("/api/ecommerce/products");
+
 export default api;

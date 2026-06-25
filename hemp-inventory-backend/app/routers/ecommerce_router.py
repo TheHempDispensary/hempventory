@@ -426,7 +426,7 @@ async def _fetch_and_cache_products() -> dict:
                 "strength": sku_attrs.get("strength"),
                 "product_type": sku_attrs.get("product_type"),
                 "modified_time": item.get("modifiedTime", 0),
-                "lab_results": coa_by_sku.get(sku, []),
+                "lab_results": coa_by_sku.get(sku) or coa_by_sku.get(item.get("id", ""), []),
             })
 
         products.sort(key=lambda p: p["name"])
@@ -2835,7 +2835,7 @@ async def get_product_detail(product_id: str):
 
     is_shipping_only = sku.startswith("LF-") if isinstance(sku, str) else False
 
-    # Look up linked COA lab results
+    # Look up linked COA lab results (check both SKU and Clover item ID)
     coa_db = await aiosqlite.connect(DB_PATH)
     try:
         coa_cursor = await coa_db.execute(
@@ -2843,9 +2843,9 @@ async def get_product_detail(product_id: str):
                       cr.sample_status, cr.coa_approved_date
                FROM coa_sku_links csl
                JOIN coa_results cr ON csl.sample_accession = cr.sample_accession
-               WHERE csl.sku = ?
+               WHERE csl.sku = ? OR csl.sku = ?
                ORDER BY cr.coa_approved_date DESC""",
-            (sku,),
+            (sku, product_id),
         )
         coa_rows = await coa_cursor.fetchall()
     finally:
