@@ -17,6 +17,7 @@ import Discounts from "./components/Discounts";
 import ProductScraper from "./components/ProductScraper";
 import Conversations from "./components/Conversations";
 import SmartPar from "./components/SmartPar";
+import LabResults from "./components/LabResults";
 
 // Detect which domain we're on to separate login state
 function getAppMode(): "timeclock" | "inventory" {
@@ -188,6 +189,8 @@ function App() {
         return <Conversations />;
       case "smart-par":
         return <SmartPar />;
+      case "lab-results":
+        return <LabResults />;
       default:
         return <Inventory />;
     }

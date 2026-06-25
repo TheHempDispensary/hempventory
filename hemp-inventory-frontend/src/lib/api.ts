@@ -676,4 +676,23 @@ export const getChatSessions = (params?: {
 export const getChatSession = (sessionId: string) =>
   api.get(`/api/chat/sessions/${sessionId}`);
 
+// COA Lab Results (ACS Laboratory)
+export const getCoaStatus = () => api.get("/api/coa/status");
+
+export const syncCoaResults = () => api.post("/api/coa/sync");
+
+export const getCoaSamples = () => api.get("/api/coa/samples");
+
+export const getCoaSample = (accession: string) =>
+  api.get(`/api/coa/samples/${encodeURIComponent(accession)}`);
+
+export const getCoaBySku = (sku: string) =>
+  api.get(`/api/coa/by-sku/${encodeURIComponent(sku)}`);
+
+export const linkSkuToCoa = (sku: string, sampleAccession: string) =>
+  api.post("/api/coa/link", { sku, sample_accession: sampleAccession });
+
+export const unlinkSkuFromCoa = (sku: string, sampleAccession: string) =>
+  api.delete("/api/coa/link", { params: { sku, sample_accession: sampleAccession } });
+
 export default api;

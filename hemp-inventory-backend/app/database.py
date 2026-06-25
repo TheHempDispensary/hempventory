@@ -797,4 +797,58 @@ async def init_db():
         except Exception as mig_err:
             print(f"[db] date_schedules migration note: {mig_err}")
 
+        # COA (Certificate of Analysis) lab results from ACS Laboratory
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS coa_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sample_accession TEXT NOT NULL,
+                order_number TEXT,
+                batch_no TEXT,
+                business_name TEXT,
+                product_name TEXT,
+                product_type TEXT,
+                consumption_type TEXT,
+                description TEXT,
+                test_purpose TEXT,
+                sample_status TEXT,
+                order_date TEXT,
+                test_start_date TEXT,
+                coa_approved_date TEXT,
+                postal_code TEXT,
+                extracted_from TEXT,
+                synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(sample_accession)
+            )
+        """)
+
+        # Individual analyte results linked to COA samples
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS coa_analyte_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sample_accession TEXT NOT NULL,
+                panel_name TEXT,
+                panel_identifier TEXT,
+                analyte_abbreviation TEXT,
+                analyte_identifier TEXT,
+                concentration REAL,
+                conc_unit TEXT,
+                result TEXT,
+                result_unit TEXT,
+                analyte_remark TEXT,
+                panel_remark TEXT,
+                UNIQUE(sample_accession, analyte_identifier, panel_name)
+            )
+        """)
+
+        # Links between inventory SKUs and COA sample accessions
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS coa_sku_links (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sku TEXT NOT NULL,
+                sample_accession TEXT NOT NULL,
+                linked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(sku, sample_accession)
+            )
+        """)
+
         await db.commit()
