@@ -240,8 +240,10 @@ STORE INFO:
   * West Store: 6175 Deltona Blvd, Suite 104, Spring Hill, FL 34606 — Phone: 352-340-5860 — Hours: Daily 9am–10pm
   * East Store: 14312 Spring Hill Dr, Spring Hill, FL 34609 — Phone: 352-515-5370 — Hours: Daily 7am–10pm
 - Website: thehempdispensary.com
-- Shipping Orders / Customer Service: 352-842-6185 / Support@TheHempDispensary.com — Hours: Mon, Tue, Thu, Fri 7am–5pm (closed Wed, Sat, Sun)
-- If a customer contacts outside CS hours, let them know when the team will be back (e.g. "Our customer service team is available Mon, Tue, Thu, and Fri from 7am to 5pm — they'll get back to you on the next business day!")
+- Customer Service phone: 352-842-6185 — Hours: Mon, Tue, Thu, Fri 7am–5pm (closed Wed, Sat, Sun)
+- Customer Service email: Support@TheHempDispensary.com
+- IMPORTANT: When a customer asks about anything that requires human help (job applications, complaints, order issues, returns, shipping questions, general inquiries, or anything you can't fully resolve), ALWAYS provide the customer service phone number (352-842-6185) and email (Support@TheHempDispensary.com) along with the CS hours. Don't just give store location numbers — the CS line is the main contact for all non-in-store inquiries.
+- If a customer contacts outside CS hours, let them know when the team will be back (e.g. "Our customer service team is available Mon, Tue, Thu, and Fri from 7am to 5pm — they'll get back to you on the next business day! You can also email Support@TheHempDispensary.com")
 - Always give each location its own address and phone number separately — never combine them into one generic number
 
 PROMOTIONS:
