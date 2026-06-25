@@ -2222,6 +2222,40 @@ async def create_order(
             except Exception as retry_err:
                 print(f"[ORDER LOST] Retry also failed: {retry_err}")
 
+    # If DB save failed, send an alert email to support so the order can be recovered manually.
+    # The customer was already charged and will receive a confirmation email, but the order
+    # won't appear in HempVentory without manual intervention.
+    if not db_save_ok:
+        try:
+            alert_smtp = await _get_smtp_settings(db)
+            items_list = "; ".join(f"{it.name} x{it.quantity} @${it.price/100:.2f}" for it in order.items)
+            alert_html = f"""
+            <h2 style="color: #dc2626;">ALERT: Order Charged But NOT Saved to Database</h2>
+            <p>A customer was charged but the order failed to save to HempVentory. This order needs manual recovery.</p>
+            <table style="border-collapse: collapse; width: 100%;">
+                <tr><td style="padding: 6px; border: 1px solid #ddd; font-weight: bold;">Order Number</td><td style="padding: 6px; border: 1px solid #ddd;">{order_number}</td></tr>
+                <tr><td style="padding: 6px; border: 1px solid #ddd; font-weight: bold;">Customer</td><td style="padding: 6px; border: 1px solid #ddd;">{order.customer.first_name} {order.customer.last_name}</td></tr>
+                <tr><td style="padding: 6px; border: 1px solid #ddd; font-weight: bold;">Email</td><td style="padding: 6px; border: 1px solid #ddd;">{order.customer.email}</td></tr>
+                <tr><td style="padding: 6px; border: 1px solid #ddd; font-weight: bold;">Phone</td><td style="padding: 6px; border: 1px solid #ddd;">{order.customer.phone}</td></tr>
+                <tr><td style="padding: 6px; border: 1px solid #ddd; font-weight: bold;">Charge ID</td><td style="padding: 6px; border: 1px solid #ddd;">{charge_id}</td></tr>
+                <tr><td style="padding: 6px; border: 1px solid #ddd; font-weight: bold;">Total Charged</td><td style="padding: 6px; border: 1px solid #ddd;">${order.total/100:.2f}</td></tr>
+                <tr><td style="padding: 6px; border: 1px solid #ddd; font-weight: bold;">Fulfillment</td><td style="padding: 6px; border: 1px solid #ddd;">{order.fulfillment_type}</td></tr>
+                <tr><td style="padding: 6px; border: 1px solid #ddd; font-weight: bold;">Items</td><td style="padding: 6px; border: 1px solid #ddd;">{items_list}</td></tr>
+                <tr><td style="padding: 6px; border: 1px solid #ddd; font-weight: bold;">Shipping</td><td style="padding: 6px; border: 1px solid #ddd;">{f"{order.shipping_address.address}, {order.shipping_address.city}, {order.shipping_address.state} {order.shipping_address.zip}" if order.shipping_address else "N/A (pickup)"}</td></tr>
+            </table>
+            <p style="color: #dc2626; font-weight: bold;">ACTION REQUIRED: Manually add this order to HempVentory or contact the customer.</p>
+            """
+            await asyncio.to_thread(
+                _send_smtp_email,
+                alert_smtp,
+                STORE_EMAIL,
+                f"URGENT: Lost Order {order_number} — Customer Charged ${order.total/100:.2f} But Order Not Saved",
+                alert_html,
+            )
+            print(f"[ORDER LOST] Alert email sent to {STORE_EMAIL} for {order_number}")
+        except Exception as alert_err:
+            print(f"[ORDER LOST] Failed to send alert email for {order_number}: {alert_err}")
+
     # Log discount usage if a promo code was used
     if db_save_ok and order.promo_code:
         try:
@@ -2344,6 +2378,14 @@ async def create_order(
         _deduct_stock_for_order(order.items, order.fulfillment_type)
     )
     stock_task.add_done_callback(lambda t: _log_task_error(t, "stock_deduct"))
+
+    # Award loyalty points for online orders (non-blocking).
+    # POS purchases get points via Clover sync, but online orders need explicit awarding.
+    if db_save_ok and payment_status == "paid":
+        loyalty_award_task = asyncio.create_task(
+            _award_loyalty_points_for_order(db, order, order_number, order_id)
+        )
+        loyalty_award_task.add_done_callback(lambda t: _log_task_error(t, "loyalty_award"))
 
     return {
         "success": True,
@@ -2486,6 +2528,86 @@ async def _deduct_stock_for_order(items: List[OrderItem], fulfillment_type: str 
         print(f"[stock] Stock deduction complete for {len(items)} item(s), cache invalidated")
     except Exception as e:
         print(f"[stock] Stock deduction task failed: {e}")
+
+
+async def _award_loyalty_points_for_order(
+    db: aiosqlite.Connection,
+    order: CreateOrderRequest,
+    order_number: str,
+    order_id: int,
+) -> None:
+    """Award loyalty points for an online order if the customer has a loyalty account.
+    POS orders get points via Clover sync, but online orders need explicit awarding."""
+    try:
+        # Look up loyalty settings
+        settings_cursor = await db.execute(
+            "SELECT value FROM loyalty_settings WHERE key = 'points_per_dollar'"
+        )
+        settings_row = await settings_cursor.fetchone()
+        points_per_dollar = int(settings_row[0]) if settings_row else 1
+
+        # Try to find the customer's loyalty account by email or phone
+        loyalty_customer = None
+        if order.customer.email:
+            cur = await db.execute(
+                "SELECT id, first_name, last_name, email, phone FROM loyalty_customers WHERE email = ?",
+                (order.customer.email,),
+            )
+            loyalty_customer = await cur.fetchone()
+        if not loyalty_customer and order.customer.phone:
+            phone = "".join(ch for ch in order.customer.phone if ch.isdigit())
+            if len(phone) >= 10:
+                phone = phone[-10:]
+                cur = await db.execute(
+                    "SELECT id, first_name, last_name, email, phone FROM loyalty_customers WHERE "
+                    "REPLACE(REPLACE(REPLACE(REPLACE(phone, '-', ''), ' ', ''), '(', ''), ')', '') LIKE ?",
+                    (f"%{phone}",),
+                )
+                loyalty_customer = await cur.fetchone()
+
+        if not loyalty_customer:
+            print(f"[loyalty-award] No loyalty account found for {order.customer.email} / {order.customer.phone} — skipping points")
+            return
+
+        customer_id = loyalty_customer[0]
+
+        # Calculate points from the item subtotal (exclude shipping, tax, discounts already applied)
+        item_subtotal = sum(item.price * item.quantity for item in order.items)
+        order_dollars = item_subtotal / 100.0
+        points_to_award = math.floor(order_dollars * points_per_dollar)
+
+        if points_to_award <= 0:
+            print(f"[loyalty-award] Zero points for {order_number} (subtotal ${order_dollars:.2f}) — skipping")
+            return
+
+        # Determine location name
+        loc_name = "Online"
+        if order.fulfillment_type == "pickup_west":
+            loc_name = "West"
+        elif order.fulfillment_type == "pickup_east":
+            loc_name = "East"
+        elif order.fulfillment_type == "local_delivery":
+            loc_name = "Local Delivery"
+
+        await db.execute(
+            """UPDATE loyalty_customers
+               SET points_balance = points_balance + ?,
+                   lifetime_points = lifetime_points + ?,
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            (points_to_award, points_to_award, customer_id),
+        )
+        await db.execute(
+            """INSERT INTO loyalty_transactions (customer_id, type, points, description, order_id, location_name)
+               VALUES (?, 'earn', ?, ?, ?, ?)""",
+            (customer_id, points_to_award,
+             f"Online purchase ${order_dollars:.2f} ({order_number})",
+             str(order_id), loc_name),
+        )
+        await db.commit()
+        print(f"[loyalty-award] Awarded {points_to_award} pts to customer {customer_id} for {order_number} (${order_dollars:.2f})")
+    except Exception as e:
+        print(f"[loyalty-award] Failed to award points for {order_number}: {e}")
 
 
 async def _get_smtp_settings(db: aiosqlite.Connection) -> dict[str, str]:
