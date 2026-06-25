@@ -191,7 +191,7 @@ async def list_coa_samples(db=Depends(get_db), view: str = "products"):
                LEFT JOIN coa_sku_links csl
                  ON cr.sample_accession = csl.sample_accession
                GROUP BY cr.description, cr.batch_no
-               ORDER BY cr.coa_approved_date DESC"""
+               ORDER BY coa_approved_date DESC"""
         )
     else:
         cursor = await db.execute(
