@@ -315,6 +315,32 @@ async def _fetch_and_cache_products() -> dict:
         finally:
             await hidden_db.close()
 
+        # Load COA lab results linked to product SKUs
+        coa_db = await aiosqlite.connect(DB_PATH)
+        try:
+            coa_cursor = await coa_db.execute(
+                """SELECT csl.sku, cr.sample_accession, cr.description,
+                          cr.batch_no, cr.sample_status, cr.coa_approved_date
+                   FROM coa_sku_links csl
+                   JOIN coa_results cr ON csl.sample_accession = cr.sample_accession
+                   ORDER BY cr.coa_approved_date DESC"""
+            )
+            coa_rows = await coa_cursor.fetchall()
+        finally:
+            await coa_db.close()
+        coa_by_sku: dict[str, list[dict]] = {}
+        for row in coa_rows:
+            sku_key = row[0]
+            if sku_key not in coa_by_sku:
+                coa_by_sku[sku_key] = []
+            coa_by_sku[sku_key].append({
+                "sample_accession": row[1],
+                "description": row[2],
+                "batch_no": row[3],
+                "sample_status": row[4],
+                "coa_approved_date": row[5],
+            })
+
         products = []
         categories_set: set = set()
 
@@ -400,6 +426,7 @@ async def _fetch_and_cache_products() -> dict:
                 "strength": sku_attrs.get("strength"),
                 "product_type": sku_attrs.get("product_type"),
                 "modified_time": item.get("modifiedTime", 0),
+                "lab_results": coa_by_sku.get(sku, []),
             })
 
         products.sort(key=lambda p: p["name"])
@@ -2808,6 +2835,32 @@ async def get_product_detail(product_id: str):
 
     is_shipping_only = sku.startswith("LF-") if isinstance(sku, str) else False
 
+    # Look up linked COA lab results
+    coa_db = await aiosqlite.connect(DB_PATH)
+    try:
+        coa_cursor = await coa_db.execute(
+            """SELECT cr.sample_accession, cr.description, cr.batch_no,
+                      cr.sample_status, cr.coa_approved_date
+               FROM coa_sku_links csl
+               JOIN coa_results cr ON csl.sample_accession = cr.sample_accession
+               WHERE csl.sku = ?
+               ORDER BY cr.coa_approved_date DESC""",
+            (sku,),
+        )
+        coa_rows = await coa_cursor.fetchall()
+    finally:
+        await coa_db.close()
+    lab_results = [
+        {
+            "sample_accession": r[0],
+            "description": r[1],
+            "batch_no": r[2],
+            "sample_status": r[3],
+            "coa_approved_date": r[4],
+        }
+        for r in coa_rows
+    ]
+
     return {
         "id": item.get("id", ""),
         "name": name,
@@ -2822,6 +2875,7 @@ async def get_product_detail(product_id: str):
         "is_age_restricted": item.get("isAgeRestricted", False),
         "shipping_only": is_shipping_only,
         "modified_time": item.get("modifiedTime", 0),
+        "lab_results": lab_results,
     }
 
 

@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 from app.database import get_db
 from app.acs_client import ACSLabClient
+from app.routers.ecommerce_router import invalidate_product_cache
 
 router = APIRouter(prefix="/api/coa", tags=["coa"])
 
@@ -307,6 +308,7 @@ async def link_sku_to_coa(req: LinkRequest, db=Depends(get_db)):
         (req.sku, req.sample_accession),
     )
     await db.commit()
+    invalidate_product_cache()
     return {"linked": True, "sku": req.sku, "sample_accession": req.sample_accession}
 
 
@@ -318,6 +320,7 @@ async def unlink_sku_from_coa(sku: str, sample_accession: str, db=Depends(get_db
         (sku, sample_accession),
     )
     await db.commit()
+    invalidate_product_cache()
     return {"unlinked": True}
 
 
