@@ -99,6 +99,54 @@ class ACSLabClient:
             log.warning("[acs] Could not resolve client_id")
         return None
 
+    async def get_all_samples(self) -> list[dict]:
+        """Fetch all samples for the user's business via the ``/all`` endpoint.
+
+        This endpoint returns batch-level sample records (one per accession)
+        with metadata, status, and panel info.  It uses ``skip``/``take``
+        pagination and supports the ``client`` parameter for business filtering.
+        Returns all 359+ THE HEMP DISPENSARY batches.
+        """
+        all_samples: list[dict] = []
+        take = 50
+
+        async with httpx.AsyncClient(timeout=PAGE_TIMEOUT) as client:
+            client_id = await self._get_client_id(client)
+            if not client_id:
+                log.warning("[acs] No client_id; cannot fetch from /all endpoint")
+                return []
+
+            skip = 0
+            total = None
+            while total is None or skip < total:
+                url = (
+                    f"{self.base_url}/admin/clientdashboard/all"
+                    f"?client={client_id}&skip={skip}&take={take}"
+                )
+                try:
+                    resp = await self._request_with_retry(
+                        client, "get", url, headers=self._headers()
+                    )
+                    data = resp.json()
+                except Exception:
+                    log.warning("[acs] Failed to fetch /all skip=%d", skip)
+                    break
+
+                if not isinstance(data, dict):
+                    break
+                if total is None:
+                    total = data.get("total", 0)
+                    log.info("[acs] /all endpoint reports %d total samples", total)
+
+                samples = data.get("samples", [])
+                if not samples:
+                    break
+                all_samples.extend(samples)
+                skip += take
+
+        log.info("[acs] Fetched %d samples from /all endpoint", len(all_samples))
+        return all_samples
+
     async def get_all_analyte_results_alternate(self, max_pages: int = 2000) -> list[dict]:
         """Fetch all alternate analyte results for the user's business.
 
