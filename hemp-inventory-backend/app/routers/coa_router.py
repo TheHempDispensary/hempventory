@@ -93,11 +93,26 @@ async def run_coa_sync(db) -> dict:
                     "panel_remark": "",
                 })
 
-    # Clear old data so stale results from previous syncs are removed.
-    # Preserve coa_sku_links (keyed on sample_accession) for any accession
-    # that still appears in the fresh data.
-    await db.execute("DELETE FROM coa_analyte_results")
-    await db.execute("DELETE FROM coa_results")
+    # Guard against partial API failures: only clear-and-replace if we
+    # fetched a reasonable number of samples.  If the new count is less
+    # than half the existing DB count (and the DB already has data), skip
+    # the wipe and fall through to the upsert path so we don't lose
+    # previously-synced results.
+    cursor = await db.execute("SELECT COUNT(*) FROM coa_results")
+    existing_count = (await cursor.fetchone())[0]
+
+    if existing_count == 0 or len(samples) >= existing_count // 2:
+        await db.execute("DELETE FROM coa_analyte_results")
+        await db.execute("DELETE FROM coa_results")
+        # Also clean up orphaned sku links whose accessions are no longer
+        # in the fresh data.
+        fresh_accessions = set(samples.keys())
+        if fresh_accessions:
+            placeholders = ",".join("?" for _ in fresh_accessions)
+            await db.execute(
+                f"DELETE FROM coa_sku_links WHERE sample_accession NOT IN ({placeholders})",
+                tuple(fresh_accessions),
+            )
 
     # Insert samples
     for s in samples.values():
