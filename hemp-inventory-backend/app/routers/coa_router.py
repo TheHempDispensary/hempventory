@@ -54,11 +54,21 @@ async def run_coa_sync(db) -> dict:
             "coa_approved_date": r.get("coa_approved_date", ""),
             "postal_code": "",
             "extracted_from": r.get("extracted_from", ""),
+            "coa_approved_filepath": r.get("coa_approved_filepath", ""),
         }
 
     # 2. Fetch analyte results from the alternate endpoint
     all_analyte_rows = await client.get_all_analyte_results_alternate()
     analytes: list[dict] = []
+
+    # Metric suffixes ordered longest-first to avoid partial matches
+    _METRIC_SUFFIXES = [
+        "_analyte_remark",
+        "_concentration",
+        "_result_unit",
+        "_conc_unit",
+        "_result",
+    ]
 
     for r in all_analyte_rows:
         acc = r.get("sample_accession", "")
@@ -72,44 +82,54 @@ async def run_coa_sync(db) -> dict:
             samples[acc]["consumption_type"] = r.get("consumption_type", "")
             samples[acc]["postal_code"] = r.get("postal_code", "")
 
-        analyte_id = r.get("analyte_identifier", "")
         panel_name = r.get("panel_name", "")
-        if analyte_id or panel_name:
+        if not panel_name:
+            continue
+
+        # Derive inline field prefix from panel_name:
+        # lowercase, spaces→'_', dashes→'_', other chars stay
+        panel_slug = panel_name.lower().replace(" ", "_").replace("-", "_")
+        prefix = panel_slug + "_"
+        panel_remark = r.get("panel_remark", "")
+        panel_identifier = r.get("panel_identifier", "")
+
+        # Parse ALL inline analyte fields from this row
+        inline_analytes: dict[str, dict] = {}
+        for key, val in r.items():
+            if not key.startswith(prefix):
+                continue
+            after_prefix = key[len(prefix):]
+            slug = None
+            metric = None
+            for sfx in _METRIC_SUFFIXES:
+                if after_prefix.endswith(sfx):
+                    slug = after_prefix[: -len(sfx)]
+                    metric = sfx[1:]  # strip leading '_'
+                    break
+            if not slug or not metric:
+                continue
+            if slug not in inline_analytes:
+                inline_analytes[slug] = {}
+            inline_analytes[slug][metric] = val
+
+        # Create one analyte record per inline field group
+        for slug, metrics in inline_analytes.items():
+            result_val = metrics.get("result", "")
+            if not result_val and not metrics.get("concentration"):
+                continue
             analytes.append({
                 "sample_accession": acc,
                 "panel_name": panel_name,
-                "panel_identifier": r.get("panel_identifier", ""),
-                "analyte_abbreviation": r.get("analyte_abbreviation", ""),
-                "analyte_identifier": analyte_id,
-                "concentration": r.get("concentration", 0),
-                "conc_unit": r.get("conc_unit", ""),
-                "result": r.get("result", ""),
-                "result_unit": r.get("result_unit", ""),
-                "analyte_remark": r.get("analyte_remark", ""),
-                "panel_remark": r.get("panel_remark", ""),
+                "panel_identifier": panel_identifier,
+                "analyte_abbreviation": "",
+                "analyte_identifier": slug,
+                "concentration": metrics.get("concentration", 0) or 0,
+                "conc_unit": metrics.get("conc_unit", ""),
+                "result": str(result_val) if result_val else "",
+                "result_unit": metrics.get("result_unit", ""),
+                "analyte_remark": metrics.get("analyte_remark", ""),
+                "panel_remark": panel_remark,
             })
-
-        # Extract inline homogeneity THC/CBD from alternate-format fields
-        for suffix, label in [
-            ("thc", "Total Active THC"),
-            ("cbd", "Total Active CBD"),
-        ]:
-            prefix = f"homogeneity_total_active_{suffix}"
-            h_result = r.get(f"{prefix}_result", "")
-            if h_result and h_result != "0.00":
-                analytes.append({
-                    "sample_accession": acc,
-                    "panel_name": "Homogeneity",
-                    "panel_identifier": "",
-                    "analyte_abbreviation": "",
-                    "analyte_identifier": label,
-                    "concentration": r.get(f"{prefix}_concentration", 0),
-                    "conc_unit": r.get(f"{prefix}_conc_unit", ""),
-                    "result": h_result,
-                    "result_unit": r.get(f"{prefix}_result_unit", ""),
-                    "analyte_remark": r.get(f"{prefix}_analyte_remark", ""),
-                    "panel_remark": "",
-                })
 
     # Always clear-and-replace so stale data from previous syncs (e.g.
     # wrong business) is removed.  The empty-response guard above (line 27)
@@ -132,8 +152,9 @@ async def run_coa_sync(db) -> dict:
                 (sample_accession, order_number, batch_no, business_name,
                  product_name, product_type, consumption_type, description,
                  test_purpose, sample_status, order_date, test_start_date,
-                 coa_approved_date, postal_code, extracted_from, synced_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                 coa_approved_date, postal_code, extracted_from,
+                 coa_approved_filepath, synced_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                ON CONFLICT(sample_accession) DO UPDATE SET
                  order_number=excluded.order_number,
                  batch_no=excluded.batch_no,
@@ -149,6 +170,7 @@ async def run_coa_sync(db) -> dict:
                  coa_approved_date=excluded.coa_approved_date,
                  postal_code=excluded.postal_code,
                  extracted_from=excluded.extracted_from,
+                 coa_approved_filepath=excluded.coa_approved_filepath,
                  synced_at=CURRENT_TIMESTAMP""",
             (
                 s["sample_accession"], s["order_number"], s["batch_no"],
@@ -156,6 +178,7 @@ async def run_coa_sync(db) -> dict:
                 s["consumption_type"], s["description"], s["test_purpose"],
                 s["sample_status"], s["order_date"], s["test_start_date"],
                 s["coa_approved_date"], s["postal_code"], s["extracted_from"],
+                s["coa_approved_filepath"],
             ),
         )
 
