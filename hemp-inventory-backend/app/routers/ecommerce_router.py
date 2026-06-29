@@ -429,6 +429,37 @@ async def _fetch_and_cache_products() -> dict:
                 "lab_results": coa_by_sku.get(sku) or coa_by_sku.get(item.get("id", ""), []),
             })
 
+        # Deduplicate products by SKU: Clover can return multiple items with the
+        # same SKU (e.g. from item-group recreation). Keep the entry with the
+        # highest HQ stock (or latest modified_time as tiebreaker) and merge
+        # stock counts from duplicates so nothing is lost.
+        seen_skus: dict[str, int] = {}  # sku -> index in products list
+        deduped: list[dict] = []
+        for p in products:
+            sku = p.get("sku", "")
+            if sku and sku in seen_skus:
+                existing = deduped[seen_skus[sku]]
+                # Merge stock: take the max at each location
+                existing["stock_hq"] = max(existing["stock_hq"], p["stock_hq"])
+                existing["stock_west"] = max(existing["stock_west"], p["stock_west"])
+                existing["stock_east"] = max(existing["stock_east"], p["stock_east"])
+                existing["stock"] = max(existing["stock_hq"], existing["stock_west"], existing["stock_east"])
+                existing["available"] = existing["available"] or p["available"]
+                # Keep the better image / description
+                if not existing.get("image_url") and p.get("image_url"):
+                    existing["image_url"] = p["image_url"]
+                if not existing.get("description") and p.get("description"):
+                    existing["description"] = p["description"]
+                # Keep more recent modified_time
+                if (p.get("modified_time") or 0) > (existing.get("modified_time") or 0):
+                    existing["modified_time"] = p["modified_time"]
+            else:
+                idx = len(deduped)
+                deduped.append(p)
+                if sku:
+                    seen_skus[sku] = idx
+        products = deduped
+
         products.sort(key=lambda p: p["name"])
 
         result = {

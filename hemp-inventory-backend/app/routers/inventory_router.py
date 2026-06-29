@@ -3175,3 +3175,201 @@ async def smart_par(
             "total_units_sold": sum(r["units_sold"] for r in results),
         },
     }
+
+
+# ── LeafLife Product Import ──────────────────────────────────────────────────
+
+# Standard retail prices (in cents) by tier and weight
+_LEAFLIFE_TIER_PRICES: dict[str, dict[str, int]] = {
+    "Everyday": {"3.5": 2500, "7": 5500, "14": 9500, "28": 12000},
+    "Premium": {"3.5": 3500, "7": 6500, "14": 12000, "28": 18000},
+    "Snowcaps": {"3.5": 3500, "7": 6500, "14": 12000},
+    "Smalls": {"3.5": 1500, "7": 3000, "14": 5500, "28": 8000},
+}
+
+# SKU suffix format per weight (matches existing Clover patterns)
+_WEIGHT_SKU_SUFFIX: dict[str, str] = {
+    "3.5": "3.5",
+    "7": "7 G",
+    "14": "14",
+    "28": "28",
+}
+
+
+class LeafLifeStrain(BaseModel):
+    strain_name: str        # e.g. "Blue Nerdz"
+    tier: str               # Everyday, Premium, Snowcaps, Smalls
+    inventory_grams: float  # total grams available from supplier
+    weights: Optional[list[str]] = None  # override default sizes, e.g. ["3.5", "7", "14", "28"]
+
+
+class LeafLifeImportRequest(BaseModel):
+    strains: list[LeafLifeStrain]
+    dry_run: bool = False  # if True, show what would be created without creating
+
+
+@router.post("/leaflife-import")
+async def leaflife_import(
+    req: LeafLifeImportRequest,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Batch-create LeafLife flower products in Clover HQ.
+
+    For each strain, creates items for each weight size with proper SKU (LF-),
+    pricing, stock, Flower category, and age restriction.
+    Only creates at HQ location (LeafLife products ship from partner).
+    """
+    from app.routers.ecommerce_router import HQ_MERCHANT_ID, HQ_API_TOKEN, invalidate_product_cache
+
+    if not HQ_MERCHANT_ID or not HQ_API_TOKEN:
+        raise HTTPException(status_code=500, detail="HQ Clover credentials not configured")
+
+    client = CloverClient(HQ_MERCHANT_ID, HQ_API_TOKEN)
+
+    # Look up or cache the "Flower" category ID
+    cats = await client.get_categories()
+    flower_cat_id = None
+    for c in cats.get("elements", []):
+        if c.get("name", "").lower() == "flower":
+            flower_cat_id = c["id"]
+            break
+    if not flower_cat_id:
+        new_cat = await client.create_category("Flower")
+        flower_cat_id = new_cat["id"]
+
+    # Get age restriction obj
+    age_obj = await _get_age_restriction_obj(client, "Vitamin & Supplements", 21)
+
+    # Fetch existing LF- SKUs to avoid duplicates
+    existing_items = await client.get_items(expand="itemStock")
+    existing_skus: set[str] = set()
+    for item in existing_items.get("elements", []):
+        sku = item.get("sku", "") or ""
+        if sku.startswith("LF-"):
+            existing_skus.add(sku.upper())
+
+    results: list[dict] = []
+
+    for strain in req.strains:
+        tier = strain.tier.strip().title()
+        tier_prices = _LEAFLIFE_TIER_PRICES.get(tier)
+        if not tier_prices:
+            results.append({
+                "strain": strain.strain_name,
+                "status": "error",
+                "error": f"Unknown tier '{strain.tier}'. Must be: Everyday, Premium, Snowcaps, or Smalls",
+            })
+            continue
+
+        weights = strain.weights or list(tier_prices.keys())
+        strain_upper = strain.strain_name.strip().upper()
+        # Build SKU base: LF-{STRAIN}-  (replace spaces with hyphens)
+        sku_base = "LF-" + re.sub(r"\s+", "-", strain_upper)
+
+        created_items: list[dict] = []
+        skipped_items: list[str] = []
+
+        for weight in weights:
+            weight_str = weight.strip()
+            if weight_str not in tier_prices:
+                skipped_items.append(f"{weight_str}g (no price for this size in {tier} tier)")
+                continue
+
+            sku_suffix = _WEIGHT_SKU_SUFFIX.get(weight_str, weight_str)
+            sku = f"{sku_base}-{sku_suffix}"
+
+            # Skip if already exists
+            if sku.upper() in existing_skus:
+                skipped_items.append(f"{weight_str}g (SKU {sku} already exists)")
+                continue
+
+            price = tier_prices[weight_str]
+            weight_float = float(weight_str)
+            stock_qty = int(strain.inventory_grams / weight_float) if weight_float > 0 else 0
+
+            # Build item name: "{STRAIN} {TIER} {WEIGHT} GRAMS"
+            weight_label = f"{weight_str} Gram{'s' if weight_float != 1 else ''}"
+            item_name = f"{strain.strain_name.strip().upper()} {tier.upper()} {weight_label.upper()}"
+
+            if req.dry_run:
+                created_items.append({
+                    "sku": sku,
+                    "name": item_name,
+                    "price": price,
+                    "stock": stock_qty,
+                    "dry_run": True,
+                })
+                continue
+
+            # Create item in Clover HQ
+            item_data: dict = {
+                "name": item_name,
+                "price": price,
+                "sku": sku,
+                "available": True,
+                "hidden": False,
+                "autoManage": False,
+                "isRevenue": True,
+                "defaultTaxRates": True,
+                "isAgeRestricted": True,
+            }
+            if age_obj:
+                item_data["ageRestrictedObj"] = age_obj
+
+            try:
+                created = await client.create_item(item_data)
+                item_id = created.get("id", "")
+
+                # Assign Flower category
+                if flower_cat_id:
+                    try:
+                        await client.assign_category(item_id, flower_cat_id)
+                    except Exception as cat_err:
+                        print(f"[leaflife-import] Category assign failed for {sku}: {cat_err}")
+
+                # Set stock
+                if stock_qty > 0:
+                    try:
+                        await client.update_item_stock(item_id, stock_qty)
+                    except Exception as stock_err:
+                        print(f"[leaflife-import] Stock update failed for {sku}: {stock_err}")
+
+                created_items.append({
+                    "sku": sku,
+                    "name": item_name,
+                    "item_id": item_id,
+                    "price": price,
+                    "stock": stock_qty,
+                })
+                existing_skus.add(sku.upper())
+
+                await asyncio.sleep(0.3)  # Rate limit
+
+            except Exception as e:
+                created_items.append({
+                    "sku": sku,
+                    "name": item_name,
+                    "error": str(e),
+                })
+
+        results.append({
+            "strain": strain.strain_name,
+            "tier": tier,
+            "inventory_grams": strain.inventory_grams,
+            "created": [i for i in created_items if "error" not in i],
+            "errors": [i for i in created_items if "error" in i],
+            "skipped": skipped_items,
+        })
+
+    if not req.dry_run:
+        # Invalidate caches so new products appear on the website
+        invalidate_product_cache()
+        await _invalidate_cache()
+
+    total_created = sum(len(r.get("created", [])) for r in results)
+    return {
+        "status": "dry_run" if req.dry_run else "completed",
+        "total_created": total_created,
+        "results": results,
+    }
