@@ -74,7 +74,12 @@ class ACSLabClient:
                     headers=self._headers(),
                 )
                 data = resp.json()
-                return page, data if isinstance(data, list) else []
+                if not isinstance(data, list):
+                    # Dict responses (e.g. {"message": "Server Error"}) are
+                    # transient failures, not end-of-data signals.
+                    log.warning("Page %d returned non-list: %s", page, str(data)[:80])
+                    return page, None
+                return page, data
             except Exception:
                 log.warning("Failed to fetch page %d from %s", page, url)
                 return page, None
@@ -175,17 +180,18 @@ class ACSLabClient:
                 results = await asyncio.gather(*tasks)
 
                 failed_pages: list[int] = []
+                batch_has_data = False
 
                 for pg, rows in sorted(results, key=lambda x: x[0]):
                     if rows is None:
                         failed_pages.append(pg)
                         continue
-                    if not rows:
-                        done = True
-                        break
-                    all_results.extend(rows)
+                    if rows:
+                        all_results.extend(rows)
+                        batch_has_data = True
+                    # Empty lists (gaps) are skipped without stopping
 
-                if failed_pages and not done:
+                if failed_pages:
                     log.info("[acs] Retrying %d failed pages", len(failed_pages))
                     retry_tasks = [
                         self._fetch_page(client, sem, url, p, extra_params)
@@ -195,6 +201,12 @@ class ACSLabClient:
                     for pg, rows in sorted(retry_results, key=lambda x: x[0]):
                         if rows is not None and rows:
                             all_results.extend(rows)
+                            batch_has_data = True
+
+                # Stop only when an entire batch (50 pages) yields zero data
+                if not batch_has_data:
+                    log.info("[acs] No data in batch pages %d-%d; stopping", page, batch_end - 1)
+                    done = True
 
                 page = batch_end
                 log.info(
