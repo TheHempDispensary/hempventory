@@ -816,10 +816,17 @@ async def init_db():
                 coa_approved_date TEXT,
                 postal_code TEXT,
                 extracted_from TEXT,
+                coa_approved_filepath TEXT,
                 synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(sample_accession)
             )
         """)
+
+        # Migration: add coa_approved_filepath if missing
+        try:
+            await db.execute("ALTER TABLE coa_results ADD COLUMN coa_approved_filepath TEXT")
+        except Exception:
+            pass
 
         # Individual analyte results linked to COA samples
         await db.execute("""

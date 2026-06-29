@@ -315,30 +315,90 @@ async def _fetch_and_cache_products() -> dict:
         finally:
             await hidden_db.close()
 
-        # Load COA lab results linked to product SKUs
+        # Load COA lab results linked to product SKUs (with analyte details)
         coa_db = await aiosqlite.connect(DB_PATH)
         try:
             coa_cursor = await coa_db.execute(
                 """SELECT csl.sku, cr.sample_accession, cr.description,
-                          cr.batch_no, cr.sample_status, cr.coa_approved_date
+                          cr.batch_no, cr.sample_status, cr.coa_approved_date,
+                          cr.coa_approved_filepath
                    FROM coa_sku_links csl
                    JOIN coa_results cr ON csl.sample_accession = cr.sample_accession
                    ORDER BY cr.coa_approved_date DESC"""
             )
             coa_rows = await coa_cursor.fetchall()
+
+            # Collect all linked accessions to fetch analytes in one query
+            linked_accessions = list({row[1] for row in coa_rows})
+            analyte_by_acc: dict[str, list[dict]] = {}
+            if linked_accessions:
+                placeholders = ",".join("?" for _ in linked_accessions)
+                analyte_cursor = await coa_db.execute(
+                    f"""SELECT sample_accession, panel_name, analyte_identifier,
+                               concentration, conc_unit, result, result_unit,
+                               analyte_remark, panel_remark
+                        FROM coa_analyte_results
+                        WHERE sample_accession IN ({placeholders})
+                        ORDER BY panel_name, analyte_identifier""",
+                    tuple(linked_accessions),
+                )
+                for arow in await analyte_cursor.fetchall():
+                    acc_key = arow[0]
+                    if acc_key not in analyte_by_acc:
+                        analyte_by_acc[acc_key] = []
+                    analyte_by_acc[acc_key].append({
+                        "panel_name": arow[1],
+                        "analyte": arow[2],
+                        "concentration": arow[3],
+                        "conc_unit": arow[4],
+                        "result": arow[5],
+                        "result_unit": arow[6],
+                        "remark": arow[7],
+                        "panel_remark": arow[8],
+                    })
         finally:
             await coa_db.close()
+
         coa_by_sku: dict[str, list[dict]] = {}
         for row in coa_rows:
             sku_key = row[0]
+            accession = row[1]
             if sku_key not in coa_by_sku:
                 coa_by_sku[sku_key] = []
+
+            # Build COA PDF URL from accession
+            coa_pdf_url = f"https://portal.acslabcannabis.com/reports/view-public-coa?orderids=%5B%22{url_quote(accession)}%22%5D&lang=en"
+
+            # Group analytes by panel
+            raw_analytes = analyte_by_acc.get(accession, [])
+            panels: dict[str, list[dict]] = {}
+            panel_remarks: dict[str, str] = {}
+            for a in raw_analytes:
+                pname = a["panel_name"] or "Other"
+                if pname not in panels:
+                    panels[pname] = []
+                    panel_remarks[pname] = a.get("panel_remark", "")
+                panels[pname].append({
+                    "analyte": a["analyte"],
+                    "result": a["result"],
+                    "result_unit": a["result_unit"],
+                    "concentration": a["concentration"],
+                    "conc_unit": a["conc_unit"],
+                    "remark": a["remark"],
+                })
+            analyte_panels = [
+                {"panel_name": pname, "panel_remark": panel_remarks.get(pname, ""), "analytes": analytes_list}
+                for pname, analytes_list in panels.items()
+            ]
+
             coa_by_sku[sku_key].append({
-                "sample_accession": row[1],
+                "sample_accession": accession,
                 "description": row[2],
                 "batch_no": row[3],
                 "sample_status": row[4],
                 "coa_approved_date": row[5],
+                "coa_pdf_url": coa_pdf_url,
+                "panels": analyte_panels,
             })
 
         products = []
