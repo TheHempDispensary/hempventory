@@ -367,7 +367,7 @@ async def _fetch_and_cache_products() -> dict:
                 coa_by_sku[sku_key] = []
 
             # Build COA PDF URL from accession
-            coa_pdf_url = f"https://portal.acslabcannabis.com/reports/view-public-coa?orderids=%5B%22{url_quote(accession)}%22%5D&add_doc=-COA&lang=en"
+            coa_pdf_url = f"https://portal.acslabcannabis.com/reports/view-public-coa?orderids=%5B%22{url_quote(accession)}%22%5D&lang=en"
 
             # Group analytes by panel
             raw_analytes = analyte_by_acc.get(accession, [])
