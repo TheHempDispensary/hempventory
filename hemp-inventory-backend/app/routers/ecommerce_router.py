@@ -489,6 +489,46 @@ async def _fetch_and_cache_products() -> dict:
                 "lab_results": coa_by_sku.get(sku) or coa_by_sku.get(item.get("id", ""), []),
             })
 
+        # Deduplicate products by SKU: Clover can return multiple items with the
+        # same SKU (e.g. from item-group recreation). Prefer the entry with the
+        # highest HQ stock (modified_time as tiebreaker) for metadata (price,
+        # name, categories, etc.) and merge stock counts so nothing is lost.
+        seen_skus: dict[str, int] = {}  # sku -> index in products list
+        deduped: list[dict] = []
+        for p in products:
+            sku = p.get("sku", "")
+            if sku and sku in seen_skus:
+                idx = seen_skus[sku]
+                existing = deduped[idx]
+                # Decide which entry is the "primary" (better metadata source):
+                # prefer higher HQ stock, then more recent modified_time.
+                p_better = (
+                    p["stock_hq"] > existing["stock_hq"]
+                    or (p["stock_hq"] == existing["stock_hq"]
+                        and (p.get("modified_time") or 0) > (existing.get("modified_time") or 0))
+                )
+                if p_better:
+                    # Swap: use p as the base entry, merge stock from existing
+                    primary, secondary = p, existing
+                else:
+                    primary, secondary = existing, p
+                # Merge stock: take the max at each location
+                primary["stock_hq"] = max(primary["stock_hq"], secondary["stock_hq"])
+                primary["stock_west"] = max(primary["stock_west"], secondary["stock_west"])
+                primary["stock_east"] = max(primary["stock_east"], secondary["stock_east"])
+                primary["stock"] = max(primary["stock_hq"], primary["stock_west"], primary["stock_east"])
+                primary["available"] = primary["available"] or secondary["available"]
+                # Fill in missing image / description from either entry
+                if not primary.get("image_url") and secondary.get("image_url"):
+                    primary["image_url"] = secondary["image_url"]
+                if not primary.get("description") and secondary.get("description"):
+                    primary["description"] = secondary["description"]
+                deduped[idx] = primary
+            else:
+                seen_skus[sku] = len(deduped)
+                deduped.append(p)
+        products = deduped
+
         products.sort(key=lambda p: p["name"])
 
         result = {
