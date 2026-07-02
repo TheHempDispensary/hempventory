@@ -1234,6 +1234,8 @@ async def _build_clover_promo_name(client: Optional[CloverClient], code: str,
     the discount applies to and doesn't apply it to other items.
     Clover discount names can be up to 127 chars.
     """
+    # If user gave a custom name (not auto-generated), use it directly
+    has_custom_name = is_direct and code and not code.startswith("DIRECT-")
     if applies_to != "specific" or not product_ids or not client:
         return code
 
@@ -1260,7 +1262,9 @@ async def _build_clover_promo_name(client: Optional[CloverClient], code: str,
         desc = "Discount"
 
     product_list = ", ".join(names)
-    if is_direct:
+    if has_custom_name:
+        label = f"{code} ({desc}: {product_list})"
+    elif is_direct:
         label = f"{desc}: {product_list}"
     else:
         label = f"{code} {desc}: {product_list} ONLY"
@@ -1274,9 +1278,13 @@ async def _build_clover_promo_name(client: Optional[CloverClient], code: str,
 async def create_promo(body: PromoCreateRequest, db: aiosqlite.Connection = Depends(get_db)):
     """Admin: Create a new promo code or direct discount."""
     if body.is_direct_discount:
-        # Auto-generate an internal code for direct discounts
-        import uuid
-        code = "DIRECT-" + uuid.uuid4().hex[:8].upper()
+        if body.code.strip():
+            # User provided a custom name for the direct discount
+            code = body.code.strip().upper()
+        else:
+            # Auto-generate an internal code for direct discounts
+            import uuid
+            code = "DIRECT-" + uuid.uuid4().hex[:8].upper()
     else:
         code = body.code.strip().upper()
         if not code:
