@@ -108,7 +108,7 @@ export default function Discounts() {
   const [vdDiscountType, setVdDiscountType] = useState<"fixed_total" | "amount_off" | "percent_off">("fixed_total");
   const [vdDiscountValue, setVdDiscountValue] = useState("");
   const [vdLabel, setVdLabel] = useState("");
-  const [vdSyncToClover, setVdSyncToClover] = useState(false);
+  const [vdSyncToClover, setVdSyncToClover] = useState(true);
   const [vdEditingId, setVdEditingId] = useState<number | null>(null);
   const [vdDeleteConfirmId, setVdDeleteConfirmId] = useState<number | null>(null);
 
@@ -124,7 +124,7 @@ export default function Discounts() {
   const [newAppliesTo, setNewAppliesTo] = useState<"all" | "specific">("all");
   const [newProductIds, setNewProductIds] = useState<string[]>([]);
   const [newExcludeOtherCoupons, setNewExcludeOtherCoupons] = useState(false);
-  const [newSyncToClover, setNewSyncToClover] = useState(false);
+  const [newSyncToClover, setNewSyncToClover] = useState(true);
   const [newExcludedBrands, setNewExcludedBrands] = useState<string[]>([]);
   const [brands, setBrands] = useState<string[]>([]);
   const [brandSearch, setBrandSearch] = useState("");
@@ -184,13 +184,13 @@ export default function Discounts() {
   const resetCreateForm = () => {
     setNewIsDirectDiscount(false); setNewCode(""); setNewDiscountValue(""); setNewSingleUse(false); setNewMaxUses("");
     setNewExpiresAt(""); setNewStartsAt(""); setNewAppliesTo("all"); setNewProductIds([]);
-    setNewExcludeOtherCoupons(false); setNewSyncToClover(false); setNewExcludedBrands([]); setBrandSearch("");
+    setNewExcludeOtherCoupons(false); setNewSyncToClover(true); setNewExcludedBrands([]); setBrandSearch("");
   };
 
   const resetVdForm = () => {
     setVdProductSearch(""); setVdSelectedProduct(null); setVdMinQty("2");
     setVdDiscountType("fixed_total"); setVdDiscountValue(""); setVdLabel("");
-    setVdSyncToClover(false); setVdEditingId(null);
+    setVdSyncToClover(true); setVdEditingId(null);
   };
 
   const resetBundleForm = () => {
@@ -343,7 +343,7 @@ export default function Discounts() {
     if (newAppliesTo === "specific" && newProductIds.length === 0) { setError("Please select at least one product"); return; }
     setError("");
     try {
-      await createPromo({
+      const res = await createPromo({
         code: newIsDirectDiscount ? "" : newCode.trim().toUpperCase(),
         is_direct_discount: newIsDirectDiscount,
         discount_pct: newDiscountType === "percent" ? val / 100 : 0,
@@ -359,7 +359,13 @@ export default function Discounts() {
         excluded_brands: newExcludedBrands.join(","),
       });
       const label = newIsDirectDiscount ? "Direct discount" : "Promo code \"" + newCode.trim().toUpperCase() + "\"";
-      setSuccess(label + " created!" + (newSyncToClover ? " Synced to Clover POS." : ""));
+      const syncStatus = newSyncToClover
+        ? (res.data?.clover_synced ? " Synced to Clover POS." : " Warning: Failed to sync to Clover POS.")
+        : "";
+      setSuccess(label + " created!" + syncStatus);
+      if (newSyncToClover && !res.data?.clover_synced) {
+        setError("Clover sync failed: " + (res.data?.clover_sync_errors?.join("; ") || "Unknown error"));
+      }
       setShowCreate(false); resetCreateForm();
       setTimeout(() => setSuccess(""), 3000);
       loadPromos();

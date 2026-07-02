@@ -1054,7 +1054,7 @@ class PromoCreateRequest(BaseModel):
     applies_to: str = "all"  # "all", "specific", or "individual"
     product_ids: str = ""  # comma-separated Clover item IDs
     exclude_from_other_coupons: bool = False
-    sync_to_clover: bool = False
+    sync_to_clover: bool = True
     excluded_brands: str = ""  # comma-separated brand/category names to exclude
 
 
@@ -1277,34 +1277,48 @@ async def create_promo(body: PromoCreateRequest, db: aiosqlite.Connection = Depe
         raise HTTPException(status_code=400, detail=f"Promo code '{code}' already exists")
 
     # Sync to all Clover POS locations (non-blocking: errors logged, don't fail response)
+    clover_sync_ok = False
+    clover_sync_errors: list[str] = []
     if body.sync_to_clover:
         try:
             pct = int(round(body.discount_pct * 100)) if body.discount_pct > 0 else 0
             amt = body.discount_amount if body.discount_amount > 0 else 0
             clients = await _get_all_location_clients(db)
-            ref_client = clients[0][2] if clients else None
-            clover_name = await _build_clover_promo_name(
-                ref_client, code, body.is_direct_discount, body.applies_to,
-                body.product_ids, body.discount_pct, body.discount_amount,
-            )
-            sync_results = await _sync_discount_to_all_locations(
-                db, promo_id, "promo", name=clover_name,
-                percentage=pct, amount=amt,
-            )
-            # Store first successful Clover ID in legacy column for backward compat
-            for r in sync_results:
-                if r.get("clover_id"):
-                    clover_discount_id = r["clover_id"]
-                    await db.execute(
-                        "UPDATE promo_codes SET clover_discount_id = ? WHERE id = ?",
-                        (clover_discount_id, promo_id),
-                    )
-                    await db.commit()
-                    break
+            if not clients:
+                clover_sync_errors.append("No Clover locations configured")
+            else:
+                ref_client = clients[0][2]
+                clover_name = await _build_clover_promo_name(
+                    ref_client, code, body.is_direct_discount, body.applies_to,
+                    body.product_ids, body.discount_pct, body.discount_amount,
+                )
+                sync_results = await _sync_discount_to_all_locations(
+                    db, promo_id, "promo", name=clover_name,
+                    percentage=pct, amount=amt,
+                )
+                # Store first successful Clover ID in legacy column for backward compat
+                for r in sync_results:
+                    if r.get("clover_id"):
+                        clover_discount_id = r["clover_id"]
+                        clover_sync_ok = True
+                        await db.execute(
+                            "UPDATE promo_codes SET clover_discount_id = ? WHERE id = ?",
+                            (clover_discount_id, promo_id),
+                        )
+                        await db.commit()
+                        break
+                    elif r.get("error"):
+                        clover_sync_errors.append(f"{r.get('location', '?')}: {r['error']}")
         except Exception as e:
             print(f"[promo] Clover sync failed: {e}")
+            clover_sync_errors.append(str(e))
 
-    return {"status": "created", "code": code, "clover_discount_id": clover_discount_id}
+    return {
+        "status": "created", "code": code,
+        "clover_discount_id": clover_discount_id,
+        "clover_synced": clover_sync_ok,
+        "clover_sync_errors": clover_sync_errors,
+    }
 
 
 class PromoUpdateRequest(BaseModel):
@@ -1404,6 +1418,37 @@ async def update_promo(promo_id: int, body: PromoUpdateRequest, db: aiosqlite.Co
         except Exception as e:
             print(f"[promo] Clover unsync failed: {e}")
 
+    # When active status changes on a Clover-synced discount, push the change
+    if body.is_active is not None and body.sync_to_clover is None:
+        cursor = await db.execute("SELECT * FROM promo_codes WHERE id = ?", (promo_id,))
+        promo = await cursor.fetchone()
+        if promo and promo["sync_to_clover"]:
+            try:
+                if body.is_active:
+                    # Reactivating: recreate on all Clover locations
+                    pct_val = promo["discount_pct"]
+                    amt_val = promo["discount_amount"]
+                    pct = int(round(pct_val * 100)) if pct_val > 0 else 0
+                    amt = amt_val if amt_val > 0 else 0
+                    is_direct = bool(promo.get("is_direct_discount", 0))
+                    applies_to = promo.get("applies_to", "all")
+                    p_ids = promo.get("product_ids", "")
+                    clients = await _get_all_location_clients(db)
+                    ref_client = clients[0][2] if clients else None
+                    clover_name = await _build_clover_promo_name(
+                        ref_client, promo["code"], is_direct, applies_to,
+                        p_ids, pct_val, amt_val,
+                    )
+                    await _update_discount_on_all_locations(
+                        db, promo_id, "promo",
+                        name=clover_name, percentage=pct, amount=amt,
+                    )
+                else:
+                    # Deactivating: remove from all Clover locations
+                    await _delete_discount_from_all_locations(db, promo_id, "promo")
+            except Exception as e:
+                print(f"[promo] Clover sync on active toggle failed: {e}")
+
     return {"status": "updated"}
 
 
@@ -1429,7 +1474,7 @@ async def resync_promos_to_clover(db: aiosqlite.Connection = Depends(get_db)):
     Syncs to ALL configured store locations.
     """
     cursor = await db.execute(
-        "SELECT * FROM promo_codes WHERE is_active = 1 AND (clover_discount_id != '' OR is_direct_discount = 1)"
+        "SELECT * FROM promo_codes WHERE is_active = 1 AND (sync_to_clover = 1 OR clover_discount_id != '' OR is_direct_discount = 1)"
     )
     rows = await cursor.fetchall()
     clients = await _get_all_location_clients(db)
@@ -1478,7 +1523,7 @@ class VolumeDiscountCreateRequest(BaseModel):
     discount_value: float = 0
     customer_label: str = ""
     is_active: bool = True
-    sync_to_clover: bool = False
+    sync_to_clover: bool = True
 
 
 class VolumeDiscountUpdateRequest(BaseModel):
@@ -1667,6 +1712,31 @@ async def update_volume_discount(discount_id: int, body: VolumeDiscountUpdateReq
                     )
         except Exception as e:
             print(f"[volume-discount] Clover sync failed: {e}")
+
+    # When active status changes on a Clover-synced volume discount, push the change
+    if body.is_active is not None and body.sync_to_clover is None:
+        cursor = await db.execute("SELECT * FROM volume_discounts WHERE id = ?", (discount_id,))
+        vd = await cursor.fetchone()
+        if vd and vd["sync_to_clover"]:
+            try:
+                if body.is_active:
+                    # Reactivating: recreate on all Clover locations
+                    clients = await _get_all_location_clients(db)
+                    ref_client = clients[0][2] if clients else None
+                    if ref_client:
+                        label, pct, amt = await _compute_clover_volume_discount(
+                            ref_client, vd["product_sku"], vd["product_name"],
+                            vd["min_quantity"], vd["discount_type"],
+                            vd["discount_value"], vd["customer_label"],
+                        )
+                        await _update_discount_on_all_locations(
+                            db, discount_id, "volume", name=label, percentage=pct, amount=amt,
+                        )
+                else:
+                    # Deactivating: remove from all Clover locations
+                    await _delete_discount_from_all_locations(db, discount_id, "volume")
+            except Exception as e:
+                print(f"[volume-discount] Clover sync on active toggle failed: {e}")
 
     return {"status": "updated"}
 
