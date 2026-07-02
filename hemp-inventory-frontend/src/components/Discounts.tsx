@@ -344,7 +344,7 @@ export default function Discounts() {
     setError("");
     try {
       const res = await createPromo({
-        code: newIsDirectDiscount ? "" : newCode.trim().toUpperCase(),
+        code: newCode.trim() || "",
         is_direct_discount: newIsDirectDiscount,
         discount_pct: newDiscountType === "percent" ? val / 100 : 0,
         discount_amount: newDiscountType === "amount" ? Math.round(val * 100) : 0,
@@ -358,7 +358,7 @@ export default function Discounts() {
         sync_to_clover: newSyncToClover,
         excluded_brands: newExcludedBrands.join(","),
       });
-      const label = newIsDirectDiscount ? "Direct discount" : "Promo code \"" + newCode.trim().toUpperCase() + "\"";
+      const label = newIsDirectDiscount ? (newCode.trim() ? "Direct discount \"" + newCode.trim() + "\"" : "Direct discount") : "Promo code \"" + newCode.trim().toUpperCase() + "\"";
       const syncStatus = newSyncToClover
         ? (res.data?.clover_synced ? " Synced to Clover POS." : " Warning: Failed to sync to Clover POS.")
         : "";
@@ -758,7 +758,11 @@ export default function Discounts() {
             <p className="text-xs text-gray-500 mb-4 -mt-2">Direct discounts are applied automatically to selected products. No promo code needed.</p>
           )}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {!newIsDirectDiscount && (<div>
+            {newIsDirectDiscount ? (<div>
+              <label className="text-sm font-medium text-gray-700 block mb-1">Discount Name</label>
+              <input type="text" value={newCode} onChange={(e) => setNewCode(e.target.value)}
+                placeholder="e.g. Military Discount" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-purple-500" />
+            </div>) : (<div>
               <label className="text-sm font-medium text-gray-700 block mb-1">Promo Code</label>
               <input type="text" value={newCode} onChange={(e) => setNewCode(e.target.value.toUpperCase())}
                 placeholder="e.g. SUMMER20" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500" />
@@ -885,7 +889,7 @@ export default function Discounts() {
                 <div className="p-5">
                   <div className="flex items-center justify-between mb-4">
                     <span className={"font-mono font-bold px-3 py-1 rounded text-sm " + (promo.is_direct_discount ? "text-purple-700 bg-purple-50" : "text-green-700 bg-green-50")}>
-                      {promo.is_direct_discount ? "DIRECT DISCOUNT" : promo.code}
+                      {promo.is_direct_discount ? (promo.code.startsWith("DIRECT-") ? "Direct Discount" : promo.code) : promo.code}
                     </span>
                     <div className="flex items-center gap-1">
                       <button onClick={() => handleUpdate(promo.id)} className="flex items-center gap-1 px-3 py-1.5 bg-green-600 text-white rounded-lg text-sm hover:bg-green-700">
@@ -982,7 +986,7 @@ export default function Discounts() {
                     <div className="flex items-center gap-3 flex-wrap">
                       {promo.is_direct_discount ? (
                         <span className="font-bold text-purple-700 bg-purple-50 px-3 py-1 rounded text-sm flex items-center gap-1">
-                          <ShoppingBag className="w-3.5 h-3.5" /> Direct Discount
+                          <ShoppingBag className="w-3.5 h-3.5" /> {promo.code.startsWith("DIRECT-") ? "Direct Discount" : promo.code}
                         </span>
                       ) : (
                         <span className="font-mono font-bold text-green-700 bg-green-50 px-3 py-1 rounded text-sm">{promo.code}</span>
