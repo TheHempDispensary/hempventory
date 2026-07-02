@@ -2281,14 +2281,17 @@ async def create_order(
             print(f"[ORDER LOST] customer={order.customer.first_name} {order.customer.last_name} email={order.customer.email} phone={order.customer.phone}")
             print(f"[ORDER LOST] items: {items_dump}")
             print(f"[ORDER LOST] DB error: {db_err}")
-            # Try a simplified insert as last resort
+            # Try a simplified insert as last resort (include fulfillment_type and discount fields
+            # so pickup orders don't lose their type and show as shipping)
             try:
                 cursor2 = await db.execute(
                     """INSERT INTO ecommerce_orders
                        (order_number, customer_first_name, customer_last_name, customer_email, customer_phone,
                         shipping_address, shipping_apartment, shipping_city, shipping_state, shipping_zip,
-                        subtotal, shipping_cost, tax, total, notes, charge_id, payment_status)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        subtotal, discount, volume_discount, sale_discount, loyalty_discount, promo_code,
+                        shipping_cost, tax, total, notes, charge_id, payment_status,
+                        fulfillment_type, shipping_service, clover_order_id, source)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         order_number,
                         order.customer.first_name,
@@ -2301,12 +2304,21 @@ async def create_order(
                         order.shipping_address.state,
                         order.shipping_address.zip,
                         order.subtotal,
+                        order.discount,
+                        order.volume_discount,
+                        order.sale_discount,
+                        order.loyalty_discount,
+                        order.promo_code or "",
                         order.shipping_cost,
                         order.tax,
                         order.total,
                         order.notes,
                         charge_id,
                         payment_status,
+                        order.fulfillment_type,
+                        order.shipping_service,
+                        clover_order_id,
+                        "website",
                     ),
                 )
                 order_id = cursor2.lastrowid
@@ -3449,6 +3461,42 @@ async def convert_to_shipping(
         "shipping_state": updated[4],
         "shipping_zip": updated[5],
     }
+
+
+@router.patch("/orders/{order_id}/fulfillment-type")
+async def update_order_fulfillment_type(
+    order_id: int,
+    request: Request,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Admin: Fix the fulfillment type for an order (e.g. when fallback insert lost the type)."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    import jwt
+    token = auth.split(" ", 1)[1]
+    jwt_secret = os.environ.get("JWT_SECRET", "hemp-inventory-secret-key")
+    try:
+        jwt.decode(token, jwt_secret, algorithms=["HS256"])
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    body = await request.json()
+    new_type = body.get("fulfillment_type", "").strip()
+    if new_type not in ("shipping", "pickup_west", "pickup_east", "local_delivery"):
+        raise HTTPException(status_code=400, detail="Invalid fulfillment type")
+
+    cursor = await db.execute("SELECT id FROM ecommerce_orders WHERE id = ?", (order_id,))
+    if not await cursor.fetchone():
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    await db.execute(
+        "UPDATE ecommerce_orders SET fulfillment_type = ? WHERE id = ?",
+        (new_type, order_id),
+    )
+    await db.commit()
+    return {"success": True, "order_id": order_id, "fulfillment_type": new_type}
 
 
 @router.post("/orders/{order_id}/resend-confirmation")

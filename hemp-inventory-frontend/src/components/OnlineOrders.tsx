@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { getOnlineOrders, updateOrderStatus, updateOrderNotes, updateOrderCustomer, createShipment, purchaseLabel, getShippingLabel, refundOrder, resendOrderConfirmation, convertToShipping, getOrderShipments } from "../lib/api";
+import { getOnlineOrders, updateOrderStatus, updateOrderNotes, updateOrderCustomer, createShipment, purchaseLabel, getShippingLabel, refundOrder, resendOrderConfirmation, convertToShipping, getOrderShipments, updateFulfillmentType } from "../lib/api";
 import { MessageSquare, Save, Edit2, X } from "lucide-react";
 import { RefreshCw, Search, Package, ChevronDown, ChevronUp, Truck, CheckCircle, XCircle, Clock, ShoppingCart, Printer, Tag, ExternalLink, Loader2, RotateCcw, AlertTriangle, DollarSign, Mail, MapPin } from "lucide-react";
 
@@ -1019,6 +1019,28 @@ export default function OnlineOrders() {
                                 <Truck className="w-3.5 h-3.5" /> {order.shipping_service}
                               </p>
                             )}
+                            {/* Show fix button when order has no shipping address (likely a pickup order that lost its type) */}
+                            {!order.shipping_address && !order.label_url && (
+                              <div className="mt-2 p-2 bg-amber-50 border border-amber-200 rounded-lg">
+                                <p className="text-xs text-amber-700 mb-1">Missing address — is this a pickup order?</p>
+                                <div className="flex gap-1">
+                                  {["pickup_west", "pickup_east"].map((ft) => (
+                                    <button
+                                      key={ft}
+                                      onClick={async () => {
+                                        try {
+                                          await updateFulfillmentType(order.id, ft);
+                                          setOrders((prev) => prev.map((o) => o.id === order.id ? { ...o, fulfillment_type: ft } : o));
+                                        } catch { /* ignore */ }
+                                      }}
+                                      className="px-2 py-1 text-xs bg-amber-200 text-amber-800 rounded hover:bg-amber-300 font-medium"
+                                    >
+                                      {ft === "pickup_west" ? "Mark Pickup West" : "Mark Pickup East"}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
                           </>
                         )}
                       </div>
@@ -1106,7 +1128,13 @@ export default function OnlineOrders() {
                         {(order.loyalty_discount || 0) > 0 && (
                           <p className="text-green-600">Loyalty Reward: -{formatPrice(order.loyalty_discount)}</p>
                         )}
-                        <p className="text-gray-600">Shipping: {order.shipping_cost === 0 ? "Free" : formatPrice(order.shipping_cost)}</p>
+                        <p className="text-gray-600">
+                          {order.fulfillment_type && order.fulfillment_type.startsWith("pickup")
+                            ? "Pickup: Free"
+                            : order.fulfillment_type === "local_delivery"
+                              ? `Delivery: ${order.shipping_cost === 0 ? "Free" : formatPrice(order.shipping_cost)}`
+                              : `Shipping: ${order.shipping_cost === 0 ? "Free" : formatPrice(order.shipping_cost)}`}
+                        </p>
                         <p className="text-gray-600">Tax: {formatPrice(order.tax)}</p>
                         <p className="font-bold text-gray-900 text-base">Total: {formatPrice(order.total)}</p>
                       </div>
