@@ -1071,15 +1071,36 @@ async def _get_all_location_clients(db: aiosqlite.Connection) -> list[tuple[str,
     """Get CloverClient instances for all store locations.
 
     Returns list of (merchant_id, location_name, CloverClient) tuples.
+    First tries the locations table; falls back to environment variables
+    so discount sync works even if the Locations page hasn't been configured.
     """
+    seen_merchants: set[str] = set()
+    clients: list[tuple[str, str, CloverClient]] = []
+
+    # 1) From the locations table (skip virtual/placeholder entries)
     cursor = await db.execute(
         "SELECT name, merchant_id, api_token FROM locations "
-        "WHERE merchant_id != '' AND api_token != ''"
+        "WHERE merchant_id != '' AND api_token != '' AND api_token != 'pending' "
+        "AND merchant_id NOT LIKE 'virtual-%'"
     )
     rows = await cursor.fetchall()
-    clients: list[tuple[str, str, CloverClient]] = []
     for row in rows:
-        clients.append((row["merchant_id"], row["name"], CloverClient(row["merchant_id"], row["api_token"])))
+        mid = row["merchant_id"]
+        if mid not in seen_merchants:
+            seen_merchants.add(mid)
+            clients.append((mid, row["name"], CloverClient(mid, row["api_token"])))
+
+    # 2) Fall back to environment variables for any locations not already covered
+    env_locations = [
+        ("HQ", HQ_MERCHANT_ID, HQ_API_TOKEN),
+        ("West", WEST_MERCHANT_ID, WEST_API_TOKEN),
+        ("East", EAST_MERCHANT_ID, EAST_API_TOKEN),
+    ]
+    for name, mid, token in env_locations:
+        if mid and token and mid not in seen_merchants:
+            seen_merchants.add(mid)
+            clients.append((mid, name, CloverClient(mid, token)))
+
     return clients
 
 
