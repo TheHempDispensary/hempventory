@@ -470,6 +470,9 @@ export const convertToShipping = (orderId: number, data: {
   shipping_zip: string;
 }) => api.patch(`/api/ecommerce/orders/${orderId}/convert-to-shipping`, data);
 
+export const updateFulfillmentType = (orderId: number, fulfillment_type: string) =>
+  api.patch(`/api/ecommerce/orders/${orderId}/fulfillment-type`, { fulfillment_type });
+
 // Schedule Hours
 export const getScheduleHours = (params?: { start_date?: string; end_date?: string }) =>
   api.get("/api/timeclock/schedule-hours", { params });
