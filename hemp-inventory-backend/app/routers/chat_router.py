@@ -532,6 +532,27 @@ async def send_message(
         else:
             assistant_message = re.sub(r'[,"\s]*"(intent|customer_name|customer_email|customer_phone)"\s*:.*$', '', raw_text, flags=re.DOTALL).strip()
 
+    # Fallback: regex-extract phone/email/name from the user's message when
+    # Claude's JSON didn't include them. This catches cases where the model
+    # acknowledges the info in its reply but omits it from the metadata fields.
+    if not customer_phone:
+        phone_match = PHONE_PATTERN.search(req.message)
+        if phone_match:
+            customer_phone = phone_match.group().strip().rstrip(".")
+    if not customer_email:
+        email_match = EMAIL_PATTERN.search(req.message)
+        if email_match:
+            customer_email = email_match.group().strip()
+    if not customer_name:
+        # Look for common name-introduction patterns in the current message
+        name_match = re.search(
+            r"(?:my name(?:'s| is)|i'm|i am|this is|call me)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
+            req.message,
+            re.IGNORECASE,
+        )
+        if name_match:
+            customer_name = name_match.group(1).strip()
+
     # Clean up literal backslash-n sequences that Claude sometimes embeds
     assistant_message = assistant_message.replace("\\n", "\n").replace("\\t", " ")
 
@@ -545,16 +566,15 @@ async def send_message(
     prev_email = None
     prev_phone = None
     prev_name = None
-    if customer_email or customer_phone:
-        notif_cursor = await db.execute(
-            "SELECT customer_name, customer_email, customer_phone FROM chat_sessions WHERE session_id = ?",
-            (req.session_id,),
-        )
-        notif_row = await notif_cursor.fetchone()
-        if notif_row:
-            prev_name = notif_row[0]
-            prev_email = notif_row[1]
-            prev_phone = notif_row[2]
+    notif_cursor = await db.execute(
+        "SELECT customer_name, customer_email, customer_phone FROM chat_sessions WHERE session_id = ?",
+        (req.session_id,),
+    )
+    notif_row = await notif_cursor.fetchone()
+    if notif_row:
+        prev_name = notif_row[0]
+        prev_email = notif_row[1]
+        prev_phone = notif_row[2]
 
     # Update session metadata
     updates = ["updated_at = CURRENT_TIMESTAMP"]
@@ -606,6 +626,24 @@ async def send_message(
                     first_msg, req.session_id, intent
                 )
             )
+    elif customer_name and intent == "purchase" and not prev_name:
+        # Customer gave their name + shows purchase intent but no contact info yet.
+        # Send a lighter "intent lead" so the team knows someone is interested.
+        smtp_settings = await _get_chat_smtp_settings(db)
+        first_msg = req.message
+        first_msg_cursor = await db.execute(
+            "SELECT content FROM chat_messages WHERE session_id = ? AND role = 'user' ORDER BY created_at ASC LIMIT 1",
+            (req.session_id,),
+        )
+        first_msg_row = await first_msg_cursor.fetchone()
+        if first_msg_row:
+            first_msg = first_msg_row[0]
+        asyncio.create_task(
+            _send_lead_notification(
+                smtp_settings, customer_name, None, None,
+                first_msg, req.session_id, intent
+            )
+        )
 
     return ChatMessageResponse(message=assistant_message, intent=intent)
 
