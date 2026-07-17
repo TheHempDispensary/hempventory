@@ -13,15 +13,19 @@ import { getSalesReport } from "../lib/api";
 interface SalesData {
   summary: {
     total_revenue: number;
+    gross_sales?: number;
+    net_sales?: number;
+    total_tax?: number;
+    total_refunds?: number;
     total_orders: number;
     total_items_sold: number;
     avg_order_value: number;
     start_date: string;
     end_date: string;
   };
-  by_location: Record<string, { revenue: number; orders: number; avg_order: number; error?: string }>;
+  by_location: Record<string, { revenue: number; gross?: number; refunds?: number; orders: number; avg_order: number; error?: string }>;
   hourly: { hour: string; label: string; revenue: number; orders: number }[];
-  daily: { date: string; label: string; revenue: number; orders: number }[];
+  daily: { date: string; label: string; revenue: number; gross?: number; refunds?: number; orders: number }[];
   top_items: { name: string; quantity: number; revenue: number; by_location?: Record<string, number> }[];
   recent_orders: { id: string; total: number; location: string; time: string; items: number }[];
 }
@@ -167,6 +171,17 @@ export default function SalesReport() {
                 <p className="text-sm text-gray-500">Total Revenue</p>
               </div>
               <p className="text-2xl font-bold text-gray-900">{fmtMoney(data.summary.total_revenue)}</p>
+              <div className="mt-1 space-y-0.5">
+                {data.summary.net_sales !== undefined && (
+                  <p className="text-xs text-gray-400">Net sales (excl. tax): {fmtMoney(data.summary.net_sales)}</p>
+                )}
+                {data.summary.total_tax !== undefined && (
+                  <p className="text-xs text-gray-400">Tax: {fmtMoney(data.summary.total_tax)}</p>
+                )}
+                {!!data.summary.total_refunds && (
+                  <p className="text-xs text-red-500">Refunds: -{fmtMoney(data.summary.total_refunds)}</p>
+                )}
+              </div>
             </div>
             <div className="bg-white rounded-xl border border-gray-200 p-5">
               <div className="flex items-center gap-3 mb-3">
@@ -223,6 +238,12 @@ export default function SalesReport() {
                         <span className="text-gray-500">Avg Order</span>
                         <span className="font-semibold text-gray-900">{fmtMoney(loc.avg_order)}</span>
                       </div>
+                      {!!loc.refunds && (
+                        <div className="flex justify-between text-sm">
+                          <span className="text-gray-500">Refunds</span>
+                          <span className="font-semibold text-red-500">-{fmtMoney(loc.refunds)}</span>
+                        </div>
+                      )}
                       {/* Location revenue bar */}
                       {data.summary.total_revenue > 0 && (
                         <div className="mt-2">
