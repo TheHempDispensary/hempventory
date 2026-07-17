@@ -225,6 +225,38 @@ class CloverClient:
                 await asyncio.sleep(0.5)  # Rate limit delay between pages
             return {"elements": all_customers}
 
+    async def get_refunds_in_range(self, start_ms: int, end_ms: int, limit: int = 100) -> dict:
+        """Get refund records created within a time range from Clover's refunds endpoint.
+
+        Each refund has a positive `amount` (cents) and a `createdTime` (ms). This is
+        the authoritative source for money returned to customers — order.total is NOT
+        reduced when a refund is issued, so revenue must be adjusted using these records.
+        """
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            all_refunds: list[dict] = []
+            current_offset = 0
+            while True:
+                params: list[tuple[str, str]] = [
+                    ("limit", str(limit)),
+                    ("offset", str(current_offset)),
+                    ("filter", f"createdTime>={start_ms}"),
+                    ("filter", f"createdTime<={end_ms}"),
+                ]
+                resp = await self._request_with_retry(
+                    client, "get",
+                    f"{self.base_url}/refunds",
+                    headers=self._headers(),
+                    params=params,
+                )
+                data = resp.json()
+                elements = data.get("elements", [])
+                all_refunds.extend(elements)
+                if len(elements) < limit:
+                    break
+                current_offset += limit
+                await asyncio.sleep(0.3)
+            return {"elements": all_refunds}
+
     async def get_refunds(self, limit: int = 100, offset: int = 0) -> dict:
         """Get refunds for tracking returned items."""
         async with httpx.AsyncClient(timeout=30.0) as client:
