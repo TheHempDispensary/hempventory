@@ -70,6 +70,23 @@ class LoyaltySettingsUpdate(BaseModel):
 
 # ── Helper ──────────────────────────────────────────────
 
+# SQL expression that strips common separators from a stored phone number so it
+# can be compared against a digits-only value regardless of how it was entered.
+_PHONE_DIGITS_SQL = "REPLACE(REPLACE(REPLACE(REPLACE(phone, '-', ''), ' ', ''), '(', ''), ')', '')"
+
+
+def _normalize_phone(raw: Optional[str]) -> str:
+    """Return the last 10 digits of a phone number (digits only).
+
+    Ensures phone numbers are stored and compared consistently regardless of
+    whether the customer typed dashes, spaces, or parentheses.
+    """
+    if not raw:
+        return ""
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    return digits[-10:] if len(digits) >= 10 else digits
+
+
 async def _get_settings(db: aiosqlite.Connection) -> dict:
     cursor = await db.execute("SELECT key, value FROM loyalty_settings")
     rows = await cursor.fetchall()
@@ -213,7 +230,7 @@ async def create_customer(
             """INSERT INTO loyalty_customers (first_name, last_name, phone, email, birthday, notes,
                                              points_balance, lifetime_points)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (data.first_name, data.last_name or "", data.phone, data.email,
+            (data.first_name, data.last_name or "", _normalize_phone(data.phone), data.email,
              data.birthday, data.notes, signup_bonus, signup_bonus),
         )
         customer_id = cursor.lastrowid
@@ -308,7 +325,7 @@ async def update_customer(
         params.append(data.last_name)
     if data.phone is not None:
         updates.append("phone = ?")
-        params.append(data.phone)
+        params.append(_normalize_phone(data.phone))
     if data.email is not None:
         updates.append("email = ?")
         params.append(data.email)
@@ -1433,11 +1450,19 @@ async def _do_signup(phone: str, first_name: str, last_name: str, email: str, db
     if not first_name:
         raise HTTPException(status_code=400, detail="First name is required")
 
-    # Check if customer already exists
-    cursor = await db.execute(
-        "SELECT id, first_name, points_balance FROM loyalty_customers WHERE phone = ?",
-        (phone,),
-    )
+    # Check if customer already exists (match on normalized digits so a number
+    # entered with dashes isn't treated as a different account than one without).
+    norm_phone = _normalize_phone(phone)
+    if norm_phone:
+        cursor = await db.execute(
+            f"SELECT id, first_name, points_balance FROM loyalty_customers WHERE {_PHONE_DIGITS_SQL} LIKE ?",
+            (f"%{norm_phone}",),
+        )
+    else:
+        cursor = await db.execute(
+            "SELECT id, first_name, points_balance FROM loyalty_customers WHERE phone = ?",
+            (phone,),
+        )
     existing = await cursor.fetchone()
     if existing:
         return {
@@ -1454,7 +1479,7 @@ async def _do_signup(phone: str, first_name: str, last_name: str, email: str, db
             """INSERT INTO loyalty_customers (first_name, last_name, phone, email, birthday,
                                              points_balance, lifetime_points)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (first_name, last_name, phone, email, birthday,
+            (first_name, last_name, norm_phone or phone, email, birthday,
              signup_bonus, signup_bonus),
         )
         customer_id = cursor.lastrowid
@@ -1489,11 +1514,19 @@ async def lookup_customer(
         raise HTTPException(status_code=400, detail="Provide phone or email")
 
     if phone:
-        cursor = await db.execute(
-            """SELECT id, first_name, last_name, phone, email, points_balance, lifetime_points
-               FROM loyalty_customers WHERE phone = ?""",
-            (phone,),
-        )
+        norm_phone = _normalize_phone(phone)
+        if norm_phone:
+            cursor = await db.execute(
+                f"""SELECT id, first_name, last_name, phone, email, points_balance, lifetime_points
+                   FROM loyalty_customers WHERE {_PHONE_DIGITS_SQL} LIKE ?""",
+                (f"%{norm_phone}",),
+            )
+        else:
+            cursor = await db.execute(
+                """SELECT id, first_name, last_name, phone, email, points_balance, lifetime_points
+                   FROM loyalty_customers WHERE phone = ?""",
+                (phone,),
+            )
     else:
         cursor = await db.execute(
             """SELECT id, first_name, last_name, phone, email, points_balance, lifetime_points

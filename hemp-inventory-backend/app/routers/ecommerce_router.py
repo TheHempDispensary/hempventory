@@ -105,6 +105,43 @@ def _haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> floa
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
+async def _geocode_address(
+    address: str, city: str, state: str, zip_code: str
+) -> Optional[tuple[float, float]]:
+    """Geocode an address to (lat, lon) via Nominatim.
+
+    Rural street addresses often aren't in OpenStreetMap, which would make the
+    exact-address lookup return nothing. Fall back to increasingly coarse queries
+    (city/state/zip, then zip) so delivery eligibility can still be determined.
+    """
+    queries = []
+    if address and city and state:
+        queries.append(f"{address}, {city}, {state} {zip_code}".strip())
+    if city and state:
+        queries.append(f"{city}, {state} {zip_code}".strip())
+    if zip_code:
+        queries.append(f"{zip_code}, USA")
+
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        for q in queries:
+            try:
+                resp = await client.get(
+                    "https://nominatim.openstreetmap.org/search",
+                    params={"q": q, "format": "json", "limit": "1", "countrycodes": "us"},
+                    headers={
+                        "Accept": "application/json",
+                        "User-Agent": "THD-Website/1.0 (support@thehempdispensary.com)",
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                if data:
+                    return float(data[0]["lat"]), float(data[0]["lon"])
+            except Exception as e:
+                print(f"[delivery] Geocode attempt failed for '{q}': {e}")
+    return None
+
+
 # ── In-memory product cache ──────────────────────────────────────────────────
 _product_cache: dict = {}  # {"products": [...], "total": int, "categories": [...]}
 _product_cache_json: bytes = b""  # Pre-serialized JSON for the full /products response
@@ -1968,10 +2005,11 @@ async def create_order(
                     (loyalty_identifier,),
                 )
             else:
-                phone = loyalty_identifier.replace("-", "").replace(" ", "").replace("(", "").replace(")", "")
+                phone = "".join(ch for ch in loyalty_identifier if ch.isdigit())[-10:]
                 lcur = await db.execute(
-                    "SELECT id, points_balance, first_name, last_name FROM loyalty_customers WHERE phone = ?",
-                    (phone,),
+                    "SELECT id, points_balance, first_name, last_name FROM loyalty_customers WHERE "
+                    "REPLACE(REPLACE(REPLACE(REPLACE(phone, '-', ''), ' ', ''), '(', ''), ')', '') LIKE ?",
+                    (f"%{phone}",),
                 )
             lrow = await lcur.fetchone()
             if not lrow:
@@ -2042,27 +2080,23 @@ async def create_order(
         # Validate delivery radius server-side (prevent bypass of client-side check)
         if order.shipping_address and order.shipping_address.address:
             try:
-                async with httpx.AsyncClient(timeout=5.0) as geo_client:
-                    full_addr = f"{order.shipping_address.address}, {order.shipping_address.city}, {order.shipping_address.state} {order.shipping_address.zip}"
-                    geo_resp = await geo_client.get(
-                        "https://nominatim.openstreetmap.org/search",
-                        params={"q": full_addr, "format": "json", "limit": "1"},
-                        headers={"Accept": "application/json", "User-Agent": "THD-Website/1.0 (support@thehempdispensary.com)"},
-                    )
-                    geo_resp.raise_for_status()
-                    geo_data = geo_resp.json()
-                    if geo_data:
-                        d_lat = float(geo_data[0]["lat"])
-                        d_lon = float(geo_data[0]["lon"])
-                        distance = _haversine_miles(HQ_LAT, HQ_LON, d_lat, d_lon)
-                        if distance > DELIVERY_RADIUS_MILES:
-                            print(f"[order] BLOCKED delivery order — address is {round(distance, 1)} miles from HQ (limit {DELIVERY_RADIUS_MILES})")
-                            raise HTTPException(
-                                status_code=400,
-                                detail=f"Sorry, your address is {round(distance, 1)} miles from our store. Local delivery is available within {DELIVERY_RADIUS_MILES} miles. Please select 'Ship To Me' instead.",
-                            )
-                    else:
-                        print(f"[order] WARNING: Could not geocode delivery address '{full_addr}' — allowing order to proceed")
+                coords = await _geocode_address(
+                    order.shipping_address.address,
+                    order.shipping_address.city,
+                    order.shipping_address.state,
+                    order.shipping_address.zip,
+                )
+                if coords:
+                    d_lat, d_lon = coords
+                    distance = _haversine_miles(HQ_LAT, HQ_LON, d_lat, d_lon)
+                    if distance > DELIVERY_RADIUS_MILES:
+                        print(f"[order] BLOCKED delivery order — address is {round(distance, 1)} miles from HQ (limit {DELIVERY_RADIUS_MILES})")
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Sorry, your address is {round(distance, 1)} miles from our store. Local delivery is available within {DELIVERY_RADIUS_MILES} miles. Please select 'Ship To Me' instead.",
+                        )
+                else:
+                    print(f"[order] WARNING: Could not geocode delivery address for {order.shipping_address.city}, {order.shipping_address.state} — allowing order to proceed")
             except HTTPException:
                 raise
             except Exception as geo_err:
@@ -2594,7 +2628,7 @@ async def create_order(
     # POS purchases get points via Clover sync, but online orders need explicit awarding.
     if db_save_ok and payment_status == "paid":
         loyalty_award_task = asyncio.create_task(
-            _award_loyalty_points_for_order(db, order, order_number, order_id)
+            _award_loyalty_points_for_order(order, order_number, order_id)
         )
         loyalty_award_task.add_done_callback(lambda t: _log_task_error(t, "loyalty_award"))
 
@@ -2742,14 +2776,21 @@ async def _deduct_stock_for_order(items: List[OrderItem], fulfillment_type: str 
 
 
 async def _award_loyalty_points_for_order(
-    db: aiosqlite.Connection,
     order: CreateOrderRequest,
     order_number: str,
     order_id: int,
 ) -> None:
     """Award loyalty points for an online order if the customer has a loyalty account.
-    POS orders get points via Clover sync, but online orders need explicit awarding."""
+    POS orders get points via Clover sync, but online orders need explicit awarding.
+
+    Opens its own DB connection: this runs as a background task after the request
+    handler returns, by which point the request-scoped connection is already closed."""
+    from app.database import DB_PATH
+    db = None
     try:
+        db = await aiosqlite.connect(DB_PATH)
+        db.row_factory = aiosqlite.Row
+        await db.execute("PRAGMA busy_timeout = 5000")
         # Look up loyalty settings
         settings_cursor = await db.execute(
             "SELECT value FROM loyalty_settings WHERE key = 'points_per_dollar'"
@@ -2819,6 +2860,9 @@ async def _award_loyalty_points_for_order(
         print(f"[loyalty-award] Awarded {points_to_award} pts to customer {customer_id} for {order_number} (${order_dollars:.2f})")
     except Exception as e:
         print(f"[loyalty-award] Failed to award points for {order_number}: {e}")
+    finally:
+        if db is not None:
+            await db.close()
 
 
 async def _get_smtp_settings(db: aiosqlite.Connection) -> dict[str, str]:
@@ -4068,41 +4112,25 @@ async def address_autocomplete(q: str):
 async def check_delivery_eligibility(address: str, city: str, state: str, zip: str):
     """Check if an address is within the local delivery radius (30 miles from HQ).
     Returns delivery fee and eligibility status."""
-    full_address = f"{address}, {city}, {state} {zip}"
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(
-                "https://nominatim.openstreetmap.org/search",
-                params={
-                    "q": full_address,
-                    "format": "json",
-                    "limit": "1",
-                },
-                headers={
-                    "Accept": "application/json",
-                    "User-Agent": "THD-Website/1.0 (support@thehempdispensary.com)",
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            if not data:
-                return {"eligible": False, "reason": "Could not verify address. Please check your address and try again."}
-            lat = float(data[0]["lat"])
-            lon = float(data[0]["lon"])
-            distance = _haversine_miles(HQ_LAT, HQ_LON, lat, lon)
-            if distance > DELIVERY_RADIUS_MILES:
-                return {
-                    "eligible": False,
-                    "distance_miles": round(distance, 1),
-                    "reason": f"Sorry, your address is {round(distance, 1)} miles from our store. Local delivery is available within {DELIVERY_RADIUS_MILES} miles.",
-                }
+        coords = await _geocode_address(address, city, state, zip)
+        if not coords:
+            return {"eligible": False, "reason": "Could not verify address. Please check your address and try again."}
+        lat, lon = coords
+        distance = _haversine_miles(HQ_LAT, HQ_LON, lat, lon)
+        if distance > DELIVERY_RADIUS_MILES:
             return {
-                "eligible": True,
+                "eligible": False,
                 "distance_miles": round(distance, 1),
-                "fee_standard": DELIVERY_FEE_STANDARD,
-                "fee_discounted": DELIVERY_FEE_DISCOUNTED,
-                "discount_threshold": DELIVERY_DISCOUNT_THRESHOLD,
+                "reason": f"Sorry, your address is {round(distance, 1)} miles from our store. Local delivery is available within {DELIVERY_RADIUS_MILES} miles.",
             }
+        return {
+            "eligible": True,
+            "distance_miles": round(distance, 1),
+            "fee_standard": DELIVERY_FEE_STANDARD,
+            "fee_discounted": DELIVERY_FEE_DISCOUNTED,
+            "discount_threshold": DELIVERY_DISCOUNT_THRESHOLD,
+        }
     except Exception as e:
         print(f"[delivery] Geocode error: {e}")
         return {"eligible": False, "reason": "Could not verify delivery address. Please try again or select a different fulfillment method."}
