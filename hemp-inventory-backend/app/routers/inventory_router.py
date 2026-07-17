@@ -2998,7 +2998,12 @@ _SMART_PAR_TTL = 3600  # 1 hour cache
 
 
 async def _fetch_all_clover_orders(client: CloverClient) -> list[dict]:
-    """Paginate through all Clover orders with lineItems expanded."""
+    """Paginate through all paid Clover orders with lineItems expanded.
+
+    Only paid orders are fetched (payType!=NULL) so open/unpaid tabs don't count
+    as sales; deleted and refunded orders/line items are filtered out at the call
+    site so velocity matches Clover's "Sold" figures.
+    """
     all_orders: list[dict] = []
     offset = 0
     limit = 100
@@ -3008,6 +3013,7 @@ async def _fetch_all_clover_orders(client: CloverClient) -> list[dict]:
                 limit=limit,
                 offset=offset,
                 expand="lineItems",
+                filters=["payType!=NULL"],
             )
         except Exception as e:
             print(f"Error fetching Clover orders at offset {offset}: {e}")
@@ -3081,12 +3087,20 @@ async def smart_par(
             client = CloverClient(merchant_id, api_token)
             orders = await _fetch_all_clover_orders(client)
             for order in orders:
+                # Skip deleted orders and full refunds/voids so they don't count as sales
+                if order.get("deletedTime") or order.get("isRefund"):
+                    continue
+                if order.get("total", 0) < 0:
+                    continue
                 order_ts = order.get("createdTime", 0) / 1000  # ms -> s
                 if order_ts > 0:
                     earliest_ts = min(earliest_ts, order_ts)
                     latest_ts = max(latest_ts, order_ts)
                 line_items = (order.get("lineItems") or {}).get("elements", [])
                 for li in line_items:
+                    # Skip refunded/returned line items to match Clover's "Sold" count
+                    if li.get("refunded") or li.get("isRefund"):
+                        continue
                     li_name = " ".join((li.get("name") or "").split())
                     if not li_name:
                         continue
