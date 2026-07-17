@@ -473,6 +473,18 @@ export const convertToShipping = (orderId: number, data: {
 export const updateFulfillmentType = (orderId: number, fulfillment_type: string) =>
   api.patch(`/api/ecommerce/orders/${orderId}/fulfillment-type`, { fulfillment_type });
 
+export const recoverOrder = (data: {
+  order_number: string;
+  charge_id?: string;
+  payment_status?: string;
+  fulfillment_type: string;
+  total: number;
+  customer: { first_name: string; last_name: string; email: string; phone?: string };
+  shipping_address?: { address?: string; apartment?: string; city?: string; state?: string; zip?: string };
+  items: { product_id: string; name: string; sku?: string; price: number; quantity: number }[];
+  notes?: string;
+}) => api.post("/api/ecommerce/orders/recover", data);
+
 // Schedule Hours
 export const getScheduleHours = (params?: { start_date?: string; end_date?: string }) =>
   api.get("/api/timeclock/schedule-hours", { params });

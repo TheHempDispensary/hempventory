@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { getOnlineOrders, updateOrderStatus, updateOrderNotes, updateOrderCustomer, createShipment, purchaseLabel, getShippingLabel, refundOrder, resendOrderConfirmation, convertToShipping, getOrderShipments, updateFulfillmentType } from "../lib/api";
+import { getOnlineOrders, updateOrderStatus, updateOrderNotes, updateOrderCustomer, createShipment, purchaseLabel, getShippingLabel, refundOrder, resendOrderConfirmation, convertToShipping, getOrderShipments, updateFulfillmentType, recoverOrder } from "../lib/api";
 import { MessageSquare, Save, Edit2, X } from "lucide-react";
-import { RefreshCw, Search, Package, ChevronDown, ChevronUp, Truck, CheckCircle, XCircle, Clock, ShoppingCart, Printer, Tag, ExternalLink, Loader2, RotateCcw, AlertTriangle, DollarSign, Mail, MapPin } from "lucide-react";
+import { RefreshCw, Search, Package, ChevronDown, ChevronUp, Truck, CheckCircle, XCircle, Clock, ShoppingCart, Printer, Tag, ExternalLink, Loader2, RotateCcw, AlertTriangle, DollarSign, Mail, MapPin, PlusCircle } from "lucide-react";
 
 interface OrderItem {
   product_id: string;
@@ -345,6 +345,28 @@ export default function OnlineOrders() {
     shipping_zip: "",
   });
 
+  // Manual recovery of a charged-but-unsaved order (from the alert email)
+  const [showRecover, setShowRecover] = useState(false);
+  const [recoverSaving, setRecoverSaving] = useState(false);
+  const [recoverError, setRecoverError] = useState("");
+  const [recoverSuccess, setRecoverSuccess] = useState("");
+  const emptyRecoverForm = {
+    order_number: "",
+    charge_id: "",
+    first_name: "",
+    last_name: "",
+    email: "",
+    phone: "",
+    fulfillment_type: "shipping",
+    total: "",
+    address: "",
+    city: "",
+    state: "",
+    zip: "",
+    items: "",
+  };
+  const [recoverForm, setRecoverForm] = useState(emptyRecoverForm);
+
   const loadOrders = async (p: number = page, searchQuery: string = debouncedSearch) => {
     setLoading(true);
     try {
@@ -385,6 +407,78 @@ export default function OnlineOrders() {
   }, [page, statusFilter, debouncedSearch]);
 
   const totalPages = Math.ceil(total / PAGE_SIZE);
+
+  const parseRecoverItems = (text: string) =>
+    text
+      .split(/[\n;]+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((line) => {
+        // Matches the alert-email format e.g. "THC SNOW CAPS 28 GRAMS x1 @$100.00"
+        const m = line.match(/^(.*?)\s*x\s*(\d+)\s*@?\s*\$?\s*([\d,]+(?:\.\d+)?)\s*$/i);
+        if (m) {
+          return {
+            product_id: "",
+            name: m[1].trim(),
+            sku: "",
+            price: Math.round(parseFloat(m[3].replace(/,/g, "")) * 100),
+            quantity: parseInt(m[2], 10),
+          };
+        }
+        return { product_id: "", name: line, sku: "", price: 0, quantity: 1 };
+      });
+
+  const handleRecoverOrder = async () => {
+    setRecoverError("");
+    setRecoverSuccess("");
+    if (!recoverForm.first_name.trim() || !recoverForm.email.trim()) {
+      setRecoverError("Customer name and email are required.");
+      return;
+    }
+    const items = parseRecoverItems(recoverForm.items);
+    if (items.length === 0) {
+      setRecoverError("Add at least one item.");
+      return;
+    }
+    const totalCents = Math.round((parseFloat(recoverForm.total) || 0) * 100);
+    const subtotalCents = items.reduce((sum, it) => sum + it.price * it.quantity, 0);
+    setRecoverSaving(true);
+    try {
+      const res = await recoverOrder({
+        order_number: recoverForm.order_number.trim(),
+        charge_id: recoverForm.charge_id.trim(),
+        payment_status: "paid",
+        fulfillment_type: recoverForm.fulfillment_type,
+        total: totalCents || subtotalCents,
+        customer: {
+          first_name: recoverForm.first_name.trim(),
+          last_name: recoverForm.last_name.trim(),
+          email: recoverForm.email.trim(),
+          phone: recoverForm.phone.trim(),
+        },
+        shipping_address: {
+          address: recoverForm.address.trim(),
+          city: recoverForm.city.trim(),
+          state: recoverForm.state.trim(),
+          zip: recoverForm.zip.trim(),
+        },
+        items,
+        notes: "Manually recovered from 'Order Charged But NOT Saved' alert",
+      });
+      setRecoverSuccess(`Recovered order ${res.data.order_number}`);
+      setRecoverForm(emptyRecoverForm);
+      loadOrders();
+      setTimeout(() => {
+        setShowRecover(false);
+        setRecoverSuccess("");
+      }, 1500);
+    } catch (err) {
+      const e = err as { response?: { data?: { detail?: string } } };
+      setRecoverError(e.response?.data?.detail || "Failed to recover order.");
+    } finally {
+      setRecoverSaving(false);
+    }
+  };
 
   const handleStatusChange = async (orderId: number, newStatus: string) => {
     setUpdatingStatus(orderId);
@@ -796,6 +890,14 @@ export default function OnlineOrders() {
             </button>
           )}
           <button
+            onClick={() => { setRecoverForm(emptyRecoverForm); setRecoverError(""); setRecoverSuccess(""); setShowRecover(true); }}
+            className="flex items-center gap-2 px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 transition-colors"
+            title="Add an order that was charged but did not save (from the alert email)"
+          >
+            <PlusCircle className="w-4 h-4" />
+            Recover Charged Order
+          </button>
+          <button
             onClick={() => loadOrders()}
             disabled={loading}
             className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors"
@@ -805,6 +907,101 @@ export default function OnlineOrders() {
           </button>
         </div>
       </div>
+
+      {showRecover && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between p-4 border-b border-gray-200">
+              <h3 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+                <AlertTriangle className="w-5 h-5 text-amber-600" />
+                Recover Charged Order
+              </h3>
+              <button onClick={() => setShowRecover(false)} className="text-gray-400 hover:text-gray-600">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-4 space-y-3">
+              <p className="text-sm text-gray-500">
+                Copy the details from the "Order Charged But NOT Saved" alert email. The order number keeps it
+                from being duplicated if it was already recovered.
+              </p>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Order Number</label>
+                  <input value={recoverForm.order_number} onChange={(e) => setRecoverForm({ ...recoverForm, order_number: e.target.value })} placeholder="HD-XXXXXXXX-XXXX" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Charge ID</label>
+                  <input value={recoverForm.charge_id} onChange={(e) => setRecoverForm({ ...recoverForm, charge_id: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">First Name *</label>
+                  <input value={recoverForm.first_name} onChange={(e) => setRecoverForm({ ...recoverForm, first_name: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Last Name</label>
+                  <input value={recoverForm.last_name} onChange={(e) => setRecoverForm({ ...recoverForm, last_name: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Email *</label>
+                  <input value={recoverForm.email} onChange={(e) => setRecoverForm({ ...recoverForm, email: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Phone</label>
+                  <input value={recoverForm.phone} onChange={(e) => setRecoverForm({ ...recoverForm, phone: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Fulfillment</label>
+                  <select value={recoverForm.fulfillment_type} onChange={(e) => setRecoverForm({ ...recoverForm, fulfillment_type: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                    <option value="shipping">Shipping</option>
+                    <option value="pickup_west">Pickup West</option>
+                    <option value="pickup_east">Pickup East</option>
+                    <option value="local_delivery">Local Delivery</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Total Charged ($)</label>
+                  <input value={recoverForm.total} onChange={(e) => setRecoverForm({ ...recoverForm, total: e.target.value })} placeholder="335.48" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                </div>
+              </div>
+              {recoverForm.fulfillment_type === "shipping" || recoverForm.fulfillment_type === "local_delivery" ? (
+                <div className="grid grid-cols-4 gap-3">
+                  <div className="col-span-4">
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Street Address</label>
+                    <input value={recoverForm.address} onChange={(e) => setRecoverForm({ ...recoverForm, address: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                  </div>
+                  <div className="col-span-2">
+                    <label className="block text-xs font-medium text-gray-600 mb-1">City</label>
+                    <input value={recoverForm.city} onChange={(e) => setRecoverForm({ ...recoverForm, city: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">State</label>
+                    <input value={recoverForm.state} onChange={(e) => setRecoverForm({ ...recoverForm, state: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Zip</label>
+                    <input value={recoverForm.zip} onChange={(e) => setRecoverForm({ ...recoverForm, zip: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                  </div>
+                </div>
+              ) : null}
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Items (one per line)</label>
+                <textarea value={recoverForm.items} onChange={(e) => setRecoverForm({ ...recoverForm, items: e.target.value })} rows={4} placeholder={"THC SNOW CAPS GUAVA 28 GRAMS x1 @$100.00\nTHC PRE ROLLED JOINT BABY J x1 @$55.00"} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono" />
+                <p className="text-xs text-gray-400 mt-1">Paste the "Items" line from the email. Format: NAME x QTY @$PRICE (semicolons or new lines both work).</p>
+              </div>
+              {recoverError && <p className="text-sm text-red-600">{recoverError}</p>}
+              {recoverSuccess && <p className="text-sm text-green-600">{recoverSuccess}</p>}
+            </div>
+            <div className="flex justify-end gap-2 p-4 border-t border-gray-200">
+              <button onClick={() => setShowRecover(false)} className="px-4 py-2 text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200">Cancel</button>
+              <button onClick={handleRecoverOrder} disabled={recoverSaving} className="flex items-center gap-2 px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 disabled:opacity-50">
+                {recoverSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                Recover Order
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Stats */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-4">

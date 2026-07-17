@@ -16,7 +16,7 @@ from urllib.parse import quote as url_quote
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-from app.database import get_db
+from app.database import get_db, DB_PATH
 from app.clover_client import CloverClient
 
 STORE_EMAIL = "Support@TheHempDispensary.com"
@@ -71,6 +71,14 @@ class CreateOrderRequest(BaseModel):
     promo_code: Optional[str] = None
     shipping_service: str = ""
     fulfillment_type: str = "shipping"  # "shipping", "pickup_west", "pickup_east", "local_delivery"
+
+
+class RecoverOrderRequest(CreateOrderRequest):
+    """Body for manually recovering an order that was charged but failed to save."""
+    order_number: str = ""
+    charge_id: str = ""
+    payment_status: str = "paid"
+
 
 router = APIRouter(prefix="/api/ecommerce", tags=["ecommerce"])
 
@@ -1943,6 +1951,97 @@ async def _check_realtime_stock(items: List[OrderItem], fulfillment_type: str) -
     return out_of_stock
 
 
+# Directory for durably capturing orders that were charged but couldn't be saved to
+# the DB, so they are never lost even if SQLite is unavailable and can be recovered.
+LOST_ORDERS_DIR = os.path.join(os.path.dirname(DB_PATH) or ".", "lost_orders")
+
+
+async def _insert_ecommerce_order(
+    db: aiosqlite.Connection,
+    order: "CreateOrderRequest",
+    order_number: str,
+    charge_id: str,
+    payment_status: str,
+    clover_order_id: str,
+) -> int:
+    """Insert an order + its line items using the given connection (no commit).
+
+    Shared by the primary save, the fallback save, and manual recovery so all three
+    paths write identical rows and can't drift apart.
+    """
+    cursor = await db.execute(
+        """INSERT INTO ecommerce_orders
+           (order_number, customer_first_name, customer_last_name, customer_email, customer_phone,
+            shipping_address, shipping_apartment, shipping_city, shipping_state, shipping_zip,
+            subtotal, discount, volume_discount, sale_discount, loyalty_discount, promo_code,
+            shipping_cost, tax, total, notes, charge_id, payment_status,
+            fulfillment_type, shipping_service, clover_order_id, source)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            order_number,
+            order.customer.first_name,
+            order.customer.last_name,
+            order.customer.email,
+            order.customer.phone,
+            order.shipping_address.address,
+            order.shipping_address.apartment,
+            order.shipping_address.city,
+            order.shipping_address.state,
+            order.shipping_address.zip,
+            order.subtotal,
+            order.discount,
+            order.volume_discount,
+            order.sale_discount,
+            order.loyalty_discount,
+            order.promo_code or "",
+            order.shipping_cost,
+            order.tax,
+            order.total,
+            order.notes,
+            charge_id,
+            payment_status,
+            order.fulfillment_type,
+            order.shipping_service,
+            clover_order_id,
+            "website",
+        ),
+    )
+    order_id = cursor.lastrowid
+    for item in order.items:
+        await db.execute(
+            """INSERT INTO ecommerce_order_items (order_id, product_id, product_name, sku, price, quantity)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (order_id, item.product_id, item.name, item.sku, item.price, item.quantity),
+        )
+    return order_id
+
+
+def _dump_lost_order(
+    order: "CreateOrderRequest",
+    order_number: str,
+    charge_id: str,
+    payment_status: str,
+    clover_order_id: str,
+) -> None:
+    """Persist a charged-but-unsaved order to disk so it is never lost and can be recovered."""
+    try:
+        os.makedirs(LOST_ORDERS_DIR, exist_ok=True)
+        payload = {
+            "order_number": order_number,
+            "charge_id": charge_id,
+            "payment_status": payment_status,
+            "clover_order_id": clover_order_id,
+            "captured_at": time.time(),
+            "order": order.model_dump(),
+        }
+        path = os.path.join(LOST_ORDERS_DIR, f"{order_number}.json")
+        with open(path, "w") as f:
+            json.dump(payload, f, indent=2)
+        print(f"[ORDER LOST] Durable backup written to {path}")
+    except Exception as dump_err:
+        print(f"[ORDER LOST] FAILED to write durable backup for {order_number}: {dump_err}")
+
+
 @router.post("/orders")
 async def create_order(
     order: CreateOrderRequest,
@@ -2344,56 +2443,20 @@ async def create_order(
     order_number = "HD-" + hex(int(time.time()))[2:].upper() + "-" + str(int(time.time() * 1000) % 10000)
 
     # CRITICAL: DB save with retry logic. SQLite can fail with "database is locked"
-    # when background sync tasks hold a write lock. We retry up to 3 times with backoff.
+    # when background sync tasks hold a write lock. Wait longer for the lock (30s
+    # busy_timeout) and retry up to 3 times with backoff.
     order_id = 0
     db_save_ok = False
     max_retries = 3
+    try:
+        await db.execute("PRAGMA busy_timeout = 30000")
+    except Exception:
+        pass
     for attempt in range(max_retries):
         try:
-            cursor = await db.execute(
-                """INSERT INTO ecommerce_orders
-                   (order_number, customer_first_name, customer_last_name, customer_email, customer_phone,
-                    shipping_address, shipping_apartment, shipping_city, shipping_state, shipping_zip,
-                    subtotal, discount, volume_discount, sale_discount, loyalty_discount, promo_code, shipping_cost, tax, total, notes, charge_id, payment_status, fulfillment_type, shipping_service, clover_order_id, source)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    order_number,
-                    order.customer.first_name,
-                    order.customer.last_name,
-                    order.customer.email,
-                    order.customer.phone,
-                    order.shipping_address.address,
-                    order.shipping_address.apartment,
-                    order.shipping_address.city,
-                    order.shipping_address.state,
-                    order.shipping_address.zip,
-                    order.subtotal,
-                    order.discount,
-                    order.volume_discount,
-                    order.sale_discount,
-                    order.loyalty_discount,
-                    order.promo_code or "",
-                    order.shipping_cost,
-                    order.tax,
-                    order.total,
-                    order.notes,
-                    charge_id,
-                    payment_status,
-                    order.fulfillment_type,
-                    order.shipping_service,
-                    clover_order_id,
-                    "website",
-                ),
+            order_id = await _insert_ecommerce_order(
+                db, order, order_number, charge_id, payment_status, clover_order_id
             )
-            order_id = cursor.lastrowid
-
-            for item in order.items:
-                await db.execute(
-                    """INSERT INTO ecommerce_order_items (order_id, product_id, product_name, sku, price, quantity)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
-                    (order_id, item.product_id, item.name, item.sku, item.price, item.quantity),
-                )
-
             await db.commit()
             db_save_ok = True
             if attempt > 0:
@@ -2402,6 +2465,12 @@ async def create_order(
                 print(f"[order] Order {order_number} saved to DB (id={order_id}, fulfillment={order.fulfillment_type}, total=${order.total/100:.2f})")
             break
         except Exception as db_err:
+            # Roll back any partial transaction so the next attempt starts clean
+            # (otherwise a half-inserted order row lingers and causes UNIQUE failures).
+            try:
+                await db.rollback()
+            except Exception:
+                pass
             if attempt < max_retries - 1:
                 wait_secs = 0.5 * (2 ** attempt)
                 print(f"[order] DB save attempt {attempt + 1} failed for {order_number}: {db_err} — retrying in {wait_secs}s")
@@ -2414,58 +2483,30 @@ async def create_order(
             print(f"[ORDER LOST] customer={order.customer.first_name} {order.customer.last_name} email={order.customer.email} phone={order.customer.phone}")
             print(f"[ORDER LOST] items: {items_dump}")
             print(f"[ORDER LOST] DB error: {db_err}")
-            # Try a simplified insert as last resort (include fulfillment_type and discount fields
-            # so pickup orders don't lose their type and show as shipping)
+            # Last resort: retry on a FRESH dedicated connection. The request-scoped
+            # connection may be wedged (locked/aborted transaction); a new one with a
+            # long busy_timeout can still commit.
+            fallback_db = None
             try:
-                cursor2 = await db.execute(
-                    """INSERT INTO ecommerce_orders
-                       (order_number, customer_first_name, customer_last_name, customer_email, customer_phone,
-                        shipping_address, shipping_apartment, shipping_city, shipping_state, shipping_zip,
-                        subtotal, discount, volume_discount, sale_discount, loyalty_discount, promo_code,
-                        shipping_cost, tax, total, notes, charge_id, payment_status,
-                        fulfillment_type, shipping_service, clover_order_id, source)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        order_number,
-                        order.customer.first_name,
-                        order.customer.last_name,
-                        order.customer.email,
-                        order.customer.phone,
-                        order.shipping_address.address,
-                        order.shipping_address.apartment,
-                        order.shipping_address.city,
-                        order.shipping_address.state,
-                        order.shipping_address.zip,
-                        order.subtotal,
-                        order.discount,
-                        order.volume_discount,
-                        order.sale_discount,
-                        order.loyalty_discount,
-                        order.promo_code or "",
-                        order.shipping_cost,
-                        order.tax,
-                        order.total,
-                        order.notes,
-                        charge_id,
-                        payment_status,
-                        order.fulfillment_type,
-                        order.shipping_service,
-                        clover_order_id,
-                        "website",
-                    ),
+                fallback_db = await aiosqlite.connect(DB_PATH)
+                fallback_db.row_factory = aiosqlite.Row
+                await fallback_db.execute("PRAGMA busy_timeout = 30000")
+                order_id = await _insert_ecommerce_order(
+                    fallback_db, order, order_number, charge_id, payment_status, clover_order_id
                 )
-                order_id = cursor2.lastrowid
-                for item in order.items:
-                    await db.execute(
-                        """INSERT INTO ecommerce_order_items (order_id, product_id, product_name, sku, price, quantity)
-                           VALUES (?, ?, ?, ?, ?, ?)""",
-                        (order_id, item.product_id, item.name, item.sku, item.price, item.quantity),
-                    )
-                await db.commit()
+                await fallback_db.commit()
                 db_save_ok = True
-                print(f"[ORDER RECOVERED] Saved with simplified insert: {order_number} (id={order_id})")
+                print(f"[ORDER RECOVERED] Saved via fresh connection: {order_number} (id={order_id})")
             except Exception as retry_err:
-                print(f"[ORDER LOST] Retry also failed: {retry_err}")
+                print(f"[ORDER LOST] Fresh-connection retry also failed: {retry_err}")
+            finally:
+                if fallback_db is not None:
+                    await fallback_db.close()
+
+    # Durably capture the charged order to disk if it still couldn't be saved, so it is
+    # never lost and can be recovered even if SQLite is completely unavailable.
+    if not db_save_ok:
+        _dump_lost_order(order, order_number, charge_id, payment_status, clover_order_id)
 
     # If DB save failed, send an alert email to support so the order can be recovered manually.
     # The customer was already charged and will receive a confirmation email, but the order
@@ -3419,6 +3460,71 @@ async def update_order_status(
     )
     await db.commit()
     return {"success": True, "order_id": order_id, "status": new_status}
+
+
+@router.post("/orders/recover")
+async def recover_order(
+    order: RecoverOrderRequest,
+    request: Request,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Manually recover an order that was charged but failed to save (requires admin auth).
+
+    Used to re-enter an order from the "Order Charged But NOT Saved" alert email. Idempotent
+    on order_number so re-submitting the same order won't create a duplicate.
+    """
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    import jwt
+    token = auth.split(" ", 1)[1]
+    jwt_secret = os.environ.get("JWT_SECRET", "hemp-inventory-secret-key")
+    try:
+        jwt.decode(token, jwt_secret, algorithms=["HS256"])
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    if not order.items:
+        raise HTTPException(status_code=400, detail="At least one item is required")
+
+    order_number = order.order_number.strip() or (
+        "HD-" + hex(int(time.time()))[2:].upper() + "-" + str(int(time.time() * 1000) % 10000)
+    )
+
+    # Idempotency: don't recreate an order that already exists.
+    existing = await db.execute(
+        "SELECT id FROM ecommerce_orders WHERE order_number = ?",
+        (order_number,),
+    )
+    row = await existing.fetchone()
+    if row is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Order {order_number} already exists (id={row[0]})",
+        )
+
+    await db.execute("PRAGMA busy_timeout = 30000")
+    order_id = await _insert_ecommerce_order(
+        db,
+        order,
+        order_number,
+        order.charge_id,
+        order.payment_status or "paid",
+        "",
+    )
+    await db.commit()
+
+    # If this order was captured to disk as a lost order, clean up the backup file.
+    try:
+        lost_path = os.path.join(LOST_ORDERS_DIR, f"{order_number}.json")
+        if os.path.exists(lost_path):
+            os.remove(lost_path)
+    except Exception as cleanup_err:
+        print(f"[recover] Could not remove lost-order file for {order_number}: {cleanup_err}")
+
+    print(f"[recover] Manually recovered order {order_number} (id={order_id}, total=${order.total/100:.2f})")
+    return {"success": True, "order_id": order_id, "order_number": order_number}
 
 
 @router.patch("/orders/{order_id}/notes")
