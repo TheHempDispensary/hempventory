@@ -25,7 +25,7 @@ interface ParMeta {
 type SortField = "name" | "category" | "price" | "total_stock" | "units_sold" | "units_per_month" | "par_level" | "order_qty";
 type SortDir = "asc" | "desc";
 
-const MONTH_OPTIONS = [1, 3, 6, 12];
+const MONTH_OPTIONS = [1, 3, 4, 6, 12];
 
 export default function SmartPar() {
   const [products, setProducts] = useState<ParProduct[]>([]);
