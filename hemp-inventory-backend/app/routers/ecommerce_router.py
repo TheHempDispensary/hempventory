@@ -168,6 +168,13 @@ def _enforce_leaflife_price_floor(sku: str, name: str, price: int) -> int:
         return price
     sku_upper = sku.upper()
     name_upper = name.upper()
+    # Concentrate floors (SKUs end -1G/-2G/-4G, no space — distinct from flower "-7 G")
+    if sku_upper.endswith("-1G"):
+        return max(price, 2000)   # $20.00 minimum for 1g concentrate
+    elif sku_upper.endswith("-2G"):
+        return max(price, 3500)   # $35.00 minimum for 2g concentrate
+    elif sku_upper.endswith("-4G"):
+        return max(price, 6000)   # $60.00 minimum for 4g concentrate
     if sku_upper.endswith("-28") or "28 GRAM" in name_upper:
         return max(price, 10000)  # $100.00 minimum for 28g
     elif sku_upper.endswith("-14") or "14 GRAM" in name_upper:
@@ -318,11 +325,14 @@ async def _fetch_and_cache_products() -> dict:
             image_rows = await cursor.fetchall()
         finally:
             await db.close()
-        image_by_sku = {row[0]: f"{image_base_url}/{url_quote(row[0], safe='')}?v=2&t={str(row[2] or '').replace(' ', '_')}" for row in image_rows}
+        image_by_sku = {row[0]: f"{image_base_url}/{url_quote(row[0], safe='')}?v=2&bg=1&t={str(row[2] or '').replace(' ', '_')}" for row in image_rows}
         image_by_name = {}
         for row in image_rows:
             if row[1]:
-                image_by_name[row[1].upper()] = f"{image_base_url}/{url_quote(row[0], safe='')}?v=2&t={str(row[2] or '').replace(' ', '_')}"
+                image_by_name[row[1].upper()] = f"{image_base_url}/{url_quote(row[0], safe='')}?v=2&bg=1&t={str(row[2] or '').replace(' ', '_')}"
+        # All gummy products share one canonical cube image (env-overridable).
+        gummy_image_sku = os.environ.get("GUMMY_IMAGE_SKU", "2025754319138")
+        gummy_image_url = f"{image_base_url}/{url_quote(gummy_image_sku, safe='')}?v=2&bg=1"
 
         # Load product descriptions from local DB (Clover API doesn't persist descriptions)
         desc_db = await aiosqlite.connect(DB_PATH)
@@ -492,6 +502,10 @@ async def _fetch_and_cache_products() -> dict:
             image_url = image_by_sku.get(sku)
             if not image_url:
                 image_url = image_by_name.get(name.upper())
+            # Every gummy uses the single canonical cube image
+            name_up = name.upper()
+            if "GUMMIES" in name_up or "GUMMY" in name_up:
+                image_url = gummy_image_url
 
             slug = name.lower()
             slug = slug.replace("/", "-").replace('"', "").replace("(", "").replace(")", "").replace("$", "").replace("'", "").replace("&", "-and-")
@@ -3249,7 +3263,11 @@ async def get_product_detail(product_id: str):
         row = await cursor.fetchone()
     finally:
         await db.close()
-    image_url = f"{image_base_url}/{url_quote(row[0], safe='')}?v=2&t={str(row[1] or '').replace(' ', '_')}" if row else None
+    image_url = f"{image_base_url}/{url_quote(row[0], safe='')}?v=2&bg=1&t={str(row[1] or '').replace(' ', '_')}" if row else None
+    name_up = name.upper()
+    if "GUMMIES" in name_up or "GUMMY" in name_up:
+        gummy_image_sku = os.environ.get("GUMMY_IMAGE_SKU", "2025754319138")
+        image_url = f"{image_base_url}/{url_quote(gummy_image_sku, safe='')}?v=2&bg=1"
 
     is_shipping_only = sku.startswith("LF-") if isinstance(sku, str) else False
 
