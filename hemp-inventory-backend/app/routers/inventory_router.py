@@ -5,6 +5,7 @@ from typing import Optional
 import asyncio
 import aiosqlite
 import base64
+import csv
 import os
 import json
 import io
@@ -13,6 +14,7 @@ import time
 import re
 import uuid
 import httpx
+from urllib.parse import quote
 from PIL import Image as PILImage
 
 from app.auth import get_current_user
@@ -3756,3 +3758,342 @@ async def leaflife_import(
         "total_created": total_created,
         "results": results,
     }
+
+
+# ── LeafLife Google Sheet Sync ───────────────────────────────────────────────
+# Reads the LeafLife x THD partnership sheet directly (link-sharing enabled, no
+# credentials needed) and reconciles LeafLife (LF-) products in Clover HQ:
+# creates new strains, updates price/stock on existing ones, and removes strains
+# that sold out or dropped off the sheet. Runs on a schedule and on demand.
+
+LEAFLIFE_SHEET_ID = os.environ.get(
+    "LEAFLIFE_SHEET_ID", "1gztJ_rdLf2EIbXWeRHu_GSexSJU1xObdXYKvkZ5TEV4"
+)
+
+# Per-tab config: which Clover category, and which sheet columns hold the retail
+# price for each package weight (in grams). Column indexes match the sheet's
+# gviz CSV header order.
+_LEAFLIFE_TABS = [
+    {
+        "tab": "Retail Flower Menu",
+        "category": "Flower",
+        # weight (g) -> retail-price column index
+        "price_cols": {"28": 12, "14": 13, "7": 14, "3.5": 15},
+        "sku_suffix": {"28": "28", "14": "14", "7": "7 G", "3.5": "3.5"},
+    },
+    {
+        "tab": "Retail Concentrate Menu",
+        "category": "Concentrates",
+        "price_cols": {"1": 12, "2": 13, "4": 14},
+        "sku_suffix": {"1": "1G", "2": "2G", "4": "4G"},
+    },
+]
+
+# Sheet column indexes shared by both tabs.
+_LL_COL_INVENTORY = 1
+_LL_COL_TIER = 2
+_LL_COL_STRAIN = 3
+_LL_COL_IHS = 8
+
+_LEAFLIFE_SYNC_STATUS: dict = {
+    "last_run": None,
+    "status": "never",
+    "created": 0,
+    "updated": 0,
+    "removed": 0,
+    "strains": 0,
+    "errors": [],
+}
+
+
+def _leaflife_strain_type(ihs: str) -> Optional[str]:
+    """Map the sheet's I/H/S text to Hybrid / Indica / Sativa.
+
+    Anything labelled a hybrid (incl. 'Indica-Dominant Hybrid') is Hybrid;
+    pure Indica/Sativa map straight through. Blank/unknown returns None.
+    """
+    low = (ihs or "").lower()
+    if "hybrid" in low:
+        return "Hybrid"
+    has_i = "indica" in low
+    has_s = "sativa" in low
+    if has_i and not has_s:
+        return "Indica"
+    if has_s and not has_i:
+        return "Sativa"
+    return None
+
+
+def _leaflife_money_cents(raw: str) -> Optional[int]:
+    """Parse a '$1,234.50' style price into integer cents. None if empty."""
+    if not raw:
+        return None
+    cleaned = raw.replace("$", "").replace(",", "").strip()
+    if not cleaned:
+        return None
+    try:
+        return int(round(float(cleaned) * 100))
+    except ValueError:
+        return None
+
+
+async def _fetch_leaflife_sheet(tab: str) -> list[list[str]]:
+    """Fetch a sheet tab as CSV rows (excluding the header). Raises on failure."""
+    url = (
+        f"https://docs.google.com/spreadsheets/d/{LEAFLIFE_SHEET_ID}"
+        f"/gviz/tq?tqx=out:csv&sheet={quote(tab)}"
+    )
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        resp = await client.get(url)
+        resp.raise_for_status()
+    text = resp.text
+    if text.lstrip().startswith("<"):
+        raise ValueError(f"Sheet tab '{tab}' not accessible (got HTML)")
+    rows = list(csv.reader(io.StringIO(text)))
+    return rows[1:] if rows else []
+
+
+def _build_leaflife_desired(tab_rows: dict) -> dict:
+    """Build the desired {sku_upper: {...}} set from parsed sheet rows.
+
+    Only package sizes with stock >= 1 and a valid price are included.
+    """
+    desired: dict = {}
+    for cfg in _LEAFLIFE_TABS:
+        rows = tab_rows.get(cfg["tab"], [])
+        category = cfg["category"]
+        for row in rows:
+            max_col = max(cfg["price_cols"].values())
+            if len(row) <= max_col:
+                continue
+            strain = (row[_LL_COL_STRAIN] or "").strip()
+            if not strain:
+                continue
+            try:
+                inventory_grams = float(
+                    (row[_LL_COL_INVENTORY] or "0").replace(",", "").strip() or 0
+                )
+            except ValueError:
+                inventory_grams = 0.0
+            if inventory_grams <= 0:
+                continue
+            tier = (row[_LL_COL_TIER] or "").strip()
+            product_type = _leaflife_strain_type(row[_LL_COL_IHS])
+            strain_upper = strain.upper()
+            # Keep flower SKUs byte-identical to the legacy importer (letters,
+            # spaces, hyphens, '#') while stripping non-ASCII (e.g. '×') that
+            # only appears in concentrate strain names.
+            sku_source = re.sub(r"[^A-Z0-9 #./&-]", "", strain_upper.replace("×", "X"))
+            sku_base = "LF-" + re.sub(r"\s+", "-", sku_source)
+            for weight, col in cfg["price_cols"].items():
+                price = _leaflife_money_cents(row[col])
+                if not price:
+                    continue
+                weight_f = float(weight)
+                stock = int(inventory_grams / weight_f) if weight_f > 0 else 0
+                if stock < 1:
+                    continue
+                suffix = cfg["sku_suffix"][weight]
+                sku = f"{sku_base}-{suffix}"
+                label = f"{weight} Gram{'s' if weight_f != 1 else ''}".upper()
+                if category == "Flower" and tier:
+                    name = f"{strain_upper} {tier.upper()} {label}"
+                else:
+                    name = f"{strain_upper} {label}"
+                desired[sku.upper()] = {
+                    "sku": sku,
+                    "name": name,
+                    "price": price,
+                    "stock": stock,
+                    "category": category,
+                    "product_type": product_type,
+                }
+    return desired
+
+
+async def _upsert_leaflife_attrs(
+    db: aiosqlite.Connection, sku: str, name: str, product_type: Optional[str]
+):
+    if not product_type:
+        return
+    await db.execute(
+        """INSERT INTO product_attributes
+               (sku, product_name, product_type, updated_at)
+           VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT(sku) DO UPDATE SET
+               product_type = excluded.product_type,
+               product_name = COALESCE(excluded.product_name, product_attributes.product_name),
+               updated_at = CURRENT_TIMESTAMP""",
+        (sku, name, product_type),
+    )
+
+
+async def run_leaflife_sync(db: aiosqlite.Connection) -> dict:
+    """Reconcile LeafLife products in Clover HQ against the partnership sheet."""
+    from app.routers.ecommerce_router import (
+        HQ_MERCHANT_ID, HQ_API_TOKEN, invalidate_product_cache,
+    )
+    if not HQ_MERCHANT_ID or not HQ_API_TOKEN:
+        raise HTTPException(
+            status_code=500, detail="HQ Clover credentials not configured"
+        )
+    client = CloverClient(HQ_MERCHANT_ID, HQ_API_TOKEN)
+    errors: list[str] = []
+
+    # 1. Read every configured tab. If any fails, we skip the delete phase so a
+    #    transient sheet error can never wipe live products.
+    tab_rows: dict = {}
+    all_tabs_ok = True
+    for cfg in _LEAFLIFE_TABS:
+        try:
+            tab_rows[cfg["tab"]] = await _fetch_leaflife_sheet(cfg["tab"])
+        except Exception as e:
+            all_tabs_ok = False
+            errors.append(f"fetch '{cfg['tab']}': {e}")
+            tab_rows[cfg["tab"]] = []
+
+    desired = _build_leaflife_desired(tab_rows)
+
+    # 2. Category IDs (create if missing).
+    cats = await client.get_categories()
+    cat_ids: dict = {}
+    for c in cats.get("elements", []):
+        cat_ids[c.get("name", "").lower()] = c["id"]
+    for cfg in _LEAFLIFE_TABS:
+        cname = cfg["category"]
+        if cname.lower() not in cat_ids:
+            new_cat = await client.create_category(cname)
+            cat_ids[cname.lower()] = new_cat["id"]
+
+    age_obj = await _get_age_restriction_obj(client, "Vitamin & Supplements", 21)
+
+    # 3. Existing LF- items in Clover HQ.
+    existing_items = await client.get_items(expand="itemStock")
+    existing: dict = {}
+    for item in existing_items.get("elements", []):
+        sku = (item.get("sku") or "")
+        if sku.upper().startswith("LF-"):
+            stock = 0
+            item_stock = item.get("itemStock") or {}
+            if isinstance(item_stock, dict):
+                stock = int(item_stock.get("quantity", 0) or 0)
+            existing[sku.upper()] = {
+                "id": item.get("id", ""),
+                "name": item.get("name", ""),
+                "price": item.get("price", 0),
+                "stock": stock,
+            }
+
+    created = updated = removed = 0
+
+    # 4. Create / update.
+    for sku_up, want in desired.items():
+        cat_id = cat_ids.get(want["category"].lower())
+        cur = existing.get(sku_up)
+        try:
+            if cur:
+                payload: dict = {}
+                if cur["price"] != want["price"]:
+                    payload["price"] = want["price"]
+                if cur["name"] != want["name"]:
+                    payload["name"] = want["name"]
+                if payload:
+                    await client.update_item(cur["id"], payload)
+                if cur["stock"] != want["stock"]:
+                    await client.update_item_stock(cur["id"], want["stock"])
+                if payload or cur["stock"] != want["stock"]:
+                    updated += 1
+                await _upsert_leaflife_attrs(
+                    db, want["sku"], want["name"], want["product_type"]
+                )
+            else:
+                item_data: dict = {
+                    "name": want["name"],
+                    "price": want["price"],
+                    "sku": want["sku"],
+                    "available": True,
+                    "hidden": False,
+                    "autoManage": False,
+                    "isRevenue": True,
+                    "defaultTaxRates": True,
+                    "isAgeRestricted": True,
+                }
+                if age_obj:
+                    item_data["ageRestrictedObj"] = age_obj
+                new_item = await client.create_item(item_data)
+                item_id = new_item.get("id", "")
+                if cat_id:
+                    try:
+                        await client.assign_category(item_id, cat_id)
+                    except Exception as ce:
+                        errors.append(f"category {want['sku']}: {ce}")
+                if want["stock"] > 0:
+                    await client.update_item_stock(item_id, want["stock"])
+                await _upsert_leaflife_attrs(
+                    db, want["sku"], want["name"], want["product_type"]
+                )
+                created += 1
+            await asyncio.sleep(0.2)
+        except Exception as e:
+            errors.append(f"{want['sku']}: {e}")
+
+    # 5. Remove LF- items no longer on the sheet (only when every tab loaded
+    #    cleanly, so a fetch error can't cascade into deletions).
+    if all_tabs_ok and desired:
+        for sku_up, cur in existing.items():
+            if sku_up in desired:
+                continue
+            try:
+                if cur["id"]:
+                    await client.delete_item(cur["id"])
+                await db.execute("DELETE FROM par_levels WHERE UPPER(sku) = ?", (sku_up,))
+                await db.execute(
+                    "DELETE FROM inventory_snapshots WHERE UPPER(sku) = ?", (sku_up,)
+                )
+                removed += 1
+                await asyncio.sleep(0.2)
+            except Exception as e:
+                errors.append(f"delete {sku_up}: {e}")
+
+    await db.commit()
+
+    try:
+        invalidate_product_cache()
+        await _invalidate_cache()
+    except Exception as e:
+        errors.append(f"cache: {e}")
+
+    _LEAFLIFE_SYNC_STATUS.update({
+        "last_run": time.time(),
+        "status": "ok" if not errors else "completed_with_errors",
+        "created": created,
+        "updated": updated,
+        "removed": removed,
+        "strains": len(desired),
+        "errors": errors[:20],
+    })
+    return {
+        "status": _LEAFLIFE_SYNC_STATUS["status"],
+        "created": created,
+        "updated": updated,
+        "removed": removed,
+        "strains": len(desired),
+        "errors": errors[:20],
+    }
+
+
+@router.post("/leaflife-sync")
+async def leaflife_sync(
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Manually trigger a LeafLife sheet sync now."""
+    return await run_leaflife_sync(db)
+
+
+@router.get("/leaflife-sync/status")
+async def leaflife_sync_status(
+    user: dict = Depends(get_current_user),
+):
+    """Return the result of the most recent LeafLife sheet sync."""
+    return _LEAFLIFE_SYNC_STATUS
