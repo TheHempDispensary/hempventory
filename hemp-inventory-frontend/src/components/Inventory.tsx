@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, useCallback } from "react";
-import { syncInventory, getCachedInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, getTransferHistory, bulkAssignCategory, bulkAssignImages, syncRefunds, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup, bulkStockUpdate, addVariantsToItem, getInventoryChanges, getProductAttributes, updateProductAttributes, getImageGallery, uploadGalleryImage, getGalleryImageUrl, deleteGalleryImage, bulkHideItems, bulkUnhideItems } from "../lib/api";
+import { syncInventory, getCachedInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, getTransferHistory, bulkAssignCategory, bulkAssignImages, syncRefunds, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup, bulkStockUpdate, addVariantsToItem, getInventoryChanges, getProductAttributes, updateProductAttributes, getImageGallery, uploadGalleryImage, getGalleryImageUrl, deleteGalleryImage, bulkHideItems, bulkUnhideItems, syncLeafLife } from "../lib/api";
 import { RefreshCw, Search, Plus, ChevronDown, ChevronUp, X, Save, Package, Trash2, CheckSquare, Square, Minus, Image, Download, Upload, Settings, ArrowRightLeft, Images, Layers, Tag, ChevronsLeft, ChevronsRight, ChevronLeft, ChevronRight, History, AlertCircle, CheckCircle2, EyeOff, Eye } from "lucide-react";
 
 interface LocationStock {
@@ -106,6 +106,7 @@ export default function Inventory() {
   const [autoManaging, setAutoManaging] = useState(false);
   const [pushingToLocation, setPushingToLocation] = useState<number | null>(null);
   const [syncingRefunds, setSyncingRefunds] = useState(false);
+  const [syncingLeafLife, setSyncingLeafLife] = useState(false);
 
   // Cache-busting counter: incremented after image uploads to force browser to fetch fresh images
   const [imageCacheBust, setImageCacheBust] = useState(() => Date.now());
@@ -1276,6 +1277,24 @@ export default function Inventory() {
     }
   };
 
+  const handleSyncLeafLife = async () => {
+    setSyncingLeafLife(true);
+    try {
+      const resp = await syncLeafLife();
+      const d = resp.data;
+      setToast({
+        type: d.errors && d.errors.length ? "error" : "success",
+        text: `LeafLife: ${d.created} added, ${d.updated} updated, ${d.removed} removed${d.errors && d.errors.length ? ` (${d.errors.length} error(s))` : ""}`,
+      });
+      await loadData();
+    } catch (err) {
+      console.error("Error syncing LeafLife:", err);
+      setToast({ type: "error", text: "Failed to sync LeafLife" });
+    } finally {
+      setSyncingLeafLife(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -1393,6 +1412,15 @@ export default function Inventory() {
           >
             <RefreshCw className={`w-4 h-4 ${syncingRefunds ? "animate-spin" : ""}`} />
             {syncingRefunds ? "Syncing..." : "Sync Refunds"}
+          </button>
+          <button
+            onClick={handleSyncLeafLife}
+            disabled={syncingLeafLife}
+            className="flex items-center gap-2 px-4 py-2 border border-emerald-300 bg-emerald-50 text-emerald-700 rounded-lg hover:bg-emerald-100 text-sm disabled:opacity-50 transition-colors"
+            title="Sync LeafLife products from the partnership Google Sheet (create/update/remove)"
+          >
+            <RefreshCw className={`w-4 h-4 ${syncingLeafLife ? "animate-spin" : ""}`} />
+            {syncingLeafLife ? "Syncing..." : "Sync LeafLife"}
           </button>
           <button
             onClick={handleSync}

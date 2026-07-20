@@ -137,6 +137,23 @@ async def _scheduled_ecommerce_refresh():
         print(f"[auto-sync] Ecommerce cache refresh failed: {e}")
 
 
+async def _scheduled_leaflife_sync():
+    """Background job: sync LeafLife products from the partnership Google Sheet."""
+    try:
+        db = await _connect_db()
+        try:
+            from app.routers.inventory_router import run_leaflife_sync
+            result = await run_leaflife_sync(db)
+            print(
+                f"[auto-sync] LeafLife synced: {result['created']} created, "
+                f"{result['updated']} updated, {result['removed']} removed"
+            )
+        finally:
+            await db.close()
+    except Exception as e:
+        print(f"[auto-sync] LeafLife sync failed: {e}")
+
+
 async def _scheduled_coa_sync():
     """Background job: sync COA lab results from ACS Laboratory."""
     import os
@@ -164,6 +181,7 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(_scheduled_ecommerce_refresh, "interval", minutes=10, id="ecommerce_refresh", replace_existing=True)
     scheduler.add_job(_scheduled_clover_order_sync, "interval", minutes=5, id="clover_order_sync", replace_existing=True)
     scheduler.add_job(_scheduled_coa_sync, "interval", minutes=30, id="coa_sync", replace_existing=True)
+    scheduler.add_job(_scheduled_leaflife_sync, "interval", minutes=15, id="leaflife_sync", replace_existing=True)
     scheduler.start()
     # Run initial inventory sync in background so server starts accepting requests immediately
     asyncio.create_task(_scheduled_inventory_sync())
