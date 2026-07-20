@@ -3061,6 +3061,50 @@ _FLOWER_KEYWORDS = (
 # a catch-all order group based on their category.
 _ORDER_GROUP_SKIP_CATEGORIES = {"Accessories", "Packaging", "Apparel", "Pets"}
 
+# Products excluded from order totals entirely (promo/loss-leader dabs).
+_ORDER_GROUP_EXCLUDE_KEYWORDS = ("PROMOTIONAL DAB", "$5 DAB")
+
+# Concentrate detection for items outside the Concentrates category (some wax
+# products carry no category in Clover).
+_CONCENTRATE_KEYWORDS = (
+    "WAX", "ROSIN", "RESIN", "BADDER", "BATTER", "SHATTER",
+    "DIAMONDS", "DISTILLATE", "SYRINGE", "HASH", "ISOLATE",
+)
+
+
+def _concentrate_form(up: str) -> str:
+    """Concentrate form (Wax, Rosin, Diamonds, ...) parsed from the name."""
+    if "SYRINGE" in up:
+        return "Distillate Syringe"
+    if "LIVE RESIN" in up:
+        return "Live Resin"
+    if "ROSIN" in up:
+        return "Rosin"
+    if "RESIN" in up:
+        return "Resin"
+    if "BADDER" in up or "BATTER" in up:
+        return "Badder"
+    if "SHATTER" in up:
+        return "Shatter"
+    if "DIAMONDS" in up and "SAUCE" in up:
+        return "Diamonds & Sauce"
+    if "DIAMONDS" in up:
+        return "Diamonds"
+    if "SUGAR" in up:
+        return "Sugar"
+    if "HASH" in up:
+        return "Hash"
+    if "WAX" in up:
+        return "Wax"
+    if "ISOLATE" in up:
+        return "Isolate"
+    if "CAPSULE" in up:
+        return "Capsules"
+    if "DISTILLATE" in up:
+        return "Distillate"
+    return "Concentrate"
+
+
 # Spelled-out gram sizes seen in vape names ("ONE GRAM", "TWO GRAMS").
 _WORD_GRAMS = (
     ("HALF GRAM", 0.5),
@@ -3113,6 +3157,9 @@ def _order_group(name: str, categories: list[str], strain_type: str) -> tuple[st
     up = " ".join((name or "").upper().split())
     is_skip = any(c in _ORDER_GROUP_SKIP_CATEGORIES for c in categories)
 
+    if any(x in up for x in _ORDER_GROUP_EXCLUDE_KEYWORDS):
+        return None, None
+
     if "GUMMIES" in up or "GUMMY" in up:
         strength_match = re.search(r"(\d+)\s*MG", up)
         strength = f"{strength_match.group(1)}mg" if strength_match else "Unspecified"
@@ -3129,6 +3176,13 @@ def _order_group(name: str, categories: list[str], strain_type: str) -> tuple[st
         size_part = f" {size}" if size else ""
         strain = _strain_from_name(up, strain_type)
         return "Vape", f"{_order_group_cannabinoid(up)} {form}{size_part} \u2014 {strain}"
+
+    if not is_skip and ("Concentrates" in categories or any(k in up for k in _CONCENTRATE_KEYWORDS)):
+        form = _concentrate_form(up)
+        size = _vape_size(up)
+        size_part = f" {size}" if size else ""
+        strain = _strain_from_name(up, strain_type)
+        return "Concentrate", f"{_order_group_cannabinoid(up)} {form}{size_part} \u2014 {strain}"
 
     if not is_skip and ("Flower" in categories or any(k in up for k in _FLOWER_KEYWORDS)):
         if "SMALLS" in up:
@@ -3206,7 +3260,7 @@ def _order_unit_basis(kind: str, group_label: str, name: str) -> tuple[str, floa
     """
     if kind == "Gummies":
         return "count", float(_pack_count(name))
-    if kind == "Vape":
+    if kind in ("Vape", "Concentrate"):
         return "count", 1.0
     if kind == "Flower":
         if "Pre-Rolls" in group_label:
@@ -3283,6 +3337,8 @@ def _build_order_groups(results: list[dict]) -> list[dict]:
                 unit = "gummies"
             elif g["kind"] == "Vape":
                 unit = "vapes"
+            elif g["kind"] == "Concentrate":
+                unit = "units"
             else:
                 unit = "units"
             order_amount = g["each_order"]

@@ -1,14 +1,29 @@
 import os
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from app.database import get_db
+from app.database import get_db, DB_PATH
 from app.acs_client import ACSLabClient
 from app.routers.ecommerce_router import invalidate_product_cache
 
 router = APIRouter(prefix="/api/coa", tags=["coa"])
+
+# COA PDFs/images are stored next to the SQLite DB on the persistent volume
+# (Fly mounts /data) so uploads survive redeploys.
+_UPLOAD_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(DB_PATH)) or ".", "coa_uploads"
+)
+_MAX_COA_BYTES = 25 * 1024 * 1024  # 25 MB
+_COA_MEDIA_TYPES = {
+    ".pdf": "application/pdf",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
 
 
 def _get_acs_client() -> ACSLabClient:
@@ -432,6 +447,51 @@ async def _require_manual(db, accession: str) -> None:
         raise HTTPException(status_code=404, detail="COA not found")
     if (row["source"] or "ACS") != "manual":
         raise HTTPException(status_code=403, detail="Only manually-added COAs can be edited")
+
+
+@router.post("/upload")
+async def upload_coa_file(file: UploadFile = File(...)):
+    """Store an uploaded COA (PDF/image) on the persistent volume and return a
+    URL to reference it from a manual COA."""
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in _COA_MEDIA_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file type. Upload a PDF or image.",
+        )
+    os.makedirs(_UPLOAD_DIR, exist_ok=True)
+    stored_name = uuid.uuid4().hex + ext
+    dest = os.path.join(_UPLOAD_DIR, stored_name)
+    size = 0
+    with open(dest, "wb") as out:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > _MAX_COA_BYTES:
+                out.close()
+                os.remove(dest)
+                raise HTTPException(status_code=413, detail="File too large (max 25 MB)")
+            out.write(chunk)
+    return {"url": f"/api/coa/file/{stored_name}", "filename": file.filename}
+
+
+@router.get("/file/{filename}")
+async def get_coa_file(filename: str):
+    """Serve a previously uploaded COA file."""
+    safe_name = os.path.basename(filename)
+    ext = os.path.splitext(safe_name)[1].lower()
+    if ext not in _COA_MEDIA_TYPES:
+        raise HTTPException(status_code=404, detail="Not found")
+    path = os.path.join(_UPLOAD_DIR, safe_name)
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="Not found")
+    return FileResponse(
+        path,
+        media_type=_COA_MEDIA_TYPES[ext],
+        content_disposition_type="inline",
+    )
 
 
 @router.post("/manual")

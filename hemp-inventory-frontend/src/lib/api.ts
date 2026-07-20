@@ -1,6 +1,6 @@
 import axios from "axios";
 
-const API_URL = import.meta.env.VITE_API_URL || (
+export const API_URL = import.meta.env.VITE_API_URL || (
   typeof window !== "undefined" && !["localhost", "127.0.0.1"].includes(window.location.hostname)
     ? "https://thd-inventory-api.fly.dev"
     : "http://localhost:8000"
@@ -745,6 +745,20 @@ export const updateManualCoa = (accession: string, payload: ManualCoaPayload) =>
 
 export const deleteManualCoa = (accession: string) =>
   api.delete(`/api/coa/manual/${encodeURIComponent(accession)}`);
+
+export const uploadCoaFile = (file: File) => {
+  const data = new FormData();
+  data.append("file", file);
+  return api.post<{ url: string; filename: string }>("/api/coa/upload", data, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+};
+
+// Build an absolute URL for a stored COA reference (upload path or full URL).
+export const coaFileUrl = (ref?: string | null): string => {
+  if (!ref) return "";
+  return /^https?:\/\//.test(ref) ? ref : `${API_URL}${ref}`;
+};
 
 // Ecommerce products (public, HQ catalog)
 export const getEcommerceProducts = () => api.get("/api/ecommerce/products");

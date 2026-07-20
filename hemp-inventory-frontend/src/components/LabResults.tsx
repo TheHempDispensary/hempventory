@@ -10,6 +10,8 @@ import {
   createManualCoa,
   updateManualCoa,
   deleteManualCoa,
+  uploadCoaFile,
+  coaFileUrl,
   type ManualCoaAnalyte,
 } from "../lib/api";
 import {
@@ -155,6 +157,7 @@ export default function LabResults() {
     coa_approved_date: "",
     coa_url: "",
   };
+  const [uploadingCoa, setUploadingCoa] = useState(false);
   const [showCoaModal, setShowCoaModal] = useState(false);
   const [editingAccession, setEditingAccession] = useState<string | null>(null);
   const [form, setForm] = useState({ ...emptyForm });
@@ -350,6 +353,24 @@ export default function LabResults() {
     }
   };
 
+  const handleUploadCoaFile = async (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setUploadingCoa(true);
+    try {
+      const res = await uploadCoaFile(file);
+      setForm((f) => ({ ...f, coa_url: res.data.url }));
+      showToast("success", "File uploaded");
+    } catch {
+      showToast("error", "Upload failed (PDF or image, max 25 MB)");
+    } finally {
+      setUploadingCoa(false);
+    }
+  };
+
   const handleDeleteCoa = async () => {
     if (!detailSample) return;
     if (!window.confirm("Delete this COA? This cannot be undone.")) return;
@@ -475,14 +496,42 @@ export default function LabResults() {
             />
           </div>
           <div>
-            <label className="block text-xs font-medium text-gray-500 mb-1">COA Document Link (URL)</label>
-            <input
-              type="url"
-              value={form.coa_url}
-              onChange={(e) => setForm({ ...form, coa_url: e.target.value })}
-              placeholder="https://... link to the PDF"
-              className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500 outline-none"
-            />
+            <label className="block text-xs font-medium text-gray-500 mb-1">COA Document</label>
+            <div className="flex items-center gap-2">
+              <label className="shrink-0 px-3 py-2 border border-gray-200 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 cursor-pointer flex items-center gap-1.5">
+                {uploadingCoa ? (
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Plus className="w-4 h-4" />
+                )}
+                {uploadingCoa ? "Uploading..." : "Upload PDF"}
+                <input
+                  type="file"
+                  accept=".pdf,image/*"
+                  onChange={handleUploadCoaFile}
+                  disabled={uploadingCoa}
+                  className="hidden"
+                />
+              </label>
+              <input
+                type="url"
+                value={form.coa_url}
+                onChange={(e) => setForm({ ...form, coa_url: e.target.value })}
+                placeholder="...or paste a link to the PDF"
+                className="flex-1 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500 outline-none"
+              />
+            </div>
+            {form.coa_url && (
+              <a
+                href={coaFileUrl(form.coa_url)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mt-1 inline-flex items-center gap-1 text-xs text-green-600 hover:text-green-700"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                View attached document
+              </a>
+            )}
           </div>
 
           {/* Optional analyte rows */}
@@ -589,9 +638,9 @@ export default function LabResults() {
           </div>
           <div className="flex items-center gap-2">
             {detailSample?.coa_approved_filepath &&
-              /^https?:\/\//.test(detailSample.coa_approved_filepath) && (
+              /^(https?:\/\/|\/api\/coa\/file\/)/.test(detailSample.coa_approved_filepath) && (
                 <a
-                  href={detailSample.coa_approved_filepath}
+                  href={coaFileUrl(detailSample.coa_approved_filepath)}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="px-3 py-1.5 border border-gray-200 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50 flex items-center gap-1.5"
