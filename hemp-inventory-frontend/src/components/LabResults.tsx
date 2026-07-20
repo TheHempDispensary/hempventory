@@ -7,6 +7,10 @@ import {
   linkSkuToCoa,
   unlinkSkuFromCoa,
   getEcommerceProducts,
+  createManualCoa,
+  updateManualCoa,
+  deleteManualCoa,
+  type ManualCoaAnalyte,
 } from "../lib/api";
 import {
   RefreshCw,
@@ -24,6 +28,10 @@ import {
   Beaker,
   FileText,
   Package,
+  Plus,
+  Pencil,
+  Trash2,
+  ExternalLink,
 } from "lucide-react";
 
 interface CoaProduct {
@@ -37,6 +45,8 @@ interface CoaProduct {
   sample_count: number;
   first_accession: string;
   linked_skus: string | null;
+  source?: string;
+  coa_approved_filepath?: string | null;
 }
 
 interface CoaSample {
@@ -58,6 +68,8 @@ interface CoaSample {
   extracted_from: string;
   synced_at: string;
   linked_skus: string | null;
+  source?: string;
+  coa_approved_filepath?: string | null;
 }
 
 interface AnalyteResult {
@@ -131,6 +143,23 @@ export default function LabResults() {
 
   // Expanded panels in detail view
   const [expandedPanels, setExpandedPanels] = useState<Set<string>>(new Set());
+
+  // Manual (non-ACS) COA modal
+  const emptyForm = {
+    product_name: "",
+    description: "",
+    batch_no: "",
+    business_name: "",
+    product_type: "",
+    sample_status: "Passed",
+    coa_approved_date: "",
+    coa_url: "",
+  };
+  const [showCoaModal, setShowCoaModal] = useState(false);
+  const [editingAccession, setEditingAccession] = useState<string | null>(null);
+  const [form, setForm] = useState({ ...emptyForm });
+  const [formAnalytes, setFormAnalytes] = useState<ManualCoaAnalyte[]>([]);
+  const [savingCoa, setSavingCoa] = useState(false);
 
   const showToast = useCallback((type: "success" | "error", text: string) => {
     setToast({ type, text });
@@ -251,6 +280,89 @@ export default function LabResults() {
     });
   };
 
+  const openAddCoaModal = () => {
+    setEditingAccession(null);
+    setForm({ ...emptyForm });
+    setFormAnalytes([]);
+    setShowCoaModal(true);
+  };
+
+  const openEditCoaModal = () => {
+    if (!detailSample) return;
+    setEditingAccession(detailSample.sample_accession);
+    setForm({
+      product_name: detailSample.product_name || "",
+      description: detailSample.description || "",
+      batch_no: detailSample.batch_no || "",
+      business_name: detailSample.business_name || "",
+      product_type: detailSample.product_type || "",
+      sample_status: detailSample.sample_status || "Passed",
+      coa_approved_date: (detailSample.coa_approved_date || "").slice(0, 10),
+      coa_url: detailSample.coa_approved_filepath || "",
+    });
+    setFormAnalytes(
+      detailAnalytes.map((a) => ({
+        panel_name: a.panel_name,
+        analyte_identifier: a.analyte_identifier || a.analyte_abbreviation,
+        result: a.result,
+        result_unit: a.result_unit,
+        analyte_remark: a.analyte_remark,
+      }))
+    );
+    setShowCoaModal(true);
+  };
+
+  const addFormAnalyte = () =>
+    setFormAnalytes((prev) => [
+      ...prev,
+      { panel_name: "Cannabinoids", analyte_identifier: "", result: "", result_unit: "%", analyte_remark: "" },
+    ]);
+
+  const updateFormAnalyte = (i: number, patch: Partial<ManualCoaAnalyte>) =>
+    setFormAnalytes((prev) => prev.map((a, idx) => (idx === i ? { ...a, ...patch } : a)));
+
+  const removeFormAnalyte = (i: number) =>
+    setFormAnalytes((prev) => prev.filter((_, idx) => idx !== i));
+
+  const handleSaveCoa = async () => {
+    if (!form.product_name.trim() && !form.description.trim()) {
+      showToast("error", "Enter a product name or description");
+      return;
+    }
+    setSavingCoa(true);
+    try {
+      const payload = { ...form, analytes: formAnalytes };
+      if (editingAccession) {
+        await updateManualCoa(editingAccession, payload);
+        showToast("success", "COA updated");
+        await loadDetail(editingAccession);
+      } else {
+        await createManualCoa(payload);
+        showToast("success", "COA added");
+      }
+      setShowCoaModal(false);
+      await loadProducts();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to save COA";
+      showToast("error", msg);
+    } finally {
+      setSavingCoa(false);
+    }
+  };
+
+  const handleDeleteCoa = async () => {
+    if (!detailSample) return;
+    if (!window.confirm("Delete this COA? This cannot be undone.")) return;
+    try {
+      await deleteManualCoa(detailSample.sample_accession);
+      showToast("success", "COA deleted");
+      setSelectedAccession(null);
+      await loadProducts();
+    } catch {
+      showToast("error", "Failed to delete COA");
+    }
+  };
+
   const filteredProducts = products.filter((p) => {
     if (!search) return true;
     const q = search.toLowerCase();
@@ -278,6 +390,168 @@ export default function LabResults() {
     analytesByPanel[key].push(a);
   }
 
+  // ── Manual COA add/edit modal (shared by list + detail views) ────
+  const coaModal = showCoaModal && (
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+        <div className="p-4 border-b border-gray-200 flex items-center justify-between">
+          <h3 className="font-semibold text-gray-900">
+            {editingAccession ? "Edit COA" : "Add COA (non-ACS lab)"}
+          </h3>
+          <button onClick={() => setShowCoaModal(false)} className="p-1 hover:bg-gray-100 rounded">
+            <XCircle className="w-5 h-5 text-gray-400" />
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-medium text-gray-500 mb-1">Product Name *</label>
+              <input
+                type="text"
+                value={form.product_name}
+                onChange={(e) => setForm({ ...form, product_name: e.target.value })}
+                placeholder="e.g. Blue Dream 3.5g"
+                className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500 outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-500 mb-1">Lab / Source</label>
+              <input
+                type="text"
+                value={form.business_name}
+                onChange={(e) => setForm({ ...form, business_name: e.target.value })}
+                placeholder="e.g. Green Scientific Labs"
+                className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500 outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-500 mb-1">Batch #</label>
+              <input
+                type="text"
+                value={form.batch_no}
+                onChange={(e) => setForm({ ...form, batch_no: e.target.value })}
+                className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500 outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-500 mb-1">Product Type</label>
+              <input
+                type="text"
+                value={form.product_type}
+                onChange={(e) => setForm({ ...form, product_type: e.target.value })}
+                placeholder="e.g. Flower, Vape, Edible"
+                className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500 outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-500 mb-1">COA Approved Date</label>
+              <input
+                type="date"
+                value={form.coa_approved_date}
+                onChange={(e) => setForm({ ...form, coa_approved_date: e.target.value })}
+                className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500 outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-500 mb-1">Status</label>
+              <select
+                value={form.sample_status}
+                onChange={(e) => setForm({ ...form, sample_status: e.target.value })}
+                className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500 outline-none"
+              >
+                <option value="Passed">Passed</option>
+                <option value="Failed">Failed</option>
+                <option value="Pending">Pending</option>
+              </select>
+            </div>
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-500 mb-1">Description</label>
+            <input
+              type="text"
+              value={form.description}
+              onChange={(e) => setForm({ ...form, description: e.target.value })}
+              className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500 outline-none"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-500 mb-1">COA Document Link (URL)</label>
+            <input
+              type="url"
+              value={form.coa_url}
+              onChange={(e) => setForm({ ...form, coa_url: e.target.value })}
+              placeholder="https://... link to the PDF"
+              className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500 outline-none"
+            />
+          </div>
+
+          {/* Optional analyte rows */}
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-xs font-medium text-gray-500">Results (optional)</label>
+              <button
+                onClick={addFormAnalyte}
+                className="text-xs text-green-600 font-medium flex items-center gap-1 hover:text-green-700"
+              >
+                <Plus className="w-3.5 h-3.5" /> Add result
+              </button>
+            </div>
+            {formAnalytes.length === 0 ? (
+              <p className="text-xs text-gray-400">No results added. You can add cannabinoid/potency rows or just attach the COA link above.</p>
+            ) : (
+              <div className="space-y-2">
+                {formAnalytes.map((a, i) => (
+                  <div key={i} className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={a.analyte_identifier || ""}
+                      onChange={(e) => updateFormAnalyte(i, { analyte_identifier: e.target.value })}
+                      placeholder="Analyte (e.g. Total THC)"
+                      className="flex-1 px-2 py-1.5 border border-gray-200 rounded text-sm outline-none focus:ring-1 focus:ring-green-500"
+                    />
+                    <input
+                      type="text"
+                      value={a.result || ""}
+                      onChange={(e) => updateFormAnalyte(i, { result: e.target.value })}
+                      placeholder="Result"
+                      className="w-24 px-2 py-1.5 border border-gray-200 rounded text-sm outline-none focus:ring-1 focus:ring-green-500"
+                    />
+                    <input
+                      type="text"
+                      value={a.result_unit || ""}
+                      onChange={(e) => updateFormAnalyte(i, { result_unit: e.target.value })}
+                      placeholder="Unit"
+                      className="w-16 px-2 py-1.5 border border-gray-200 rounded text-sm outline-none focus:ring-1 focus:ring-green-500"
+                    />
+                    <button onClick={() => removeFormAnalyte(i)} className="p-1 hover:bg-red-50 rounded">
+                      <Trash2 className="w-4 h-4 text-red-500" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="p-4 border-t border-gray-200 flex justify-end gap-2">
+          <button
+            onClick={() => setShowCoaModal(false)}
+            className="px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-100 rounded-lg"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSaveCoa}
+            disabled={savingCoa}
+            className="px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 disabled:opacity-50 flex items-center gap-2"
+          >
+            {savingCoa && <RefreshCw className="w-4 h-4 animate-spin" />}
+            {editingAccession ? "Save Changes" : "Add COA"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
   // ── Detail view ─────────────────────────────────────────────────
 
   if (selectedAccession) {
@@ -298,9 +572,14 @@ export default function LabResults() {
           >
             <ArrowLeft className="w-5 h-5 text-gray-600" />
           </button>
-          <div>
-            <h1 className="text-2xl font-bold text-gray-900">
+          <div className="flex-1">
+            <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
               COA: {selectedAccession}
+              {detailSample?.source === "manual" && (
+                <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-700">
+                  Manual
+                </span>
+              )}
             </h1>
             {detailSample && (
               <p className="text-sm text-gray-500">
@@ -308,7 +587,40 @@ export default function LabResults() {
               </p>
             )}
           </div>
+          <div className="flex items-center gap-2">
+            {detailSample?.coa_approved_filepath &&
+              /^https?:\/\//.test(detailSample.coa_approved_filepath) && (
+                <a
+                  href={detailSample.coa_approved_filepath}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-3 py-1.5 border border-gray-200 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50 flex items-center gap-1.5"
+                >
+                  <ExternalLink className="w-4 h-4" />
+                  View COA
+                </a>
+              )}
+            {detailSample?.source === "manual" && (
+              <>
+                <button
+                  onClick={openEditCoaModal}
+                  className="px-3 py-1.5 border border-gray-200 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50 flex items-center gap-1.5"
+                >
+                  <Pencil className="w-4 h-4" />
+                  Edit
+                </button>
+                <button
+                  onClick={handleDeleteCoa}
+                  className="px-3 py-1.5 border border-red-200 text-red-600 text-sm font-medium rounded-lg hover:bg-red-50 flex items-center gap-1.5"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  Delete
+                </button>
+              </>
+            )}
+          </div>
         </div>
+        {coaModal}
 
         {loadingDetail ? (
           <div className="flex items-center justify-center py-20">
@@ -586,7 +898,7 @@ export default function LabResults() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Lab Results (COA)</h1>
           <p className="text-sm text-gray-500 mt-1">
-            Certificate of Analysis results from ACS Laboratory
+            ACS Laboratory results plus manually-added non-ACS COAs
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -613,6 +925,13 @@ export default function LabResults() {
             )}
           </div>
           <button
+            onClick={openAddCoaModal}
+            className="px-4 py-2 border border-green-600 text-green-700 text-sm font-medium rounded-lg hover:bg-green-50 transition-colors flex items-center gap-2"
+          >
+            <Plus className="w-4 h-4" />
+            Add COA
+          </button>
+          <button
             onClick={handleSync}
             disabled={syncing || connected === false}
             className="px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
@@ -622,6 +941,7 @@ export default function LabResults() {
           </button>
         </div>
       </div>
+      {coaModal}
 
       {/* Search */}
       <div className="relative max-w-md">
@@ -673,8 +993,15 @@ export default function LabResults() {
                     onClick={() => loadDetail(p.first_accession)}
                     className="hover:bg-green-50/50 cursor-pointer transition-colors"
                   >
-                    <td className="px-6 py-4 text-gray-700 max-w-xs truncate">
-                      {p.description || "—"}
+                    <td className="px-6 py-4 text-gray-700 max-w-xs">
+                      <div className="flex items-center gap-2">
+                        <span className="truncate">{p.description || p.business_name || "—"}</span>
+                        {p.source === "manual" && (
+                          <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium bg-purple-100 text-purple-700">
+                            Manual
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-6 py-4 font-mono text-gray-600 text-xs">
                       {p.batch_no || "—"}
