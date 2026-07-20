@@ -37,6 +37,7 @@ interface ParMeta {
 
 type SortField = "name" | "category" | "price" | "total_stock" | "units_sold" | "units_per_month" | "par_level" | "order_qty";
 type SortDir = "asc" | "desc";
+type GroupSortField = "group" | "item_count" | "sold_amount" | "stock_amount" | "order_amount";
 
 const MONTH_OPTIONS = [1, 3, 4, 6, 12];
 
@@ -51,6 +52,8 @@ export default function SmartPar() {
   const [categoryFilter, setCategoryFilter] = useState("All");
   const [sortField, setSortField] = useState<SortField>("order_qty");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const [groupSortField, setGroupSortField] = useState<GroupSortField>("order_amount");
+  const [groupSortDir, setGroupSortDir] = useState<SortDir>("desc");
   const [error, setError] = useState("");
 
   const fetchData = async (m: number) => {
@@ -131,10 +134,41 @@ export default function SmartPar() {
   }, [filtered, sortField, sortDir]);
 
   const filteredGroups = useMemo(() => {
-    if (!search) return groups;
-    const q = search.toLowerCase();
-    return groups.filter((g) => g.group.toLowerCase().includes(q));
-  }, [groups, search]);
+    let list = groups;
+    if (search) {
+      const q = search.toLowerCase();
+      list = list.filter((g) => g.group.toLowerCase().includes(q));
+    }
+    const copy = [...list];
+    copy.sort((a, b) => {
+      let cmp = 0;
+      if (groupSortField === "group") {
+        cmp = a.group.localeCompare(b.group);
+      } else {
+        cmp = a[groupSortField] - b[groupSortField];
+      }
+      return groupSortDir === "asc" ? cmp : -cmp;
+    });
+    return copy;
+  }, [groups, search, groupSortField, groupSortDir]);
+
+  const toggleGroupSort = (field: GroupSortField) => {
+    if (groupSortField === field) {
+      setGroupSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setGroupSortField(field);
+      setGroupSortDir(field === "group" ? "asc" : "desc");
+    }
+  };
+
+  const GroupSortIcon = ({ field }: { field: GroupSortField }) => {
+    if (groupSortField !== field) return <ChevronDown className="w-3 h-3 text-gray-300 inline ml-0.5" />;
+    return groupSortDir === "asc" ? (
+      <ChevronUp className="w-3 h-3 text-green-600 inline ml-0.5" />
+    ) : (
+      <ChevronDown className="w-3 h-3 text-green-600 inline ml-0.5" />
+    );
+  };
 
   const fmtAmount = (amount: number, unit: string) => {
     const rounded = Number.isInteger(amount) ? amount : Math.round(amount * 100) / 100;
@@ -356,11 +390,36 @@ export default function SmartPar() {
             <table className="w-full text-sm">
               <thead className="bg-gray-50 text-left">
                 <tr>
-                  <th className="px-4 py-3 font-medium text-gray-600 whitespace-nowrap">Order Group</th>
-                  <th className="px-4 py-3 font-medium text-gray-600 text-right whitespace-nowrap">Items</th>
-                  <th className="px-4 py-3 font-medium text-gray-600 text-right whitespace-nowrap">Sold</th>
-                  <th className="px-4 py-3 font-medium text-gray-600 text-right whitespace-nowrap">In Stock</th>
-                  <th className="px-4 py-3 font-medium text-amber-700 bg-amber-50 text-right whitespace-nowrap">To Order</th>
+                  <th
+                    onClick={() => toggleGroupSort("group")}
+                    className="px-4 py-3 font-medium text-gray-600 cursor-pointer hover:text-gray-900 whitespace-nowrap select-none"
+                  >
+                    Order Group <GroupSortIcon field="group" />
+                  </th>
+                  <th
+                    onClick={() => toggleGroupSort("item_count")}
+                    className="px-4 py-3 font-medium text-gray-600 text-right cursor-pointer hover:text-gray-900 whitespace-nowrap select-none"
+                  >
+                    Items <GroupSortIcon field="item_count" />
+                  </th>
+                  <th
+                    onClick={() => toggleGroupSort("sold_amount")}
+                    className="px-4 py-3 font-medium text-gray-600 text-right cursor-pointer hover:text-gray-900 whitespace-nowrap select-none"
+                  >
+                    Sold <GroupSortIcon field="sold_amount" />
+                  </th>
+                  <th
+                    onClick={() => toggleGroupSort("stock_amount")}
+                    className="px-4 py-3 font-medium text-gray-600 text-right cursor-pointer hover:text-gray-900 whitespace-nowrap select-none"
+                  >
+                    In Stock <GroupSortIcon field="stock_amount" />
+                  </th>
+                  <th
+                    onClick={() => toggleGroupSort("order_amount")}
+                    className="px-4 py-3 font-medium text-amber-700 bg-amber-50 text-right cursor-pointer hover:text-amber-900 whitespace-nowrap select-none"
+                  >
+                    To Order <GroupSortIcon field="order_amount" />
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
