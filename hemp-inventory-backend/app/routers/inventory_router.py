@@ -6,6 +6,7 @@ import asyncio
 import aiosqlite
 import base64
 import csv
+from collections import deque
 import os
 import json
 import io
@@ -1559,13 +1560,15 @@ async def get_image(
     sku: str,
     w: Optional[int] = None,
     nobg: Optional[int] = None,
+    bg: Optional[int] = None,
     db: aiosqlite.Connection = Depends(get_db),
 ):
     """Get a product image by SKU. Returns the raw image bytes.
     Optional ?w=300 parameter to get a resized thumbnail for faster loading.
     Optional ?nobg=1 parameter to remove white background (returns transparent PNG).
-    Results are cached in-memory so expensive nobg processing only runs once per SKU."""
-    cache_key = (sku, w, nobg)
+    Optional ?bg=1 parameter to whiten a dark studio background (subject preserved).
+    Results are cached in-memory so expensive processing only runs once per SKU."""
+    cache_key = (sku, w, nobg, bg)
     cached = _image_cache.get(cache_key)
     if cached is not None:
         return Response(
@@ -1596,6 +1599,15 @@ async def get_image(
                 result_bytes, media = _remove_white_background(result_bytes)
             except Exception:
                 pass
+        # Whiten a dark studio background if requested (leaves image untouched
+        # when the subject can't be separated from a dark background)
+        elif bg and bg == 1:
+            try:
+                whitened, wmedia = _whiten_background(result_bytes)
+                if whitened is not result_bytes:
+                    result_bytes, media = whitened, wmedia
+            except Exception:
+                pass
         # Resize if width parameter provided
         if w and 50 <= w <= 1200:
             try:
@@ -1606,9 +1618,9 @@ async def get_image(
                 buf = io.BytesIO()
                 try:
                     if img.mode == "RGBA":
-                        bg = PILImage.new("RGBA", img.size, (255, 255, 255, 255))
-                        bg.paste(img, mask=img.split()[3])
-                        img = bg.convert("RGB")
+                        bg_img = PILImage.new("RGBA", img.size, (255, 255, 255, 255))
+                        bg_img.paste(img, mask=img.split()[3])
+                        img = bg_img.convert("RGB")
                     else:
                         img = img.convert("RGB")
                     img.save(buf, format="WEBP", quality=95)
@@ -2372,6 +2384,62 @@ def _remove_white_background(image_bytes: bytes, threshold: int = 240, edge_soft
     rgb_img = background.convert("RGB")
     buf = io.BytesIO()
     rgb_img.save(buf, format="JPEG", quality=90)
+    return buf.getvalue(), "image/jpeg"
+
+
+def _whiten_background(
+    image_bytes: bytes, dark_thr: int = 60, min_fg: float = 0.12, mask_dim: int = 480
+) -> tuple[bytes, str]:
+    """Replace a dark studio background with white while preserving the subject.
+
+    Uses an edge flood-fill so only dark pixels connected to the image border are
+    whitened — a light/colorful subject in the center is kept intact. If the
+    remaining foreground is tiny (a dark subject on a dark background, e.g. a
+    black vape), the image is left untouched to avoid erasing the product.
+    Returns the original bytes unchanged when there is nothing safe to do.
+    """
+    img = PILImage.open(io.BytesIO(image_bytes)).convert("RGB")
+    W, H = img.size
+    scale = min(1.0, mask_dim / max(W, H))
+    sw, sh = max(1, int(W * scale)), max(1, int(H * scale))
+    gpx = img.resize((sw, sh), PILImage.BILINEAR).convert("L").load()
+
+    visited = bytearray(sw * sh)
+    dq: deque = deque()
+
+    def _dark(x: int, y: int) -> bool:
+        return gpx[x, y] < dark_thr
+
+    for x in range(sw):
+        for y in (0, sh - 1):
+            if not visited[y * sw + x] and _dark(x, y):
+                visited[y * sw + x] = 1
+                dq.append((x, y))
+    for y in range(sh):
+        for x in (0, sw - 1):
+            if not visited[y * sw + x] and _dark(x, y):
+                visited[y * sw + x] = 1
+                dq.append((x, y))
+    while dq:
+        x, y = dq.popleft()
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < sw and 0 <= ny < sh and not visited[ny * sw + nx] and _dark(nx, ny):
+                visited[ny * sw + nx] = 1
+                dq.append((nx, ny))
+
+    bg_count = sum(visited)
+    fg_frac = 1 - bg_count / (sw * sh)
+    # Nothing to whiten, or subject indistinguishable from a dark background.
+    if bg_count == 0 or fg_frac < min_fg:
+        return image_bytes, "image/jpeg"
+
+    mask = PILImage.frombytes(
+        "L", (sw, sh), bytes(255 if v else 0 for v in visited)
+    ).resize((W, H), PILImage.BILINEAR)
+    img.paste((255, 255, 255), (0, 0), mask)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=90)
     return buf.getvalue(), "image/jpeg"
 
 
@@ -3786,6 +3854,8 @@ _LEAFLIFE_TABS = [
         "category": "Concentrates",
         "price_cols": {"1": 12, "2": 13, "4": 14},
         "sku_suffix": {"1": "1G", "2": "2G", "4": "4G"},
+        # weight (g) -> minimum customer price in cents
+        "price_floor": {"1": 2000, "2": 3500, "4": 6000},
     },
 ]
 
@@ -3885,10 +3955,14 @@ def _build_leaflife_desired(tab_rows: dict) -> dict:
             # only appears in concentrate strain names.
             sku_source = re.sub(r"[^A-Z0-9 #./&-]", "", strain_upper.replace("×", "X"))
             sku_base = "LF-" + re.sub(r"\s+", "-", sku_source)
+            price_floor = cfg.get("price_floor", {})
             for weight, col in cfg["price_cols"].items():
                 price = _leaflife_money_cents(row[col])
                 if not price:
                     continue
+                floor = price_floor.get(weight)
+                if floor and price < floor:
+                    price = floor
                 weight_f = float(weight)
                 stock = int(inventory_grams / weight_f) if weight_f > 0 else 0
                 if stock < 1:
