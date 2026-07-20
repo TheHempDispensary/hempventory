@@ -3056,8 +3056,48 @@ _FLOWER_KEYWORDS = (
     "PRE ROLLED", "PRE-ROLL", "PRE ROLL", "SHAKE",
 )
 
-# Non-consumable categories that should never form an order group.
+# Categories that should not use the flower/vape name-keyword matching (a
+# "glass pipe flower" accessory must not be treated as flower). They still get
+# a catch-all order group based on their category.
 _ORDER_GROUP_SKIP_CATEGORIES = {"Accessories", "Packaging", "Apparel", "Pets"}
+
+# Spelled-out gram sizes seen in vape names ("ONE GRAM", "TWO GRAMS").
+_WORD_GRAMS = (
+    ("HALF GRAM", 0.5),
+    ("ONE GRAM", 1.0),
+    ("TWO GRAM", 2.0),
+    ("THREE GRAM", 3.0),
+    ("FOUR GRAM", 4.0),
+)
+
+
+def _strain_from_name(up: str, strain_type: str) -> str:
+    """Strain from the name (vapes carry it) falling back to the tagged type."""
+    if "HYBRID" in up:
+        return "Hybrid"
+    if "SATIVA" in up:
+        return "Sativa"
+    if "INDICA" in up:
+        return "Indica"
+    st = (strain_type or "").strip().title()
+    return st if st in ("Hybrid", "Sativa", "Indica") else "Unclassified"
+
+
+def _vape_size(up: str) -> str:
+    """Size label for a vape ("1g", "2g", ...) parsed from the name ('' if none)."""
+    m = re.search(r"(\d+(?:\.\d+)?)\s*GRAMS?\b", up)
+    grams = 0.0
+    if m:
+        try:
+            grams = float(m.group(1))
+        except ValueError:
+            grams = 0.0
+    else:
+        for word, val in _WORD_GRAMS:
+            if word in up:
+                grams = val
+                break
+    return f"{grams:g}g" if grams > 0 else ""
 
 
 def _order_group(name: str, categories: list[str], strain_type: str) -> tuple[str | None, str | None]:
@@ -3065,20 +3105,32 @@ def _order_group(name: str, categories: list[str], strain_type: str) -> tuple[st
 
     Gummies group by cannabinoid + strength (e.g. "Delta 9 THC Gummies 10mg").
     Flower groups by cannabinoid + form + strain type
-    (e.g. "THC Flower Smalls — Indica"). Everything else returns (None, None)
-    and is only shown in the per-item view.
+    (e.g. "THC Flower Smalls — Indica"). Vapes group by cannabinoid + form +
+    size + strain (e.g. "THC Disposable Vape 2g — Indica"). Everything else
+    falls back to a catch-all group named after its Clover category so no
+    product is hidden from the order totals.
     """
-    if any(c in _ORDER_GROUP_SKIP_CATEGORIES for c in categories):
-        return None, None
-
     up = " ".join((name or "").upper().split())
+    is_skip = any(c in _ORDER_GROUP_SKIP_CATEGORIES for c in categories)
 
     if "GUMMIES" in up or "GUMMY" in up:
         strength_match = re.search(r"(\d+)\s*MG", up)
         strength = f"{strength_match.group(1)}mg" if strength_match else "Unspecified"
         return "Gummies", f"{_order_group_cannabinoid(up)} Gummies {strength}"
 
-    if "Flower" in categories or any(k in up for k in _FLOWER_KEYWORDS):
+    if not is_skip and ("VAPE" in up or "Vapor" in categories):
+        if "DISPOSABLE" in up:
+            form = "Disposable Vape"
+        elif "CARTRIDGE" in up or "CART" in up:
+            form = "Vape Cartridge"
+        else:
+            form = "Vape"
+        size = _vape_size(up)
+        size_part = f" {size}" if size else ""
+        strain = _strain_from_name(up, strain_type)
+        return "Vape", f"{_order_group_cannabinoid(up)} {form}{size_part} \u2014 {strain}"
+
+    if not is_skip and ("Flower" in categories or any(k in up for k in _FLOWER_KEYWORDS)):
         if "SMALLS" in up:
             form = "Smalls"
         elif "TRIM" in up:
@@ -3097,12 +3149,11 @@ def _order_group(name: str, categories: list[str], strain_type: str) -> tuple[st
             form = "Exotic"
         else:
             form = "Flower"
-        st = (strain_type or "").strip().title()
-        if st not in ("Hybrid", "Sativa", "Indica"):
-            st = "Unclassified"
-        return "Flower", f"{_order_group_cannabinoid(up)} {form} \u2014 {st}"
+        strain = _strain_from_name(up, strain_type)
+        return "Flower", f"{_order_group_cannabinoid(up)} {form} \u2014 {strain}"
 
-    return None, None
+    category = next((c for c in categories if c), None) or "Uncategorized"
+    return "Other", category
 
 
 # Grams per pound used to roll flower reorder amounts up to pounds.
@@ -3151,6 +3202,8 @@ def _order_unit_basis(kind: str, group_label: str, name: str) -> tuple[str, floa
     """
     if kind == "Gummies":
         return "count", float(_pack_count(name))
+    if kind == "Vape":
+        return "count", 1.0
     if kind == "Flower":
         if "Pre-Rolls" in group_label:
             return "count", float(_pack_count(name))
@@ -3220,7 +3273,14 @@ def _build_order_groups(results: list[dict]) -> list[dict]:
             sold_amount = round(g["grams_sold"] / _GRAMS_PER_POUND, 2)
             stock_amount = round(g["grams_in_stock"] / _GRAMS_PER_POUND, 2)
         elif basis == "count":
-            unit = "joints" if g["kind"] == "Flower" else "gummies"
+            if g["kind"] == "Flower":
+                unit = "joints"
+            elif g["kind"] == "Gummies":
+                unit = "gummies"
+            elif g["kind"] == "Vape":
+                unit = "vapes"
+            else:
+                unit = "units"
             order_amount = g["each_order"]
             sold_amount = g["each_sold"]
             stock_amount = g["each_in_stock"]
