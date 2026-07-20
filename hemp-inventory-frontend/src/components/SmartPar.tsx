@@ -383,7 +383,7 @@ export default function SmartPar() {
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
           <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
             <p className="text-sm text-gray-500">
-              <strong>{filteredGroups.length}</strong> order groups &mdash; flower in pounds (448g/lb), gummies &amp; pre-rolls by the piece
+              <strong>{filteredGroups.length}</strong> order groups &mdash; flower in pounds (448g/lb); gummies, pre-rolls &amp; vapes by the piece; everything else by package
             </p>
           </div>
           <div className="overflow-x-auto">
@@ -451,7 +451,7 @@ export default function SmartPar() {
       {!loading && view === "groups" && filteredGroups.length === 0 && products.length > 0 && (
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-8 text-center">
           <p className="text-gray-500">
-            {search ? "No order groups match your search." : "No flower or gummie groups found."}
+            {search ? "No order groups match your search." : "No order groups found."}
           </p>
         </div>
       )}
