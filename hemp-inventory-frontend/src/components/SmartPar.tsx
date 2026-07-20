@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo } from "react";
 import { getSmartPar } from "../lib/api";
-import { RefreshCw, Search, ChevronUp, ChevronDown, Download, Calculator } from "lucide-react";
+import { RefreshCw, Search, ChevronUp, ChevronDown, Download, Calculator, Layers, List } from "lucide-react";
 
 interface ParProduct {
   name: string;
@@ -13,6 +13,19 @@ interface ParProduct {
   units_per_month: number;
   par_level: number;
   order_qty: number;
+  group: string | null;
+  group_kind: string | null;
+}
+
+interface ParGroup {
+  group: string;
+  kind: string;
+  item_count: number;
+  order_unit: string;
+  order_amount: number;
+  sold_amount: number;
+  stock_amount: number;
+  packages_order_qty: number;
 }
 
 interface ParMeta {
@@ -29,6 +42,8 @@ const MONTH_OPTIONS = [1, 3, 4, 6, 12];
 
 export default function SmartPar() {
   const [products, setProducts] = useState<ParProduct[]>([]);
+  const [groups, setGroups] = useState<ParGroup[]>([]);
+  const [view, setView] = useState<"groups" | "items">("groups");
   const [meta, setMeta] = useState<ParMeta | null>(null);
   const [loading, setLoading] = useState(false);
   const [months, setMonths] = useState(3);
@@ -44,6 +59,7 @@ export default function SmartPar() {
     try {
       const res = await getSmartPar(m);
       setProducts(res.data.products);
+      setGroups(res.data.groups || []);
       setMeta(res.data.meta);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Failed to load Smart PAR data";
@@ -114,6 +130,17 @@ export default function SmartPar() {
     return copy;
   }, [filtered, sortField, sortDir]);
 
+  const filteredGroups = useMemo(() => {
+    if (!search) return groups;
+    const q = search.toLowerCase();
+    return groups.filter((g) => g.group.toLowerCase().includes(q));
+  }, [groups, search]);
+
+  const fmtAmount = (amount: number, unit: string) => {
+    const rounded = Number.isInteger(amount) ? amount : Math.round(amount * 100) / 100;
+    return `${rounded.toLocaleString()} ${unit}`;
+  };
+
   const toggleSort = (field: SortField) => {
     if (sortField === field) {
       setSortDir((d) => (d === "asc" ? "desc" : "asc"));
@@ -133,24 +160,39 @@ export default function SmartPar() {
   };
 
   const exportCSV = () => {
-    const headers = ["Product", "SKU", "Category", "Price", "Current Stock", "Units Sold", "Units/Month", `PAR (${months}mo)`, "Order Qty"];
-    const rows = sorted.map((p) => [
-      `"${p.name}"`,
-      p.sku,
-      `"${p.categories.join(", ")}"`,
-      `$${p.price.toFixed(2)}`,
-      p.total_stock,
-      p.units_sold,
-      p.units_per_month,
-      p.par_level,
-      p.order_qty,
-    ]);
+    let headers: string[];
+    let rows: (string | number)[][];
+    if (view === "groups") {
+      headers = ["Order Group", "Type", "Items", "Sold", "In Stock", "To Order", "Unit"];
+      rows = filteredGroups.map((g) => [
+        `"${g.group}"`,
+        g.kind,
+        g.item_count,
+        g.sold_amount,
+        g.stock_amount,
+        g.order_amount,
+        g.order_unit,
+      ]);
+    } else {
+      headers = ["Product", "SKU", "Category", "Price", "Current Stock", "Units Sold", "Units/Month", `PAR (${months}mo)`, "Order Qty"];
+      rows = sorted.map((p) => [
+        `"${p.name}"`,
+        p.sku,
+        `"${p.categories.join(", ")}"`,
+        `$${p.price.toFixed(2)}`,
+        p.total_stock,
+        p.units_sold,
+        p.units_per_month,
+        p.par_level,
+        p.order_qty,
+      ]);
+    }
     const csv = [headers.join(","), ...rows.map((r) => r.join(","))].join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `smart-par-${months}mo-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `smart-par-${view}-${months}mo-${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -179,13 +221,35 @@ export default function SmartPar() {
           </button>
           <button
             onClick={exportCSV}
-            disabled={loading || sorted.length === 0}
+            disabled={loading || (view === "groups" ? filteredGroups.length === 0 : sorted.length === 0)}
             className="flex items-center gap-2 px-3 py-2 text-sm bg-white border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50"
           >
             <Download className="w-4 h-4" />
             Export CSV
           </button>
         </div>
+      </div>
+
+      {/* View toggle */}
+      <div className="inline-flex rounded-lg border border-gray-300 overflow-hidden bg-white">
+        <button
+          onClick={() => setView("groups")}
+          className={`flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors ${
+            view === "groups" ? "bg-green-600 text-white" : "text-gray-700 hover:bg-gray-50"
+          }`}
+        >
+          <Layers className="w-4 h-4" />
+          Order Totals
+        </button>
+        <button
+          onClick={() => setView("items")}
+          className={`flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors border-l border-gray-300 ${
+            view === "items" ? "bg-green-600 text-white" : "text-gray-700 hover:bg-gray-50"
+          }`}
+        >
+          <List className="w-4 h-4" />
+          By Item
+        </button>
       </div>
 
       {/* Time Period Selector */}
@@ -239,23 +303,25 @@ export default function SmartPar() {
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
           <input
             type="text"
-            placeholder="Search products..."
+            placeholder={view === "groups" ? "Search order groups..." : "Search products..."}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="w-full pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent"
           />
         </div>
-        <select
-          value={categoryFilter}
-          onChange={(e) => setCategoryFilter(e.target.value)}
-          className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent bg-white"
-        >
-          {categories.map((c) => (
-            <option key={c} value={c}>
-              {c === "All" ? "All Categories" : c}
-            </option>
-          ))}
-        </select>
+        {view === "items" && (
+          <select
+            value={categoryFilter}
+            onChange={(e) => setCategoryFilter(e.target.value)}
+            className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent bg-white"
+          >
+            {categories.map((c) => (
+              <option key={c} value={c}>
+                {c === "All" ? "All Categories" : c}
+              </option>
+            ))}
+          </select>
+        )}
       </div>
 
       {/* Error */}
@@ -278,8 +344,61 @@ export default function SmartPar() {
         </div>
       )}
 
+      {/* Grouped totals table */}
+      {!loading && view === "groups" && filteredGroups.length > 0 && (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+            <p className="text-sm text-gray-500">
+              <strong>{filteredGroups.length}</strong> order groups &mdash; flower in pounds (448g/lb), gummies &amp; pre-rolls by the piece
+            </p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-gray-50 text-left">
+                <tr>
+                  <th className="px-4 py-3 font-medium text-gray-600 whitespace-nowrap">Order Group</th>
+                  <th className="px-4 py-3 font-medium text-gray-600 text-right whitespace-nowrap">Items</th>
+                  <th className="px-4 py-3 font-medium text-gray-600 text-right whitespace-nowrap">Sold</th>
+                  <th className="px-4 py-3 font-medium text-gray-600 text-right whitespace-nowrap">In Stock</th>
+                  <th className="px-4 py-3 font-medium text-amber-700 bg-amber-50 text-right whitespace-nowrap">To Order</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {filteredGroups.map((g) => (
+                  <tr key={g.group} className="hover:bg-gray-50 transition-colors">
+                    <td className="px-4 py-3">
+                      <div className="font-medium text-gray-900">{g.group}</div>
+                      <div className="text-xs text-gray-400">{g.kind}</div>
+                    </td>
+                    <td className="px-4 py-3 text-right text-gray-500">{g.item_count}</td>
+                    <td className="px-4 py-3 text-right text-gray-600">{fmtAmount(g.sold_amount, g.order_unit)}</td>
+                    <td className="px-4 py-3 text-right text-gray-600">{fmtAmount(g.stock_amount, g.order_unit)}</td>
+                    <td className="px-4 py-3 text-right bg-amber-50/50">
+                      {g.order_amount > 0 ? (
+                        <span className="font-semibold text-amber-700">{fmtAmount(g.order_amount, g.order_unit)}</span>
+                      ) : (
+                        <span className="text-gray-300">&mdash;</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Empty grouped state */}
+      {!loading && view === "groups" && filteredGroups.length === 0 && products.length > 0 && (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-8 text-center">
+          <p className="text-gray-500">
+            {search ? "No order groups match your search." : "No flower or gummie groups found."}
+          </p>
+        </div>
+      )}
+
       {/* Table */}
-      {!loading && sorted.length > 0 && (
+      {!loading && view === "items" && sorted.length > 0 && (
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
           <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
             <p className="text-sm text-gray-500">
@@ -403,7 +522,7 @@ export default function SmartPar() {
       )}
 
       {/* Empty state */}
-      {!loading && !error && sorted.length === 0 && products.length > 0 && (
+      {!loading && !error && view === "items" && sorted.length === 0 && products.length > 0 && (
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-8 text-center">
           <p className="text-gray-500">No products match your search or filter.</p>
         </div>
