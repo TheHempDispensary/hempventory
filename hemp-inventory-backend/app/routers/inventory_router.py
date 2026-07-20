@@ -3152,8 +3152,12 @@ def _order_group(name: str, categories: list[str], strain_type: str) -> tuple[st
         strain = _strain_from_name(up, strain_type)
         return "Flower", f"{_order_group_cannabinoid(up)} {form} \u2014 {strain}"
 
-    category = next((c for c in categories if c), None) or "Uncategorized"
-    return "Other", category
+    # No cannabinoid/piece rule for this category, so grouping a whole category
+    # ("all Concentrates") into one line isn't actionable. Give each distinct
+    # product its own order line; the same product across stores/online still
+    # merges by name.
+    label = " ".join((name or "").split())
+    return "Other", label or "Uncategorized"
 
 
 # Grams per pound used to roll flower reorder amounts up to pounds.
