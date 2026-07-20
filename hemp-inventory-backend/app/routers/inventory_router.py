@@ -3032,6 +3032,222 @@ def _normalise_name(name: str) -> str:
     return " ".join(name.lower().split())
 
 
+def _order_group_cannabinoid(up: str) -> str:
+    """Derive the cannabinoid family from an upper-cased product name."""
+    if up.startswith("DELTA 8"):
+        return "Delta 8 THC"
+    if up.startswith("DELTA 9"):
+        return "Delta 9 THC"
+    if "CBD/CBG/CBN" in up:
+        return "CBD/CBG/CBN"
+    if "CBG/CBD" in up or "CBD/CBG" in up:
+        return "CBD/CBG"
+    if up.startswith("CBN"):
+        return "CBN"
+    if up.startswith("CBG"):
+        return "CBG"
+    if up.startswith("CBD"):
+        return "CBD"
+    return "THC"
+
+
+_FLOWER_KEYWORDS = (
+    "FLOWER", "SNOW CAPS", "SNOWCAPS", "MOON ROCK", "MOONROCK",
+    "PRE ROLLED", "PRE-ROLL", "PRE ROLL", "SHAKE",
+)
+
+# Non-consumable categories that should never form an order group.
+_ORDER_GROUP_SKIP_CATEGORIES = {"Accessories", "Packaging", "Apparel", "Pets"}
+
+
+def _order_group(name: str, categories: list[str], strain_type: str) -> tuple[str | None, str | None]:
+    """Classify a product into the order-line the store reorders by.
+
+    Gummies group by cannabinoid + strength (e.g. "Delta 9 THC Gummies 10mg").
+    Flower groups by cannabinoid + form + strain type
+    (e.g. "THC Flower Smalls — Indica"). Everything else returns (None, None)
+    and is only shown in the per-item view.
+    """
+    if any(c in _ORDER_GROUP_SKIP_CATEGORIES for c in categories):
+        return None, None
+
+    up = " ".join((name or "").upper().split())
+
+    if "GUMMIES" in up or "GUMMY" in up:
+        strength_match = re.search(r"(\d+)\s*MG", up)
+        strength = f"{strength_match.group(1)}mg" if strength_match else "Unspecified"
+        return "Gummies", f"{_order_group_cannabinoid(up)} Gummies {strength}"
+
+    if "Flower" in categories or any(k in up for k in _FLOWER_KEYWORDS):
+        if "SMALLS" in up:
+            form = "Smalls"
+        elif "TRIM" in up:
+            form = "Trim"
+        elif "GROUND" in up:
+            form = "Ground"
+        elif "SNOW CAPS" in up or "SNOWCAPS" in up:
+            form = "Snow Caps"
+        elif "MOON ROCK" in up or "MOONROCK" in up:
+            form = "Moon Rock"
+        elif "PRE ROLL" in up or "PRE-ROLL" in up:
+            form = "Baby J Pre-Rolls" if "BABY J" in up else "Pre-Rolls"
+        elif "SHAKE" in up:
+            form = "Shake"
+        elif "EXOTIC" in up:
+            form = "Exotic"
+        else:
+            form = "Flower"
+        st = (strain_type or "").strip().title()
+        if st not in ("Hybrid", "Sativa", "Indica"):
+            st = "Unclassified"
+        return "Flower", f"{_order_group_cannabinoid(up)} {form} \u2014 {st}"
+
+    return None, None
+
+
+# Grams per pound used to roll flower reorder amounts up to pounds.
+# The store buys flower at 448 g (16 oz) per pound.
+_GRAMS_PER_POUND = 448.0
+
+
+def _flower_grams(name: str) -> float:
+    """Grams of flower in one package, parsed from the product name (0 if none)."""
+    up = name.upper()
+    mp = re.search(r"(\d+(?:\.\d+)?)\s*(?:POUNDS?|LBS?)\b", up)
+    if mp:
+        try:
+            return float(mp.group(1)) * _GRAMS_PER_POUND
+        except ValueError:
+            return 0.0
+    m = re.search(r"(\d+(?:\.\d+)?)\s*GRAMS?\b", up)
+    if not m:
+        m = re.search(r"(\d+(?:\.\d+)?)\s*G\b", up)
+    if not m:
+        return 0.0
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return 0.0
+
+
+def _pack_count(name: str) -> int:
+    """Units (gummies/joints) in one package, parsed from the name (default 1)."""
+    m = re.search(r"(\d+)\s*(?:COUNT|CT|PACK)\b", name.upper())
+    if not m:
+        return 1
+    try:
+        return max(int(m.group(1)), 1)
+    except ValueError:
+        return 1
+
+
+def _order_unit_basis(kind: str, group_label: str, name: str) -> tuple[str, float]:
+    """How a grouped item is counted for ordering.
+
+    Returns (basis, per_package) where basis is:
+        "weight" – flower buds, per_package = grams (rolled up to pounds)
+        "count"  – gummies / pre-rolls, per_package = units per package
+        "package" – fallback, per_package = 1
+    """
+    if kind == "Gummies":
+        return "count", float(_pack_count(name))
+    if kind == "Flower":
+        if "Pre-Rolls" in group_label:
+            return "count", float(_pack_count(name))
+        grams = _flower_grams(name)
+        if grams > 0:
+            return "weight", grams
+    return "package", 1.0
+
+
+def _build_order_groups(results: list[dict]) -> list[dict]:
+    """Roll grouped products up into order-line totals in their buying unit.
+
+    Flower buds report the reorder amount in pounds (summed grams / lb),
+    gummies and pre-rolls report total units (package count x units/package).
+    """
+    groups: dict[str, dict] = {}
+    for r in results:
+        label = r.get("group")
+        if not label:
+            continue
+        kind = r.get("group_kind") or ""
+        g = groups.get(label)
+        if g is None:
+            g = {
+                "group": label,
+                "kind": kind,
+                "item_count": 0,
+                "packages_sold": 0,
+                "packages_in_stock": 0,
+                "packages_par": 0,
+                "packages_order_qty": 0,
+                "grams_sold": 0.0,
+                "grams_in_stock": 0.0,
+                "grams_order": 0.0,
+                "each_sold": 0,
+                "each_in_stock": 0,
+                "each_order": 0,
+                "basis": "package",
+            }
+            groups[label] = g
+
+        basis, per = _order_unit_basis(kind, label, r["name"])
+        g["item_count"] += 1
+        g["packages_sold"] += r["units_sold"]
+        g["packages_in_stock"] += r["total_stock"]
+        g["packages_par"] += r["par_level"]
+        g["packages_order_qty"] += r["order_qty"]
+
+        if basis == "weight":
+            g["basis"] = "weight"
+            g["grams_sold"] += r["units_sold"] * per
+            g["grams_in_stock"] += r["total_stock"] * per
+            g["grams_order"] += r["order_qty"] * per
+        elif basis == "count":
+            if g["basis"] != "weight":
+                g["basis"] = "count"
+            g["each_sold"] += int(round(r["units_sold"] * per))
+            g["each_in_stock"] += int(round(r["total_stock"] * per))
+            g["each_order"] += int(round(r["order_qty"] * per))
+
+    out: list[dict] = []
+    for g in groups.values():
+        basis = g["basis"]
+        if basis == "weight":
+            unit = "lb"
+            order_amount = round(g["grams_order"] / _GRAMS_PER_POUND, 2)
+            sold_amount = round(g["grams_sold"] / _GRAMS_PER_POUND, 2)
+            stock_amount = round(g["grams_in_stock"] / _GRAMS_PER_POUND, 2)
+        elif basis == "count":
+            unit = "joints" if g["kind"] == "Flower" else "gummies"
+            order_amount = g["each_order"]
+            sold_amount = g["each_sold"]
+            stock_amount = g["each_in_stock"]
+        else:
+            unit = "packages"
+            order_amount = g["packages_order_qty"]
+            sold_amount = g["packages_sold"]
+            stock_amount = g["packages_in_stock"]
+
+        out.append({
+            "group": g["group"],
+            "kind": g["kind"],
+            "item_count": g["item_count"],
+            "order_unit": unit,
+            "order_amount": order_amount,
+            "sold_amount": sold_amount,
+            "stock_amount": stock_amount,
+            "packages_sold": g["packages_sold"],
+            "packages_in_stock": g["packages_in_stock"],
+            "packages_par": g["packages_par"],
+            "packages_order_qty": g["packages_order_qty"],
+        })
+
+    out.sort(key=lambda x: (x["kind"], -x["order_amount"]))
+    return out
+
+
 @router.get("/smart-par")
 async def smart_par(
     months: int = 3,
@@ -3147,6 +3363,21 @@ async def smart_par(
     else:
         days_of_data = max((latest_ts - earliest_ts) / 86400, 1)
 
+    # Strain type (Sativa/Indica/Hybrid) per product, used to group flower.
+    strain_by_sku: dict[str, str] = {}
+    strain_by_name: dict[str, str] = {}
+    attr_cursor = await db.execute(
+        "SELECT sku, product_name, product_type FROM product_attributes"
+    )
+    for row in await attr_cursor.fetchall():
+        attr_sku, attr_name, attr_type = row[0], row[1], row[2]
+        if not attr_type:
+            continue
+        if attr_sku:
+            strain_by_sku[attr_sku] = attr_type
+        if attr_name:
+            strain_by_name[attr_name.upper()] = attr_type
+
     results: list[dict] = []
 
     for item in items_list:
@@ -3170,6 +3401,15 @@ async def smart_par(
             for loc_name, loc_data in item.get("locations", {}).items()
         }
 
+        strain = (
+            strain_by_sku.get(item["sku"])
+            or strain_by_name.get(item["name"].upper())
+            or ""
+        )
+        group_kind, group_label = _order_group(
+            item["name"], item.get("categories", []), strain
+        )
+
         results.append({
             "name": item["name"],
             "sku": item["sku"],
@@ -3181,10 +3421,15 @@ async def smart_par(
             "units_per_month": round(units_per_month, 1),
             "par_level": par_level,
             "order_qty": max(par_level - total_stock, 0),
+            "group": group_label,
+            "group_kind": group_kind,
         })
+
+    groups = _build_order_groups(results)
 
     return {
         "products": results,
+        "groups": groups,
         "meta": {
             "months": months,
             "days_of_data": round(days_of_data, 1),
