@@ -3150,6 +3150,10 @@ async def smart_par(
     results: list[dict] = []
 
     for item in items_list:
+        # Exclude LeafLife products (SKU prefix "LF-") — they ship from the
+        # partner and shouldn't drive our reorder recommendations.
+        if (item.get("sku") or "").upper().startswith("LF-"):
+            continue
         norm = _normalise_name(item["name"])
         units_sold = sales_by_product.get(norm, 0)
         units_per_day = units_sold / days_of_data
