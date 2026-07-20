@@ -1,4 +1,5 @@
 import os
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -131,19 +132,17 @@ async def run_coa_sync(db) -> dict:
                 "panel_remark": panel_remark,
             })
 
-    # Always clear-and-replace so stale data from previous syncs (e.g.
-    # wrong business) is removed.  The empty-response guard above (line 27)
-    # already prevents wiping on a total API failure.
-    await db.execute("DELETE FROM coa_analyte_results")
-    await db.execute("DELETE FROM coa_results")
-    # Clean up orphaned sku links whose accessions are no longer present.
-    fresh_accessions = set(samples.keys())
-    if fresh_accessions:
-        placeholders = ",".join("?" for _ in fresh_accessions)
-        await db.execute(
-            f"DELETE FROM coa_sku_links WHERE sample_accession NOT IN ({placeholders})",
-            tuple(fresh_accessions),
-        )
+    # Clear-and-replace ONLY ACS-sourced data so manually-added (non-ACS) COAs
+    # survive the sync. The empty-response guard above already prevents wiping
+    # on a total API failure.
+    await db.execute(
+        """DELETE FROM coa_analyte_results
+           WHERE sample_accession IN (
+               SELECT sample_accession FROM coa_results
+               WHERE source = 'ACS' OR source IS NULL
+           )"""
+    )
+    await db.execute("DELETE FROM coa_results WHERE source = 'ACS' OR source IS NULL")
 
     # Insert samples
     for s in samples.values():
@@ -153,8 +152,8 @@ async def run_coa_sync(db) -> dict:
                  product_name, product_type, consumption_type, description,
                  test_purpose, sample_status, order_date, test_start_date,
                  coa_approved_date, postal_code, extracted_from,
-                 coa_approved_filepath, synced_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                 coa_approved_filepath, source, synced_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACS', CURRENT_TIMESTAMP)
                ON CONFLICT(sample_accession) DO UPDATE SET
                  order_number=excluded.order_number,
                  batch_no=excluded.batch_no,
@@ -171,6 +170,7 @@ async def run_coa_sync(db) -> dict:
                  postal_code=excluded.postal_code,
                  extracted_from=excluded.extracted_from,
                  coa_approved_filepath=excluded.coa_approved_filepath,
+                 source='ACS',
                  synced_at=CURRENT_TIMESTAMP""",
             (
                 s["sample_accession"], s["order_number"], s["batch_no"],
@@ -208,6 +208,13 @@ async def run_coa_sync(db) -> dict:
             ),
         )
 
+    # Drop links pointing at accessions that no longer exist (keeps manual
+    # COA links intact because their accessions remain in coa_results).
+    await db.execute(
+        "DELETE FROM coa_sku_links WHERE sample_accession NOT IN "
+        "(SELECT sample_accession FROM coa_results)"
+    )
+
     await db.commit()
     invalidate_product_cache()
     return {"synced_samples": len(samples), "synced_analytes": len(analytes)}
@@ -239,6 +246,8 @@ async def list_coa_samples(db=Depends(get_db), view: str = "products"):
                     cr.product_type,
                     cr.order_number,
                     cr.sample_status,
+                    MIN(cr.source) AS source,
+                    MAX(cr.coa_approved_filepath) AS coa_approved_filepath,
                     MAX(cr.coa_approved_date) AS coa_approved_date,
                     COUNT(DISTINCT cr.sample_accession) AS sample_count,
                     MIN(cr.sample_accession) AS first_accession,
@@ -346,6 +355,155 @@ async def unlink_sku_from_coa(sku: str, sample_accession: str, db=Depends(get_db
     await db.commit()
     invalidate_product_cache()
     return {"unlinked": True}
+
+
+# ── Manual (non-ACS) COAs ──────────────────────────────────────────
+
+
+class ManualAnalyte(BaseModel):
+    panel_name: str = ""
+    analyte_identifier: str = ""
+    analyte_abbreviation: str = ""
+    result: str = ""
+    result_unit: str = ""
+    concentration: float = 0.0
+    conc_unit: str = ""
+    analyte_remark: str = ""
+    panel_remark: str = ""
+
+
+class ManualCoaRequest(BaseModel):
+    product_name: str = ""
+    description: str = ""
+    batch_no: str = ""
+    business_name: str = ""  # lab / source name (e.g. "Green Scientific Labs")
+    product_type: str = ""
+    test_purpose: str = ""
+    sample_status: str = ""
+    coa_approved_date: str = ""
+    coa_url: str = ""  # link to the COA PDF
+    analytes: list[ManualAnalyte] = []
+    skus: list[str] = []  # optional SKUs to link on create
+
+
+async def _replace_manual_analytes(db, accession: str, analytes: list[ManualAnalyte]) -> int:
+    """Delete and re-insert the analyte rows for a manual COA accession."""
+    await db.execute(
+        "DELETE FROM coa_analyte_results WHERE sample_accession = ?", (accession,)
+    )
+    count = 0
+    for a in analytes:
+        identifier = (a.analyte_identifier or a.analyte_abbreviation or "").strip()
+        if not identifier and not (a.result or "").strip():
+            continue
+        await db.execute(
+            """INSERT INTO coa_analyte_results
+                (sample_accession, panel_name, panel_identifier,
+                 analyte_abbreviation, analyte_identifier,
+                 concentration, conc_unit, result, result_unit,
+                 analyte_remark, panel_remark)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(sample_accession, analyte_identifier, panel_name) DO UPDATE SET
+                 analyte_abbreviation=excluded.analyte_abbreviation,
+                 concentration=excluded.concentration,
+                 conc_unit=excluded.conc_unit,
+                 result=excluded.result,
+                 result_unit=excluded.result_unit,
+                 analyte_remark=excluded.analyte_remark,
+                 panel_remark=excluded.panel_remark""",
+            (
+                accession, a.panel_name or "Results", "",
+                a.analyte_abbreviation, identifier,
+                a.concentration or 0, a.conc_unit, a.result, a.result_unit,
+                a.analyte_remark, a.panel_remark,
+            ),
+        )
+        count += 1
+    return count
+
+
+async def _require_manual(db, accession: str) -> None:
+    """404 if the accession is missing, 403 if it belongs to an ACS sync."""
+    cursor = await db.execute(
+        "SELECT source FROM coa_results WHERE sample_accession = ?", (accession,)
+    )
+    row = await cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="COA not found")
+    if (row["source"] or "ACS") != "manual":
+        raise HTTPException(status_code=403, detail="Only manually-added COAs can be edited")
+
+
+@router.post("/manual")
+async def create_manual_coa(req: ManualCoaRequest, db=Depends(get_db)):
+    """Add a COA from a non-ACS lab. Stored with source='manual' so the ACS
+    sync never overwrites it."""
+    if not (req.product_name.strip() or req.description.strip()):
+        raise HTTPException(status_code=400, detail="Product name or description is required")
+
+    accession = "MANUAL-" + uuid.uuid4().hex[:12].upper()
+    await db.execute(
+        """INSERT INTO coa_results
+            (sample_accession, order_number, batch_no, business_name,
+             product_name, product_type, consumption_type, description,
+             test_purpose, sample_status, order_date, test_start_date,
+             coa_approved_date, postal_code, extracted_from,
+             coa_approved_filepath, source, synced_at)
+           VALUES (?, '', ?, ?, ?, ?, '', ?, ?, ?, '', '', ?, '', '', ?, 'manual', CURRENT_TIMESTAMP)""",
+        (
+            accession, req.batch_no, req.business_name, req.product_name,
+            req.product_type, req.description, req.test_purpose,
+            req.sample_status, req.coa_approved_date, req.coa_url,
+        ),
+    )
+    await _replace_manual_analytes(db, accession, req.analytes)
+    for sku in req.skus:
+        if sku.strip():
+            await db.execute(
+                "INSERT OR IGNORE INTO coa_sku_links (sku, sample_accession) VALUES (?, ?)",
+                (sku.strip(), accession),
+            )
+    await db.commit()
+    invalidate_product_cache()
+    return {"created": True, "sample_accession": accession}
+
+
+@router.put("/manual/{accession}")
+async def update_manual_coa(accession: str, req: ManualCoaRequest, db=Depends(get_db)):
+    """Update a manually-added COA. ACS-synced COAs cannot be edited."""
+    await _require_manual(db, accession)
+    if not (req.product_name.strip() or req.description.strip()):
+        raise HTTPException(status_code=400, detail="Product name or description is required")
+
+    await db.execute(
+        """UPDATE coa_results SET
+             batch_no=?, business_name=?, product_name=?, product_type=?,
+             description=?, test_purpose=?, sample_status=?,
+             coa_approved_date=?, coa_approved_filepath=?,
+             synced_at=CURRENT_TIMESTAMP
+           WHERE sample_accession=?""",
+        (
+            req.batch_no, req.business_name, req.product_name, req.product_type,
+            req.description, req.test_purpose, req.sample_status,
+            req.coa_approved_date, req.coa_url, accession,
+        ),
+    )
+    await _replace_manual_analytes(db, accession, req.analytes)
+    await db.commit()
+    invalidate_product_cache()
+    return {"updated": True, "sample_accession": accession}
+
+
+@router.delete("/manual/{accession}")
+async def delete_manual_coa(accession: str, db=Depends(get_db)):
+    """Delete a manually-added COA and its analytes/links."""
+    await _require_manual(db, accession)
+    await db.execute("DELETE FROM coa_analyte_results WHERE sample_accession = ?", (accession,))
+    await db.execute("DELETE FROM coa_sku_links WHERE sample_accession = ?", (accession,))
+    await db.execute("DELETE FROM coa_results WHERE sample_accession = ?", (accession,))
+    await db.commit()
+    invalidate_product_cache()
+    return {"deleted": True}
 
 
 # ── ACS Lab connection status ─────────────────────────────────────

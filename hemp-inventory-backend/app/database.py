@@ -828,6 +828,18 @@ async def init_db():
         except Exception:
             pass
 
+        # Migration: track the lab source so manually-added (non-ACS) COAs are
+        # not wiped by the ACS clear-and-replace sync. Existing rows default to
+        # 'ACS'; manual entries use 'manual'.
+        try:
+            await db.execute("ALTER TABLE coa_results ADD COLUMN source TEXT DEFAULT 'ACS'")
+        except Exception:
+            pass
+        try:
+            await db.execute("UPDATE coa_results SET source = 'ACS' WHERE source IS NULL OR source = ''")
+        except Exception:
+            pass
+
         # Individual analyte results linked to COA samples
         await db.execute("""
             CREATE TABLE IF NOT EXISTS coa_analyte_results (

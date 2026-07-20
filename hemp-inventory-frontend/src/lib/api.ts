@@ -710,6 +710,42 @@ export const linkSkuToCoa = (sku: string, sampleAccession: string) =>
 export const unlinkSkuFromCoa = (sku: string, sampleAccession: string) =>
   api.delete("/api/coa/link", { params: { sku, sample_accession: sampleAccession } });
 
+// Manual (non-ACS) COAs
+export interface ManualCoaAnalyte {
+  panel_name?: string;
+  analyte_identifier?: string;
+  analyte_abbreviation?: string;
+  result?: string;
+  result_unit?: string;
+  concentration?: number;
+  conc_unit?: string;
+  analyte_remark?: string;
+  panel_remark?: string;
+}
+
+export interface ManualCoaPayload {
+  product_name?: string;
+  description?: string;
+  batch_no?: string;
+  business_name?: string;
+  product_type?: string;
+  test_purpose?: string;
+  sample_status?: string;
+  coa_approved_date?: string;
+  coa_url?: string;
+  analytes?: ManualCoaAnalyte[];
+  skus?: string[];
+}
+
+export const createManualCoa = (payload: ManualCoaPayload) =>
+  api.post("/api/coa/manual", payload);
+
+export const updateManualCoa = (accession: string, payload: ManualCoaPayload) =>
+  api.put(`/api/coa/manual/${encodeURIComponent(accession)}`, payload);
+
+export const deleteManualCoa = (accession: string) =>
+  api.delete(`/api/coa/manual/${encodeURIComponent(accession)}`);
+
 // Ecommerce products (public, HQ catalog)
 export const getEcommerceProducts = () => api.get("/api/ecommerce/products");
 
