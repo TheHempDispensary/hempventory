@@ -510,6 +510,9 @@ async def _fetch_and_cache_products() -> dict:
             slug = name.lower()
             slug = slug.replace("/", "-").replace('"', "").replace("(", "").replace(")", "").replace("$", "").replace("'", "").replace("&", "-and-")
             slug = slug.replace(" ", "-").replace(",", "").replace(".", "")
+            # Strip any remaining URL/filename-unsafe characters (e.g. # ? % :) so
+            # slugs work as routes and as static file paths on the CDN.
+            slug = re.sub(r"[^a-z0-9-]", "-", slug)
             slug = re.sub(r"-+", "-", slug).strip("-")
             slug = "-".join(slug.split())
 
