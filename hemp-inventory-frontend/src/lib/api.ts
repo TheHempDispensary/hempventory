@@ -584,6 +584,7 @@ export const createPromo = (data: {
   product_ids?: string;
   exclude_from_other_coupons?: boolean;
   sync_to_clover?: boolean;
+  in_store_only?: boolean;
   is_direct_discount?: boolean;
   excluded_brands?: string;
 }) => api.post("/api/ecommerce/promos", data);
@@ -600,6 +601,7 @@ export const updatePromo = (promoId: number, data: {
   product_ids?: string;
   exclude_from_other_coupons?: boolean;
   sync_to_clover?: boolean;
+  in_store_only?: boolean;
   excluded_brands?: string;
 }) => api.put(`/api/ecommerce/promos/${promoId}`, data);
 
