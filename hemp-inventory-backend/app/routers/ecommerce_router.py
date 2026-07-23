@@ -927,6 +927,7 @@ async def validate_promo(
     sale_cursor = await db.execute(
         """SELECT discount_pct FROM promo_codes
            WHERE is_direct_discount = 1 AND is_active = 1
+             AND (in_store_only = 0 OR in_store_only IS NULL)
              AND starts_at IS NOT NULL AND starts_at != ''
              AND expires_at IS NOT NULL AND expires_at != ''
              AND (CASE WHEN LENGTH(starts_at) <= 10 THEN starts_at || 'T00:00' ELSE starts_at END) <= ?
@@ -944,6 +945,10 @@ async def validate_promo(
     promo = await cursor.fetchone()
     if not promo:
         return {"valid": False, "reason": "Invalid promo code"}
+
+    # In-store-only discounts can never be redeemed on the online store
+    if "in_store_only" in promo.keys() and promo["in_store_only"]:
+        return {"valid": False, "reason": "This discount is only available in store"}
 
     # Check expiration (dates are stored in Eastern time)
     now_et = datetime.now(eastern).strftime("%Y-%m-%dT%H:%M")
@@ -1040,6 +1045,7 @@ async def active_sale(db: aiosqlite.Connection = Depends(get_db)):
            FROM promo_codes
            WHERE is_direct_discount = 1
              AND is_active = 1
+             AND (in_store_only = 0 OR in_store_only IS NULL)
              AND starts_at IS NOT NULL AND starts_at != ''
              AND expires_at IS NOT NULL AND expires_at != ''
              AND (CASE WHEN LENGTH(starts_at) <= 10 THEN starts_at || 'T00:00' ELSE starts_at END) <= ?
@@ -1097,6 +1103,7 @@ async def list_promos(db: aiosqlite.Connection = Depends(get_db)):
             "exclude_from_other_coupons": bool(row["exclude_from_other_coupons"]) if "exclude_from_other_coupons" in row.keys() else False,
             "clover_discount_id": row["clover_discount_id"] if "clover_discount_id" in row.keys() else "",
             "is_direct_discount": bool(row["is_direct_discount"]) if "is_direct_discount" in row.keys() else False,
+            "in_store_only": bool(row["in_store_only"]) if "in_store_only" in row.keys() else False,
             "excluded_brands": row["excluded_brands"] if "excluded_brands" in row.keys() else "",
             "sync_to_clover": bool(row["sync_to_clover"]) if "sync_to_clover" in row.keys() else False,
             "created_at": row["created_at"] or "",
@@ -1118,6 +1125,7 @@ class PromoCreateRequest(BaseModel):
     exclude_from_other_coupons: bool = False
     sync_to_clover: bool = True
     excluded_brands: str = ""  # comma-separated brand/category names to exclude
+    in_store_only: bool = False  # True = sync to Clover POS only, never apply on the online store
 
 
 async def _get_hq_clover_client(db: aiosqlite.Connection) -> Optional[CloverClient]:
@@ -1356,11 +1364,11 @@ async def create_promo(body: PromoCreateRequest, db: aiosqlite.Connection = Depe
     try:
         cursor = await db.execute(
             """INSERT INTO promo_codes (code, discount_pct, discount_amount, single_use, max_uses,
-               expires_at, starts_at, applies_to, product_ids, exclude_from_other_coupons, clover_discount_id, is_direct_discount, excluded_brands, sync_to_clover)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               expires_at, starts_at, applies_to, product_ids, exclude_from_other_coupons, clover_discount_id, is_direct_discount, excluded_brands, sync_to_clover, in_store_only)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (code, body.discount_pct, body.discount_amount, int(body.single_use), body.max_uses,
              body.expires_at, body.starts_at, body.applies_to, body.product_ids,
-             int(body.exclude_from_other_coupons), clover_discount_id, int(body.is_direct_discount), body.excluded_brands, int(body.sync_to_clover)),
+             int(body.exclude_from_other_coupons), clover_discount_id, int(body.is_direct_discount), body.excluded_brands, int(body.sync_to_clover), int(body.in_store_only)),
         )
         await db.commit()
         promo_id = cursor.lastrowid
@@ -1425,6 +1433,7 @@ class PromoUpdateRequest(BaseModel):
     exclude_from_other_coupons: Optional[bool] = None
     sync_to_clover: Optional[bool] = None
     excluded_brands: Optional[str] = None
+    in_store_only: Optional[bool] = None
 
 
 @router.put("/promos/{promo_id}")
@@ -1468,6 +1477,9 @@ async def update_promo(promo_id: int, body: PromoUpdateRequest, db: aiosqlite.Co
     if body.sync_to_clover is not None:
         updates.append("sync_to_clover = ?")
         params.append(int(body.sync_to_clover))
+    if body.in_store_only is not None:
+        updates.append("in_store_only = ?")
+        params.append(int(body.in_store_only))
     if not updates:
         return {"status": "no changes"}
     if updates:
@@ -2261,6 +2273,7 @@ async def create_order(
         _sc = await db.execute(
             """SELECT discount_pct, applies_to, product_ids, excluded_brands FROM promo_codes
                WHERE is_direct_discount = 1 AND is_active = 1
+               AND (in_store_only = 0 OR in_store_only IS NULL)
                AND starts_at IS NOT NULL AND starts_at != ''
                AND expires_at IS NOT NULL AND expires_at != ''
                AND (CASE WHEN LENGTH(starts_at) <= 10 THEN starts_at || 'T00:00' ELSE starts_at END) <= ?

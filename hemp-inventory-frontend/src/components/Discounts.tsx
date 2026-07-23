@@ -21,6 +21,7 @@ interface PromoCode {
   is_direct_discount: boolean;
   excluded_brands: string;
   sync_to_clover: boolean;
+  in_store_only: boolean;
   created_at: string;
 }
 
@@ -125,6 +126,7 @@ export default function Discounts() {
   const [newProductIds, setNewProductIds] = useState<string[]>([]);
   const [newExcludeOtherCoupons, setNewExcludeOtherCoupons] = useState(false);
   const [newSyncToClover, setNewSyncToClover] = useState(true);
+  const [newInStoreOnly, setNewInStoreOnly] = useState(false);
   const [newExcludedBrands, setNewExcludedBrands] = useState<string[]>([]);
   const [brands, setBrands] = useState<string[]>([]);
   const [brandSearch, setBrandSearch] = useState("");
@@ -145,6 +147,7 @@ export default function Discounts() {
   const [editProductIds, setEditProductIds] = useState<string[]>([]);
   const [editExcludeOtherCoupons, setEditExcludeOtherCoupons] = useState(false);
   const [editSyncToClover, setEditSyncToClover] = useState(false);
+  const [editInStoreOnly, setEditInStoreOnly] = useState(false);
   const [editExcludedBrands, setEditExcludedBrands] = useState<string[]>([]);
 
   const loadPromos = async () => {
@@ -184,7 +187,7 @@ export default function Discounts() {
   const resetCreateForm = () => {
     setNewIsDirectDiscount(false); setNewCode(""); setNewDiscountValue(""); setNewSingleUse(false); setNewMaxUses("");
     setNewExpiresAt(""); setNewStartsAt(""); setNewAppliesTo("all"); setNewProductIds([]);
-    setNewExcludeOtherCoupons(false); setNewSyncToClover(true); setNewExcludedBrands([]); setBrandSearch("");
+    setNewExcludeOtherCoupons(false); setNewSyncToClover(true); setNewInStoreOnly(false); setNewExcludedBrands([]); setBrandSearch("");
   };
 
   const resetVdForm = () => {
@@ -356,6 +359,7 @@ export default function Discounts() {
         product_ids: newProductIds.join(","),
         exclude_from_other_coupons: newExcludeOtherCoupons,
         sync_to_clover: newSyncToClover,
+        in_store_only: newInStoreOnly,
         excluded_brands: newExcludedBrands.join(","),
       });
       const label = newIsDirectDiscount ? (newCode.trim() ? "Direct discount \"" + newCode.trim() + "\"" : "Direct discount") : "Promo code \"" + newCode.trim().toUpperCase() + "\"";
@@ -384,6 +388,7 @@ export default function Discounts() {
     setEditProductIds(promo.product_ids ? promo.product_ids.split(",").filter(Boolean) : []);
     setEditExcludeOtherCoupons(promo.exclude_from_other_coupons);
     setEditSyncToClover(!!promo.sync_to_clover || !!promo.clover_discount_id);
+    setEditInStoreOnly(!!promo.in_store_only);
     setEditExcludedBrands(promo.excluded_brands ? promo.excluded_brands.split(",").filter(Boolean) : []);
   };
 
@@ -403,6 +408,7 @@ export default function Discounts() {
         product_ids: editProductIds.join(","),
         exclude_from_other_coupons: editExcludeOtherCoupons,
         sync_to_clover: editSyncToClover,
+        in_store_only: editInStoreOnly,
         excluded_brands: editExcludedBrands.join(","),
       });
       setEditingId(null); setSuccess("Discount updated!");
@@ -859,6 +865,12 @@ export default function Discounts() {
                 <Cloud className="w-4 h-4 text-blue-500" />
                 <span className="text-sm text-gray-700">Sync to Clover POS</span>
               </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" checked={newInStoreOnly} onChange={(e) => setNewInStoreOnly(e.target.checked)}
+                  className="w-4 h-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500" />
+                <MapPin className="w-4 h-4 text-indigo-500" />
+                <span className="text-sm text-gray-700">In-store only (never applies on the online store)</span>
+              </label>
             </div>
           </div>
           <div className="mt-4 flex gap-2">
@@ -945,6 +957,11 @@ export default function Discounts() {
                           className="w-4 h-4 rounded border-gray-300 text-blue-600" />
                         <Cloud className="w-3.5 h-3.5 text-blue-500" /><span className="text-sm text-gray-700">Sync to Clover</span>
                       </label>
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input type="checkbox" checked={editInStoreOnly} onChange={(e) => setEditInStoreOnly(e.target.checked)}
+                          className="w-4 h-4 rounded border-gray-300 text-indigo-600" />
+                        <MapPin className="w-3.5 h-3.5 text-indigo-500" /><span className="text-sm text-gray-700">In-store only</span>
+                      </label>
                     </div>
                   </div>
                   <div className="mt-3">
@@ -1005,6 +1022,11 @@ export default function Discounts() {
                             <ToggleLeft className="w-3.5 h-3.5" /> Inactive</span>
                         )}
                       </button>
+                      {promo.in_store_only && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800"
+                          title="Syncs to Clover POS only — never applies on the online store">
+                          <MapPin className="w-3.5 h-3.5" /> In-store only</span>
+                      )}
                     </div>
                     <div className="flex items-center gap-1">
                       <button onClick={() => startEdit(promo)} className="p-1.5 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors" title="Edit">
