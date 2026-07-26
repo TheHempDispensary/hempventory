@@ -6,8 +6,10 @@ import time
 import json
 import asyncio
 from typing import Optional
+from urllib.parse import urlparse, unquote
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import aiosqlite
 import anthropic
@@ -18,12 +20,103 @@ from app.auth import get_current_user
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-MODEL = os.environ.get("CLAUDE_MODEL", "claude-opus-4-8")
+
+# ── Model configuration ──────────────────────────────────────────────────
+# Known-good Claude model identifiers supported by the pinned anthropic SDK.
+# Used to warn on an unrecognized CLAUDE_MODEL and to pick a safe default.
+_KNOWN_MODELS = {
+    "claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5",
+    "claude-opus-4-5", "claude-sonnet-4-5", "claude-opus-4-1",
+    "claude-opus-4-0", "claude-sonnet-4-0", "claude-3-haiku-20240307",
+}
+# Fast + capable + cost-effective default for customer-facing chat.
+_DEFAULT_MODEL = "claude-sonnet-4-5"
+# Cheaper/faster model tried automatically if the primary model call fails
+# (e.g. a misconfigured/retired CLAUDE_MODEL) so Bud degrades instead of erroring.
+_FALLBACK_MODEL = "claude-haiku-4-5"
+
+
+def _resolve_model() -> str:
+    """Pick the chat model from CLAUDE_MODEL, defaulting safely.
+
+    We trust an explicitly-configured value (ops may set a newer id than this
+    SDK knows about) but log a note when it isn't recognized. If unset, use a
+    fast, cost-effective default instead of a possibly-invalid hardcoded name.
+    """
+    configured = os.environ.get("CLAUDE_MODEL", "").strip()
+    if not configured:
+        return _DEFAULT_MODEL
+    known = configured in _KNOWN_MODELS or any(
+        configured.startswith(m + "-") for m in _KNOWN_MODELS
+    )
+    if not known:
+        print(
+            f"[chat] NOTE: CLAUDE_MODEL='{configured}' isn't in the known model list; "
+            f"using it anyway (will fall back to '{_FALLBACK_MODEL}' if the call fails)."
+        )
+    return configured
+
+
+MODEL = _resolve_model()
 
 # ── Inventory context cache (reuses ecommerce product cache) ─────────────
 _inventory_context: str = ""
 _inventory_context_ts: float = 0.0
 INVENTORY_CACHE_TTL = 300  # 5 minutes — keeps Bud's stock data fresh
+
+# ── Recommendation context cache (bestsellers + active online sale) ──────
+_recommendation_context: str = ""
+_recommendation_context_ts: float = 0.0
+RECOMMENDATION_CACHE_TTL = 1800  # 30 minutes
+
+# Cap the conversation history sent to the model to bound cost/latency.
+MAX_HISTORY_MESSAGES = 16
+
+# ── Rate limiting (per client IP + session) ──────────────────────────────
+_RATE_LIMIT_PER_MIN = 15
+_RATE_LIMIT_PER_HOUR = 120
+_rate_buckets: dict[str, list[float]] = {}
+
+
+def _client_key(request: Optional[Request], session_id: str) -> str:
+    """Best-effort client identity for rate limiting: real IP + session id.
+
+    Behind Fly.io the real client IP is in Fly-Client-IP / X-Forwarded-For;
+    fall back to the socket peer. Session id is client-provided so it can't be
+    trusted alone — combining with IP keeps a single abuser from rotating ids.
+    """
+    ip = ""
+    if request is not None:
+        ip = (
+            request.headers.get("fly-client-ip")
+            or (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+            or (request.client.host if request.client else "")
+        )
+    return f"{ip}|{session_id}"
+
+
+def _check_rate_limit(request: Optional[Request], session_id: str) -> None:
+    """Sliding-window limiter. Raises HTTP 429 when a client exceeds the cap.
+
+    In-memory only: limits are per-process, so with multiple workers the
+    effective ceiling scales with worker count. Fly runs this app as a single
+    process, so it holds; document/tighten if that changes.
+    """
+    key = _client_key(request, session_id)
+    now = time.time()
+    times = [t for t in _rate_buckets.get(key, []) if now - t < 3600]
+    last_min = sum(1 for t in times if now - t < 60)
+    if last_min >= _RATE_LIMIT_PER_MIN or len(times) >= _RATE_LIMIT_PER_HOUR:
+        raise HTTPException(
+            status_code=429,
+            detail="You're sending messages a little too fast — give me a sec and try again!",
+        )
+    times.append(now)
+    _rate_buckets[key] = times
+    # Opportunistically prune empty/stale buckets so the dict can't grow forever.
+    if len(_rate_buckets) > 5000:
+        for k in [k for k, v in _rate_buckets.items() if not v or now - v[-1] > 3600]:
+            _rate_buckets.pop(k, None)
 
 
 SITE_BASE = "https://www.thehempdispensary.com"
@@ -76,6 +169,196 @@ async def _get_inventory_context() -> str:
     except Exception as e:
         print(f"[chat] Failed to build inventory context: {e}")
         return _inventory_context or "(Inventory temporarily unavailable)"
+
+
+# ── Page awareness ───────────────────────────────────────────────────────
+
+_CANNABINOID_PAGE_LABELS = {
+    "delta-8": "Delta-8 THC",
+    "delta-9": "Delta-9 THC",
+    "cbd": "CBD",
+    "cbg": "CBG",
+    "cbn": "CBN",
+}
+
+
+def _format_product_page_context(p: dict) -> str:
+    """Concise CURRENT PAGE block for a specific product the customer is viewing."""
+    name = p.get("online_name") or p.get("name") or "this product"
+    price = f"${p['price'] / 100:.2f}" if p.get("price") else "Price TBD"
+    cats = p.get("categories") or []
+    cat = cats[0] if cats else "Other"
+    slug = p.get("slug", "")
+    url = f"{SITE_BASE}/products/product/{slug}" if slug else ""
+    if p.get("shipping_only"):
+        stock_note = "Ships from partner (1-3 days); NOT available for pickup or local delivery"
+    else:
+        stock_note = (
+            f"West: {p.get('stock_west', 0)}, East: {p.get('stock_east', 0)}, "
+            f"HQ/Warehouse: {p.get('stock_hq', 0)}"
+        )
+    lines = [
+        "CURRENT PAGE — the customer is viewing THIS product right now. "
+        "Prioritize answering about it and respect its fulfillment-specific stock:",
+        f"- Name: {name}",
+        f"- Price: {price}",
+        f"- Category: {cat}",
+        f"- Stock — {stock_note}",
+    ]
+    if url:
+        lines.append(f"- Link: {url}")
+    return "\n".join(lines)
+
+
+def _get_page_context(page_url: str, products: list[dict]) -> str:
+    """Turn the customer's current page URL into a concise context block.
+
+    Product pages match a live product by slug; cannabinoid/category pages get
+    a light label. Never fabricates product facts for unmatched URLs.
+    """
+    if not page_url:
+        return ""
+    try:
+        path = (urlparse(page_url).path or "").rstrip("/")
+    except Exception:
+        return ""
+    if not path:
+        return ""
+
+    m = re.search(r"/products/product/([^/]+)$", path)
+    if m:
+        slug = unquote(m.group(1)).lower()
+        for p in products:
+            if (p.get("slug") or "").lower() == slug:
+                return _format_product_page_context(p)
+        return (
+            "CURRENT PAGE: The customer is on a product page, but it doesn't match "
+            "current inventory. Ask what they're looking for rather than guessing."
+        )
+
+    m = re.search(r"/cannabinoids?/([a-z0-9-]+)$", path)
+    if m and m.group(1) in _CANNABINOID_PAGE_LABELS:
+        return (
+            f"CURRENT PAGE: The customer is browsing the {_CANNABINOID_PAGE_LABELS[m.group(1)]} "
+            "category. Tailor suggestions to that cannabinoid when relevant."
+        )
+
+    if path.endswith("/thca"):
+        return "CURRENT PAGE: The customer is browsing THCA flower products."
+    if path.endswith("/cart"):
+        return "CURRENT PAGE: The customer is viewing their cart."
+    if "/checkout" in path:
+        return "CURRENT PAGE: The customer is on checkout — they're close to buying; be helpful and concise."
+    if path.endswith("/products") or path.startswith("/products"):
+        return "CURRENT PAGE: The customer is browsing the shop."
+    return ""
+
+
+# ── Smarter recommendations (bestsellers + active online sale) ───────────
+
+async def _get_bestsellers(db: aiosqlite.Connection, limit: int = 12) -> list[str]:
+    """Top-selling product names. Reuses the Smart PAR sales cache when fresh,
+    otherwise falls back to a single cheap query over online orders."""
+    try:
+        from app.routers.inventory_router import _smart_par_cache, _SMART_PAR_TTL
+        data = _smart_par_cache.get("data")
+        if data and (time.time() - _smart_par_cache.get("updated_at", 0)) < _SMART_PAR_TTL:
+            sales = data.get("sales_by_product", {})
+            ranked = sorted(sales.items(), key=lambda kv: kv[1], reverse=True)
+            names = [name.title() for name, qty in ranked if qty > 0][:limit]
+            if names:
+                return names
+    except Exception as e:
+        print(f"[chat] bestseller (smart par cache) lookup failed: {e}")
+
+    try:
+        cursor = await db.execute(
+            """SELECT oi.product_name, SUM(oi.quantity) AS q
+               FROM ecommerce_order_items oi
+               JOIN ecommerce_orders eo ON oi.order_id = eo.id
+               WHERE eo.status NOT IN ('cancelled', 'refunded')
+                 AND oi.product_name IS NOT NULL AND oi.product_name != ''
+               GROUP BY oi.product_name
+               ORDER BY q DESC
+               LIMIT ?""",
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        return [row[0] for row in rows if row[0]]
+    except Exception as e:
+        print(f"[chat] bestseller (orders) lookup failed: {e}")
+        return []
+
+
+async def _get_active_online_sale(db: aiosqlite.Connection) -> str:
+    """Return a note describing the active online Direct Discount, or ''.
+
+    Excludes in-store-only discounts so Bud never advertises them online."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    now_eastern = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%dT%H:%M")
+    try:
+        cursor = await db.execute(
+            """SELECT discount_pct, excluded_brands, expires_at, applies_to
+               FROM promo_codes
+               WHERE is_direct_discount = 1
+                 AND is_active = 1
+                 AND (in_store_only = 0 OR in_store_only IS NULL)
+                 AND starts_at IS NOT NULL AND starts_at != ''
+                 AND expires_at IS NOT NULL AND expires_at != ''
+                 AND (CASE WHEN LENGTH(starts_at) <= 10 THEN starts_at || 'T00:00' ELSE starts_at END) <= ?
+                 AND (CASE WHEN LENGTH(expires_at) <= 10 THEN expires_at || 'T23:59' ELSE expires_at END) >= ?
+               ORDER BY discount_pct DESC
+               LIMIT 1""",
+            (now_eastern, now_eastern),
+        )
+        row = await cursor.fetchone()
+    except Exception as e:
+        print(f"[chat] active sale lookup failed: {e}")
+        return ""
+    if not row:
+        return ""
+    pct = round(row[0] * 100)
+    applies_to = row[3] if row[3] else "all"
+    excluded = [b.strip() for b in (row[1] or "").split(",") if b.strip()]
+    if applies_to == "specific":
+        scope = "select products"
+    elif excluded:
+        scope = f"sitewide (excluding {', '.join(excluded)})"
+    else:
+        scope = "sitewide"
+    end = row[2]
+    return (
+        f"ACTIVE ONLINE SALE: {pct}% off {scope} right now (through {end}). "
+        "This automatic online discount applies at checkout with no code needed — "
+        "mention it when relevant. Never mention in-store-only discounts to online customers."
+    )
+
+
+async def _get_recommendation_context(db: aiosqlite.Connection) -> str:
+    """Cached, concise bestseller + active-sale block for the system prompt."""
+    global _recommendation_context, _recommendation_context_ts
+    now = time.time()
+    if _recommendation_context and (now - _recommendation_context_ts) < RECOMMENDATION_CACHE_TTL:
+        return _recommendation_context
+
+    parts: list[str] = []
+    bestsellers = await _get_bestsellers(db)
+    if bestsellers:
+        parts.append(
+            "TOP SELLERS (our most popular items — lean on these when a customer asks "
+            "for popular/recommended picks, but only recommend ones in stock for their "
+            "chosen fulfillment):\n"
+            + "\n".join(f"- {n}" for n in bestsellers)
+        )
+    sale = await _get_active_online_sale(db)
+    if sale:
+        parts.append(sale)
+
+    _recommendation_context = "\n\n".join(parts)
+    _recommendation_context_ts = now
+    return _recommendation_context
 
 
 ORDER_NUMBER_PATTERN = re.compile(r"\bHD-[0-9A-Fa-f]+-\d+\b")
@@ -298,6 +581,8 @@ When a customer says a product shows out of stock:
 
 CURRENT INVENTORY:
 {INVENTORY_CONTEXT}
+{RECOMMENDATIONS}
+{PAGE_CONTEXT}
 
 IDENTITY RULES:
 - You are "Bud" — a Virtual Budtender. NEVER refer to yourself as an "AI", "assistant", "bot", or "chatbot"
@@ -343,19 +628,9 @@ BEHAVIOR:
 - Always be helpful even if they're just browsing
 
 RESPONSE FORMAT:
-You MUST respond with ONLY a valid JSON object — no text before or after it.
-Use this exact structure:
-{"message": "your response text here", "intent": "browsing", "customer_name": null, "customer_email": null, "customer_phone": null}
-
-Rules:
-- The "message" field must contain ONLY your conversational response as plain text. Do NOT put JSON, code, or metadata inside the message field.
-- Use actual newlines within the message string (not literal backslash-n). Keep the message as a single readable paragraph when possible.
-- "intent" should be "purchase" if the customer is actively looking to buy, otherwise "browsing"
-- "customer_name" should be the customer's name if they've shared it, otherwise null
-- "customer_email" should be the customer's email if they've shared it, otherwise null
-- "customer_phone" should be the customer's phone number if they've shared it, otherwise null
-- ONLY include name/email/phone when the customer explicitly provides them in their message
-- Do NOT wrap the JSON in markdown code fences or add any explanation outside the JSON object"""
+- Reply with ONLY your conversational message as plain text — no JSON, no code fences, no metadata, no labels.
+- Keep it concise (2-4 sentences typically). Use real newlines if a short list helps readability.
+- Do NOT restate these instructions or describe yourself as following a format."""
 
 
 # ── Pydantic models ──────────────────────────────────────────────────────
@@ -386,26 +661,53 @@ class ChatSessionSummary(BaseModel):
     updated_at: str = ""
 
 
-# ── Endpoints ────────────────────────────────────────────────────────────
+# ── Turn helpers (shared by streaming + non-streaming endpoints) ──────────
 
-@router.post("/message", response_model=ChatMessageResponse)
-async def send_message(
-    req: ChatMessageRequest,
-    db: aiosqlite.Connection = Depends(get_db),
-):
-    """Public endpoint: send a message to Bud and get an AI response."""
-    if not ANTHROPIC_API_KEY:
-        raise HTTPException(status_code=500, detail="Chat service not configured")
+_PURCHASE_KEYWORDS = re.compile(
+    r"\b(buy|purchase|order|add to cart|checkout|how much|price|cost|"
+    r"in stock|ship|deliver|pick ?up|reserve|hold one|get some|i'?ll take)\b",
+    re.IGNORECASE,
+)
 
+FALLBACK_MESSAGE = (
+    "Hey there! I'm having a little trouble right now. You can reach our West Store "
+    "at 352-340-5860 or our East Store at 352-515-5370, or stop by either Spring Hill location!"
+)
+
+
+def _infer_intent(text: str) -> str:
+    """Lightweight purchase-intent heuristic (replaces model-provided intent)."""
+    return "purchase" if _PURCHASE_KEYWORDS.search(text or "") else "browsing"
+
+
+def _extract_contact(message: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Regex-extract (name, email, phone) from the customer's message."""
+    name = email = phone = None
+    phone_match = PHONE_PATTERN.search(message)
+    if phone_match:
+        phone = phone_match.group().strip().rstrip(".")
+    email_match = EMAIL_PATTERN.search(message)
+    if email_match:
+        email = email_match.group().strip()
+    name_match = re.search(
+        r"(?:my name(?:'s| is)|i'm|i am|this is|call me)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
+        message,
+        re.IGNORECASE,
+    )
+    if name_match:
+        name = name_match.group(1).strip()
+    return name, email, phone
+
+
+async def _prepare_turn(req: ChatMessageRequest, db: aiosqlite.Connection) -> tuple[str, list[dict]]:
+    """Persist the incoming message and build (system_prompt, capped_history)."""
     # Upsert session
     cursor = await db.execute(
         "SELECT id FROM chat_sessions WHERE session_id = ?", (req.session_id,)
     )
-    session_row = await cursor.fetchone()
-    if not session_row:
+    if not await cursor.fetchone():
         await db.execute(
-            """INSERT INTO chat_sessions (session_id, page_url, device_type)
-               VALUES (?, ?, ?)""",
+            "INSERT INTO chat_sessions (session_id, page_url, device_type) VALUES (?, ?, ?)",
             (req.session_id, req.page_url, req.device_type),
         )
         await db.commit()
@@ -417,39 +719,54 @@ async def send_message(
     )
     await db.commit()
 
-    # Fetch conversation history for context
+    # Fetch conversation history, capped to the most recent turns to bound cost.
     cursor = await db.execute(
         "SELECT role, content FROM chat_messages WHERE session_id = ? ORDER BY created_at ASC",
         (req.session_id,),
     )
     history_rows = await cursor.fetchall()
     messages = [{"role": row[0], "content": row[1]} for row in history_rows]
+    messages = messages[-MAX_HISTORY_MESSAGES:]
+    # Anthropic requires the first message to be from the user.
+    while messages and messages[0]["role"] != "user":
+        messages.pop(0)
 
-    # Build system prompt with live inventory
+    # Base system prompt: inventory + recommendations + page awareness.
     inventory_context = await _get_inventory_context()
     system = SYSTEM_PROMPT.replace("{INVENTORY_CONTEXT}", inventory_context)
 
-    # Check conversation for order numbers — look them up and inject context
-    # Scan current message + recent history so follow-up questions still have order data
+    recommendations = await _get_recommendation_context(db)
+    system = system.replace(
+        "{RECOMMENDATIONS}", f"\n{recommendations}" if recommendations else ""
+    )
+
+    page_context = ""
+    if req.page_url:
+        try:
+            from app.routers.ecommerce_router import _get_cached_products
+            products = (await _get_cached_products()).get("products", [])
+            page_context = _get_page_context(req.page_url, products)
+        except Exception as e:
+            print(f"[chat] page context failed: {e}")
+    system = system.replace(
+        "{PAGE_CONTEXT}", f"\n{page_context}" if page_context else ""
+    )
+
+    # Order-status lookups from current message + recent history.
     all_user_text = req.message
     for msg in messages[-6:]:
         if msg["role"] == "user":
             all_user_text += " " + msg["content"]
     order_matches = list(dict.fromkeys(ORDER_NUMBER_PATTERN.findall(all_user_text)))
     if order_matches:
-        order_contexts = []
-        for on in order_matches[:3]:
-            order_info = await _lookup_order(on.upper(), db)
-            order_contexts.append(order_info)
+        order_contexts = [await _lookup_order(on.upper(), db) for on in order_matches[:3]]
         if order_contexts:
             system += "\n\n" + "\n\n".join(order_contexts)
 
-    # Check for loyalty-related questions — look up points if phone/email available
+    # Loyalty lookups when the customer asks and we have a phone/email.
     if LOYALTY_KEYWORDS.search(all_user_text):
-        # Try to find a phone or email in the conversation to look up
         phones = PHONE_PATTERN.findall(all_user_text)
         emails = EMAIL_PATTERN.findall(all_user_text)
-        # Also check if we already have contact info stored for this session
         if not phones and not emails:
             sess_cursor = await db.execute(
                 "SELECT customer_phone, customer_email FROM chat_sessions WHERE session_id = ?",
@@ -463,135 +780,53 @@ async def send_message(
                     emails = [sess_row[1]]
         identifier = phones[0] if phones else (emails[0] if emails else None)
         if identifier:
-            loyalty_info = await _lookup_loyalty(identifier, db)
-            system += "\n\n" + loyalty_info
+            system += "\n\n" + await _lookup_loyalty(identifier, db)
 
-    # Call Claude
-    try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=1024,
-            system=system,
-            messages=messages,
-        )
-        raw_text = response.content[0].text.strip()
-    except Exception as e:
-        print(f"[chat] Claude API error: {e}")
-        # Fallback response
-        raw_text = json.dumps({
-            "message": "Hey there! I'm having a little trouble right now. You can reach our West Store at 352-340-5860 or our East Store at 352-515-5370, or stop by either Spring Hill location!",
-            "intent": "browsing",
-            "customer_name": None,
-            "customer_email": None,
-        })
+    return system, messages
 
-    # Parse Claude's JSON response
-    assistant_message = raw_text
-    intent = "browsing"
-    customer_name = None
-    customer_email = None
-    customer_phone = None
 
-    # Try to extract JSON from Claude's response (may be wrapped in markdown code fences)
-    json_text = raw_text.strip()
-    if json_text.startswith("```"):
-        lines = json_text.split("\n")
-        lines = [l for l in lines if not l.strip().startswith("```")]
-        json_text = "\n".join(lines).strip()
+async def _call_claude(system: str, messages: list[dict]) -> str:
+    """Non-blocking Claude call with automatic fallback to a cheaper model."""
+    client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+    for model in (MODEL, _FALLBACK_MODEL):
+        try:
+            response = await client.messages.create(
+                model=model, max_tokens=1024, system=system, messages=messages,
+            )
+            return response.content[0].text.strip()
+        except Exception as e:
+            print(f"[chat] Claude API error (model={model}): {e}")
+    return FALLBACK_MESSAGE
 
-    # Attempt 1: direct JSON parse
-    parsed = None
-    try:
-        parsed = json.loads(json_text)
-    except json.JSONDecodeError:
-        pass
 
-    # Attempt 2: find the outermost JSON object using brace matching
-    if parsed is None:
-        start = raw_text.find("{")
-        if start != -1:
-            depth = 0
-            end = start
-            for i in range(start, len(raw_text)):
-                if raw_text[i] == "{":
-                    depth += 1
-                elif raw_text[i] == "}":
-                    depth -= 1
-                    if depth == 0:
-                        end = i + 1
-                        break
-            try:
-                parsed = json.loads(raw_text[start:end])
-            except json.JSONDecodeError:
-                pass
+async def _finalize_turn(
+    req: ChatMessageRequest, db: aiosqlite.Connection, assistant_message: str
+) -> str:
+    """Persist the reply, capture lead metadata, update session, notify on new leads."""
+    intent = _infer_intent(req.message)
+    customer_name, customer_email, customer_phone = _extract_contact(req.message)
 
-    if parsed and isinstance(parsed, dict) and "message" in parsed:
-        assistant_message = parsed["message"]
-        intent = parsed.get("intent", "browsing")
-        customer_name = parsed.get("customer_name")
-        customer_email = parsed.get("customer_email")
-        customer_phone = parsed.get("customer_phone")
-    else:
-        # Claude returned plain text — strip any trailing JSON fragments
-        # Common failure: Claude writes the message as plain text, then appends a JSON object
-        # e.g. "Hello!\n{\"message\": \"Hello!\"..." — strip the JSON suffix
-        json_suffix = re.search(r'\s*\{\s*"message"\s*:', raw_text)
-        if json_suffix:
-            assistant_message = raw_text[:json_suffix.start()].strip()
-        else:
-            assistant_message = re.sub(r'[,"\s]*"(intent|customer_name|customer_email|customer_phone)"\s*:.*$', '', raw_text, flags=re.DOTALL).strip()
+    assistant_message = (assistant_message or "").replace("\\n", "\n").replace("\\t", " ").strip()
+    if not assistant_message:
+        assistant_message = FALLBACK_MESSAGE
 
-    # Fallback: regex-extract phone/email/name from the user's message when
-    # Claude's JSON didn't include them. This catches cases where the model
-    # acknowledges the info in its reply but omits it from the metadata fields.
-    if not customer_phone:
-        phone_match = PHONE_PATTERN.search(req.message)
-        if phone_match:
-            customer_phone = phone_match.group().strip().rstrip(".")
-    if not customer_email:
-        email_match = EMAIL_PATTERN.search(req.message)
-        if email_match:
-            customer_email = email_match.group().strip()
-    if not customer_name:
-        # Look for common name-introduction patterns in the current message
-        name_match = re.search(
-            r"(?:my name(?:'s| is)|i'm|i am|this is|call me)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
-            req.message,
-            re.IGNORECASE,
-        )
-        if name_match:
-            customer_name = name_match.group(1).strip()
-
-    # Clean up literal backslash-n sequences that Claude sometimes embeds
-    assistant_message = assistant_message.replace("\\n", "\n").replace("\\t", " ")
-
-    # Store assistant message
     await db.execute(
         "INSERT INTO chat_messages (session_id, role, content) VALUES (?, 'assistant', ?)",
         (req.session_id, assistant_message),
     )
 
-    # Check existing contact info BEFORE updating (to detect new leads)
-    prev_email = None
-    prev_phone = None
-    prev_name = None
+    # Existing contact info (to detect new leads).
+    prev_name = prev_email = prev_phone = None
     notif_cursor = await db.execute(
         "SELECT customer_name, customer_email, customer_phone FROM chat_sessions WHERE session_id = ?",
         (req.session_id,),
     )
     notif_row = await notif_cursor.fetchone()
     if notif_row:
-        prev_name = notif_row[0]
-        prev_email = notif_row[1]
-        prev_phone = notif_row[2]
+        prev_name, prev_email, prev_phone = notif_row[0], notif_row[1], notif_row[2]
 
-    # Update session metadata
-    updates = ["updated_at = CURRENT_TIMESTAMP"]
-    params: list = []
-    if intent:
-        updates.append("intent = ?")
-        params.append(intent)
+    updates = ["updated_at = CURRENT_TIMESTAMP", "intent = ?"]
+    params: list = [intent]
     if customer_name:
         updates.append("customer_name = ?")
         params.append(customer_name)
@@ -604,58 +839,117 @@ async def send_message(
     if req.page_url:
         updates.append("page_url = ?")
         params.append(req.page_url)
-
     params.append(req.session_id)
     await db.execute(
-        f"UPDATE chat_sessions SET {', '.join(updates)} WHERE session_id = ?",
-        params,
+        f"UPDATE chat_sessions SET {', '.join(updates)} WHERE session_id = ?", params
     )
     await db.commit()
 
-    # Send lead notification if new contact info was captured this turn
+    async def _first_msg() -> str:
+        cur = await db.execute(
+            "SELECT content FROM chat_messages WHERE session_id = ? AND role = 'user' ORDER BY created_at ASC LIMIT 1",
+            (req.session_id,),
+        )
+        row = await cur.fetchone()
+        return row[0] if row else req.message
+
     if customer_email or customer_phone:
         new_contact = (
-            (customer_email and customer_email != prev_email) or
-            (customer_phone and customer_phone != prev_phone)
+            (customer_email and customer_email != prev_email)
+            or (customer_phone and customer_phone != prev_phone)
         )
         if new_contact:
             lead_name = customer_name or prev_name or "Anonymous"
             smtp_settings = await _get_chat_smtp_settings(db)
-            first_msg = req.message
-            # Get the customer's first message for context
-            first_msg_cursor = await db.execute(
-                "SELECT content FROM chat_messages WHERE session_id = ? AND role = 'user' ORDER BY created_at ASC LIMIT 1",
-                (req.session_id,),
-            )
-            first_msg_row = await first_msg_cursor.fetchone()
-            if first_msg_row:
-                first_msg = first_msg_row[0]
             asyncio.create_task(
                 _send_lead_notification(
                     smtp_settings, lead_name, customer_email, customer_phone,
-                    first_msg, req.session_id, intent
+                    await _first_msg(), req.session_id, intent,
                 )
             )
     elif customer_name and intent == "purchase" and not prev_name:
-        # Customer gave their name + shows purchase intent but no contact info yet.
-        # Send a lighter "intent lead" so the team knows someone is interested.
         smtp_settings = await _get_chat_smtp_settings(db)
-        first_msg = req.message
-        first_msg_cursor = await db.execute(
-            "SELECT content FROM chat_messages WHERE session_id = ? AND role = 'user' ORDER BY created_at ASC LIMIT 1",
-            (req.session_id,),
-        )
-        first_msg_row = await first_msg_cursor.fetchone()
-        if first_msg_row:
-            first_msg = first_msg_row[0]
         asyncio.create_task(
             _send_lead_notification(
                 smtp_settings, customer_name, None, None,
-                first_msg, req.session_id, intent
+                await _first_msg(), req.session_id, intent,
             )
         )
 
-    return ChatMessageResponse(message=assistant_message, intent=intent)
+    return assistant_message
+
+
+# ── Endpoints ────────────────────────────────────────────────────────────
+
+@router.post("/message", response_model=ChatMessageResponse)
+async def send_message(
+    req: ChatMessageRequest,
+    request: Request = None,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Public endpoint: send a message to Bud and get an AI response (JSON)."""
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(status_code=500, detail="Chat service not configured")
+    _check_rate_limit(request, req.session_id)
+
+    system, messages = await _prepare_turn(req, db)
+    raw_text = await _call_claude(system, messages)
+    assistant_message = await _finalize_turn(req, db, raw_text)
+    return ChatMessageResponse(message=assistant_message, intent=_infer_intent(req.message))
+
+
+@router.post("/message/stream")
+async def send_message_stream(
+    req: ChatMessageRequest,
+    request: Request = None,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Public endpoint: stream Bud's reply token-by-token as Server-Sent Events.
+
+    Emits `data: {"delta": "..."}` chunks, then a terminal `data: {"done": true}`.
+    On any model error it streams the fallback message so the widget still renders.
+    """
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(status_code=500, detail="Chat service not configured")
+    _check_rate_limit(request, req.session_id)
+
+    system, messages = await _prepare_turn(req, db)
+
+    async def event_stream():
+        collected: list[str] = []
+        client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+        streamed = False
+        for model in (MODEL, _FALLBACK_MODEL):
+            try:
+                async with client.messages.stream(
+                    model=model, max_tokens=1024, system=system, messages=messages,
+                ) as stream:
+                    async for text in stream.text_stream:
+                        if text:
+                            collected.append(text)
+                            yield f"data: {json.dumps({'delta': text})}\n\n"
+                streamed = True
+                break
+            except Exception as e:
+                print(f"[chat] Claude stream error (model={model}): {e}")
+                collected = []  # discard partial output before trying fallback
+                continue
+
+        if not streamed:
+            collected = [FALLBACK_MESSAGE]
+            yield f"data: {json.dumps({'delta': FALLBACK_MESSAGE})}\n\n"
+
+        try:
+            await _finalize_turn(req, db, "".join(collected))
+        except Exception as e:
+            print(f"[chat] finalize (stream) failed: {e}")
+        yield f"data: {json.dumps({'done': True, 'intent': _infer_intent(req.message)})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ── Lead Notification Helpers ────────────────────────────────────────────
