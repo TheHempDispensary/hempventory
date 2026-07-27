@@ -728,6 +728,22 @@ async def init_db():
             )
         """)
 
+        # LeafLife Order Sheet: track which orders have been written to the
+        # shared Google Sheet so writes stay idempotent and failures can be
+        # retried/backfilled.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS leaflife_order_sync (
+                order_number TEXT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'pending',
+                rows_written INTEGER DEFAULT 0,
+                attempts INTEGER DEFAULT 0,
+                last_error TEXT,
+                synced_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Production: "made in-house" product flags (presence = flagged)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS production_flags (
