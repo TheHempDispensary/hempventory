@@ -18,6 +18,7 @@ from email.mime.multipart import MIMEMultipart
 
 from app.database import get_db, DB_PATH
 from app.clover_client import CloverClient
+from app import leaflife_orders
 
 STORE_EMAIL = "Support@TheHempDispensary.com"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -2703,6 +2704,12 @@ async def create_order(
         )
         loyalty_award_task.add_done_callback(lambda t: _log_task_error(t, "loyalty_award"))
 
+    # Auto-write LeafLife (LF-) shipping orders into the shared Google Sheet so
+    # staff no longer copy them by hand (non-blocking; never fails the order).
+    if db_save_ok and payment_status == "paid":
+        leaflife_task = asyncio.create_task(_sync_leaflife_order(order, order_number))
+        leaflife_task.add_done_callback(lambda t: _log_task_error(t, "leaflife_sheet"))
+
     return {
         "success": True,
         "order_number": order_number,
@@ -2770,6 +2777,83 @@ def _find_item_at_location(lookup: dict, product_id: str, sku: str, name: str) -
 def _format_price(cents: int) -> str:
     """Format cents as dollar string."""
     return f"${cents / 100:.2f}"
+
+
+def _order_items_as_dicts(items: List[OrderItem]) -> List[dict]:
+    return [
+        {"name": it.name, "sku": it.sku, "price": it.price, "quantity": it.quantity}
+        for it in items
+    ]
+
+
+async def _record_leaflife_sync(
+    order_number: str, status: str, rows_written: int, error: str
+) -> None:
+    """Upsert the LeafLife sheet-sync status for an order (own connection)."""
+    short = leaflife_orders.short_order_no(order_number)
+    try:
+        conn = await aiosqlite.connect(DB_PATH)
+        try:
+            await conn.execute("PRAGMA busy_timeout = 30000")
+            await conn.execute(
+                """
+                INSERT INTO leaflife_order_sync
+                    (order_number, status, rows_written, attempts, last_error,
+                     synced_at, updated_at)
+                VALUES (?, ?, ?, 1, ?,
+                        CASE WHEN ?='synced' THEN CURRENT_TIMESTAMP ELSE NULL END,
+                        CURRENT_TIMESTAMP)
+                ON CONFLICT(order_number) DO UPDATE SET
+                    status=excluded.status,
+                    rows_written=excluded.rows_written,
+                    attempts=leaflife_order_sync.attempts + 1,
+                    last_error=excluded.last_error,
+                    synced_at=CASE WHEN excluded.status='synced'
+                        THEN CURRENT_TIMESTAMP ELSE leaflife_order_sync.synced_at END,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (short, status, rows_written, error or None, status),
+            )
+            await conn.commit()
+        finally:
+            await conn.close()
+    except Exception as e:  # noqa: BLE001 - tracking is best-effort
+        print(f"[leaflife-orders] failed to record sync status for {short}: {e}")
+
+
+async def _sync_leaflife_order(order: "CreateOrderRequest", order_number: str) -> dict:
+    """Best-effort: append a shipping order's LeafLife (LF-) items to the sheet.
+
+    Only "Ship to Me" orders with LF- items are written; non-LeafLife lines are
+    ignored. Never raises — records status for retry/backfill.
+    """
+    if order.fulfillment_type != "shipping":
+        return {"ok": False, "reason": "not a shipping order", "written": 0}
+    items = _order_items_as_dicts(order.items)
+    if not leaflife_orders.leaflife_items(items):
+        return {"ok": False, "reason": "no LeafLife items", "written": 0}
+    if not leaflife_orders.is_configured():
+        return {"ok": False, "reason": "Google Sheets credentials not configured", "written": 0}
+
+    ship = order.shipping_address or OrderShipping()
+    result = await leaflife_orders.sync_order(
+        order_number=order_number,
+        first_name=order.customer.first_name,
+        last_name=order.customer.last_name,
+        street=ship.address,
+        city=ship.city,
+        state=ship.state,
+        zip_code=ship.zip,
+        notes=order.notes,
+        shipping_service=order.shipping_service,
+        items=items,
+    )
+    if result.get("ok"):
+        status = "synced" if result.get("written") else "already_present"
+        await _record_leaflife_sync(order_number, status, int(result.get("written", 0)), "")
+    else:
+        await _record_leaflife_sync(order_number, "failed", 0, str(result.get("reason", "")))
+    return result
 
 
 async def _deduct_stock_for_order(items: List[OrderItem], fulfillment_type: str = "shipping") -> None:
@@ -3559,6 +3643,153 @@ async def recover_order(
 
     print(f"[recover] Manually recovered order {order_number} (id={order_id}, total=${order.total/100:.2f})")
     return {"success": True, "order_id": order_id, "order_number": order_number}
+
+
+def _require_admin(request: Request) -> None:
+    """Raise 401 unless the request carries a valid admin bearer token."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+    import jwt
+    token = auth.split(" ", 1)[1]
+    jwt_secret = os.environ.get("JWT_SECRET", "hemp-inventory-secret-key")
+    try:
+        jwt.decode(token, jwt_secret, algorithms=["HS256"])
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+
+async def _sync_leaflife_from_db(db: aiosqlite.Connection, order_number: str) -> dict:
+    """Reconstruct a stored order and (re)write its LeafLife items to the sheet."""
+    cur = await db.execute(
+        """SELECT customer_first_name, customer_last_name, shipping_address,
+                  shipping_city, shipping_state, shipping_zip, notes,
+                  shipping_service, fulfillment_type, id
+             FROM ecommerce_orders WHERE order_number = ?""",
+        (order_number,),
+    )
+    row = await cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Order {order_number} not found")
+    if (row[8] or "shipping") != "shipping":
+        return {"ok": False, "reason": "not a shipping order", "written": 0}
+
+    items_cur = await db.execute(
+        "SELECT product_name, sku, price, quantity FROM ecommerce_order_items WHERE order_id = ?",
+        (row[9],),
+    )
+    item_rows = await items_cur.fetchall()
+    items = [
+        {"name": r[0] or "", "sku": r[1] or "", "price": r[2] or 0, "quantity": r[3] or 1}
+        for r in item_rows
+    ]
+    if not leaflife_orders.leaflife_items(items):
+        return {"ok": False, "reason": "no LeafLife items", "written": 0}
+
+    result = await leaflife_orders.sync_order(
+        order_number=order_number,
+        first_name=row[0] or "",
+        last_name=row[1] or "",
+        street=row[2] or "",
+        city=row[3] or "",
+        state=row[4] or "",
+        zip_code=row[5] or "",
+        notes=row[6] or "",
+        shipping_service=row[7] or "",
+        items=items,
+    )
+    if result.get("ok"):
+        status = "synced" if result.get("written") else "already_present"
+        await _record_leaflife_sync(order_number, status, int(result.get("written", 0)), "")
+    else:
+        await _record_leaflife_sync(order_number, "failed", 0, str(result.get("reason", "")))
+    return result
+
+
+@router.post("/leaflife-sheet/sync/{order_number}")
+async def leaflife_sheet_sync_order(
+    order_number: str,
+    request: Request,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Manually (re)sync one existing order into the LeafLife Order Sheet.
+
+    Works for backfilling old orders and for retrying failed writes. Idempotent:
+    the sheet is checked for the order # before appending.
+    """
+    _require_admin(request)
+    if not leaflife_orders.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Google Sheets service account is not configured (GOOGLE_SHEETS_SA_JSON).",
+        )
+    result = await _sync_leaflife_from_db(db, order_number.strip())
+    return {"order_number": order_number.strip(), **result}
+
+
+@router.get("/leaflife-sheet/status")
+async def leaflife_sheet_status(
+    request: Request,
+    limit: int = 100,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Report LeafLife sheet-sync configuration + recent per-order sync status."""
+    _require_admin(request)
+    cur = await db.execute(
+        """SELECT order_number, status, rows_written, attempts, last_error,
+                  synced_at, updated_at
+             FROM leaflife_order_sync
+             ORDER BY updated_at DESC LIMIT ?""",
+        (max(1, min(limit, 500)),),
+    )
+    rows = await cur.fetchall()
+    records = [
+        {
+            "order_number": r[0],
+            "status": r[1],
+            "rows_written": r[2],
+            "attempts": r[3],
+            "last_error": r[4],
+            "synced_at": r[5],
+            "updated_at": r[6],
+        }
+        for r in rows
+    ]
+    failed = sum(1 for r in records if r["status"] == "failed")
+    return {"configured": leaflife_orders.is_configured(), "failed": failed, "records": records}
+
+
+@router.post("/leaflife-sheet/retry-failed")
+async def leaflife_sheet_retry_failed(
+    request: Request,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Retry every order whose last LeafLife sheet write failed."""
+    _require_admin(request)
+    if not leaflife_orders.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Google Sheets service account is not configured (GOOGLE_SHEETS_SA_JSON).",
+        )
+    cur = await db.execute(
+        "SELECT order_number FROM leaflife_order_sync WHERE status = 'failed'"
+    )
+    failed_numbers = [r[0] for r in await cur.fetchall()]
+    results = []
+    for short in failed_numbers:
+        # The tracking table stores the short order #; match it back to the full one.
+        oc = await db.execute(
+            "SELECT order_number FROM ecommerce_orders WHERE order_number LIKE ?",
+            (f"HD-{short}-%",),
+        )
+        orow = await oc.fetchone()
+        full = orow[0] if orow else short
+        try:
+            res = await _sync_leaflife_from_db(db, full)
+            results.append({"order_number": short, **res})
+        except HTTPException as e:
+            results.append({"order_number": short, "ok": False, "reason": e.detail})
+    return {"retried": len(results), "results": results}
 
 
 @router.patch("/orders/{order_id}/notes")
