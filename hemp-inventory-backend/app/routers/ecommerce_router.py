@@ -377,7 +377,7 @@ async def _fetch_and_cache_products() -> dict:
             coa_cursor = await coa_db.execute(
                 """SELECT csl.sku, cr.sample_accession, cr.description,
                           cr.batch_no, cr.sample_status, cr.coa_approved_date,
-                          cr.coa_approved_filepath
+                          cr.coa_approved_filepath, cr.source
                    FROM coa_sku_links csl
                    JOIN coa_results cr ON csl.sample_accession = cr.sample_accession
                    ORDER BY cr.coa_approved_date DESC"""
@@ -422,8 +422,23 @@ async def _fetch_and_cache_products() -> dict:
             if sku_key not in coa_by_sku:
                 coa_by_sku[sku_key] = []
 
-            # Build COA PDF URL from accession
-            coa_pdf_url = f"https://portal.acslabcannabis.com/reports/view-public-coa?orderids=%5B%22{url_quote(accession)}%22%5D&lang=en"
+            # Build the COA PDF URL. Manually-added (non-ACS) COAs point to the
+            # uploaded PDF (or a pasted external URL) — NOT the ACS portal, which
+            # only knows ACS batches and returns "no COAs available" for them.
+            filepath = row[6]
+            source = (row[7] or "").lower()
+            if source == "manual":
+                if filepath and filepath.startswith(("http://", "https://")):
+                    coa_pdf_url = filepath
+                elif filepath:
+                    coa_pdf_url = (
+                        os.environ.get("BASE_URL", "https://thd-inventory-api.fly.dev")
+                        + filepath
+                    )
+                else:
+                    coa_pdf_url = ""
+            else:
+                coa_pdf_url = f"https://portal.acslabcannabis.com/reports/view-public-coa?orderids=%5B%22{url_quote(accession)}%22%5D&lang=en"
 
             # Group analytes by panel
             raw_analytes = analyte_by_acc.get(accession, [])
