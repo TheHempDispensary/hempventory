@@ -19,6 +19,11 @@ def test_parse_size():
     assert lo.parse_size("OG Kush 28 gram") == "28g"
     assert lo.parse_size("Live Resin 1 gram") == "1g"
     assert lo.parse_size("Blend 3.5 gram jar") == "3.5g"
+    # Compact "g" form used on the storefront.
+    assert lo.parse_size("Illemonati Snowcaps THCA Flower 28g") == "28g"
+    assert lo.parse_size("Live Resin 3.5g") == "3.5g"
+    # Must not misread mg/kg.
+    assert lo.parse_size("Gummies 100mg") == ""
     assert lo.parse_size("Mystery item") == ""
 
 
@@ -43,6 +48,13 @@ def test_leaflife_items_filters_lf_only():
     ]
     lf = lo.leaflife_items(items)
     assert [i["sku"] for i in lf] == ["LF-OG-28", "lf-abc"]
+
+
+def test_state_name():
+    assert lo.state_name("FL") == "Florida"
+    assert lo.state_name("fl") == "Florida"
+    assert lo.state_name("Florida") == "Florida"
+    assert lo.state_name("ZZ") == "ZZ"
 
 
 def test_match_strain_prefers_longest():
@@ -91,26 +103,30 @@ def test_build_rows_column_placement_and_totals():
     assert info[lo.COL_FIRST] == "Jane"
     assert info[lo.COL_ZIP] == "34608"
     assert info[lo.COL_SHIP_METHOD] == "Priority"
-    # Total = LF subtotal = 100 + 35*2 + 500 = $670.00
-    assert info[lo.COL_TOTAL] == "$670.00"
-    assert info[lo.COL_CARD_FEE] == lo._dollars(lo.card_fee_cents(67000))
+    # State code is expanded to the full name the sheet uses.
+    assert info[lo.COL_STATE] == "Florida"
+    # Total = LF subtotal = 100 + 35*2 + 500 = 670.00, stored as a plain number.
+    assert info[lo.COL_TOTAL] == "670.00"
+    assert info[lo.COL_CARD_FEE] == lo._money(lo.card_fee_cents(67000))
     # Order-details/PDF column is intentionally left blank.
     assert info[lo.COL_ORDER_LINK] == ""
+    # Column A (group) is left blank — the sheet's array formula fills it.
+    assert info[lo.COL_GROUP] == ""
 
     flower = rows[1]
     assert flower[lo.COL_FLOWER] == "Blue Dream"
     assert flower[lo.COL_FLOWER_QTY] == "28g"
-    assert flower[lo.COL_FLOWER_COA] == "flower-coa"
+    # COA columns are left blank — the sheet VLOOKUPs them from the product name.
+    assert flower[lo.COL_FLOWER_COA] == ""
 
     conc = rows[2]
     assert conc[lo.COL_CONC] == "Live Resin"
-    assert conc[lo.COL_CONC_COA] == "conc-coa"
+    assert conc[lo.COL_CONC_COA] == ""
 
     bulk = rows[4]
     assert bulk[lo.COL_BULK] == "Bulk OG"
-    assert bulk[lo.COL_BULK_COA] == "bulk-coa"
+    assert bulk[lo.COL_BULK_COA] == ""
 
-    # LeafLife-owned columns beyond the shipping method are never populated.
     assert all(len(r) == lo._ROW_WIDTH for r in rows)
 
 

@@ -69,8 +69,33 @@ def is_configured() -> bool:
     return bool(os.environ.get("GOOGLE_SHEETS_SA_JSON") or os.environ.get("GOOGLE_SHEETS_SA_FILE"))
 
 
-def _dollars(cents: int) -> str:
-    return f"${cents / 100:,.2f}"
+def _money(cents: int) -> str:
+    """Plain numeric dollar string as the sheet stores it (e.g. 100 -> '100.00')."""
+    return f"{cents / 100:.2f}"
+
+
+# The sheet spells state names out ("Florida", not "FL").
+_US_STATES = {
+    "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas",
+    "CA": "California", "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware",
+    "FL": "Florida", "GA": "Georgia", "HI": "Hawaii", "ID": "Idaho",
+    "IL": "Illinois", "IN": "Indiana", "IA": "Iowa", "KS": "Kansas",
+    "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
+    "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota", "MS": "Mississippi",
+    "MO": "Missouri", "MT": "Montana", "NE": "Nebraska", "NV": "Nevada",
+    "NH": "New Hampshire", "NJ": "New Jersey", "NM": "New Mexico", "NY": "New York",
+    "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio", "OK": "Oklahoma",
+    "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
+    "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah",
+    "VT": "Vermont", "VA": "Virginia", "WA": "Washington", "WV": "West Virginia",
+    "WI": "Wisconsin", "WY": "Wyoming", "DC": "District of Columbia",
+}
+
+
+def state_name(state: str) -> str:
+    """Expand a 2-letter state code to the full name the sheet uses."""
+    s = (state or "").strip()
+    return _US_STATES.get(s.upper(), s)
 
 
 def card_fee_cents(total_cents: int) -> int:
@@ -83,8 +108,11 @@ def _norm(s: str) -> str:
 
 
 def parse_size(name: str) -> str:
-    """Extract a purchase size like '28g' or '3.5g' from a LeafLife item name."""
-    m = re.search(r"(\d+(?:\.\d+)?)\s*gram", (name or "").lower())
+    """Extract a purchase size like '28g' or '3.5g' from a LeafLife item name.
+
+    Handles both '28 gram(s)' and the compact '28g' form (but not 'mg'/'kg').
+    """
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:grams?|g)(?![a-z])", (name or "").lower())
     if not m:
         return ""
     num = m.group(1)
@@ -198,8 +226,12 @@ def build_rows(
 
     `lf_items` is a list of {name, sku, price(cents), quantity}. Only LF- items
     should be passed in. `order total` = sum(price*qty) over these items.
+
+    The group column (A) and the COA columns (K/L/M) are left blank: the sheet
+    fills them itself via array formulas (A carries the order # down; K/L/M
+    VLOOKUP the product name against the 'Pricing Archive' tab). Those columns
+    are protected, so we must not write them.
     """
-    group = short_order_no(order_number)
     total_cents = sum(int(it["price"]) * int(it["quantity"]) for it in lf_items)
 
     def blank_row() -> list[str]:
@@ -207,38 +239,35 @@ def build_rows(
 
     # Order-info row (customer + totals; product columns blank).
     info = blank_row()
-    info[COL_GROUP] = group
     info[COL_DATE] = order_date
-    info[COL_ORDER_NO] = group
+    info[COL_ORDER_NO] = short_order_no(order_number)
     info[COL_STATUS] = status
     info[COL_FIRST] = first_name
     info[COL_LAST] = last_name
     info[COL_STREET] = street
     info[COL_CITY] = city
-    info[COL_STATE] = state
+    info[COL_STATE] = state_name(state)
     info[COL_ZIP] = zip_code
     info[COL_NOTES] = notes
-    info[COL_TOTAL] = _dollars(total_cents)
-    info[COL_CARD_FEE] = _dollars(card_fee_cents(total_cents))
+    info[COL_TOTAL] = _money(total_cents)
+    info[COL_CARD_FEE] = _money(card_fee_cents(total_cents))
     info[COL_SHIP_METHOD] = ship_method
     rows = [info]
 
-    # One row per product unit.
+    # One row per product unit. COA columns are left blank (auto-filled).
     for it in lf_items:
         entry = match_strain(it["name"], lookup)
         display = entry["display"] if entry else it["name"]
-        coa = entry["coa"] if entry else ""
         kind = entry["kind"] if entry else "flower"
         size = parse_size(it["name"])
         for _ in range(max(1, int(it["quantity"]))):
             r = blank_row()
-            r[COL_GROUP] = group
             if kind == "concentrate":
-                r[COL_CONC], r[COL_CONC_QTY], r[COL_CONC_COA] = display, size, coa
+                r[COL_CONC], r[COL_CONC_QTY] = display, size
             elif kind == "bulk":
-                r[COL_BULK], r[COL_BULK_QTY], r[COL_BULK_COA] = display, size, coa
+                r[COL_BULK], r[COL_BULK_QTY] = display, size
             else:
-                r[COL_FLOWER], r[COL_FLOWER_QTY], r[COL_FLOWER_COA] = display, size, coa
+                r[COL_FLOWER], r[COL_FLOWER_QTY] = display, size
             rows.append(r)
     return rows
 
@@ -260,13 +289,17 @@ def _credentials():
     raise RuntimeError("No Google service-account credentials configured")
 
 
-def _existing_order_numbers_sync() -> set[str]:
-    """Order #s already present in the sheet (column C), read via the API."""
+def _sheets_service():
     from googleapiclient.discovery import build  # lazy import
 
-    service = build("sheets", "v4", credentials=_credentials(), cache_discovery=False)
+    return build("sheets", "v4", credentials=_credentials(), cache_discovery=False)
+
+
+def _existing_order_numbers_sync() -> set[str]:
+    """Order #s already present in the sheet (column C), read via the API."""
     resp = (
-        service.spreadsheets()
+        _sheets_service()
+        .spreadsheets()
         .values()
         .get(spreadsheetId=SHEET_ID, range=f"'{ORDER_TAB}'!C:C")
         .execute()
@@ -275,17 +308,37 @@ def _existing_order_numbers_sync() -> set[str]:
     return {row[0].strip() for row in values if row and row[0].strip()}
 
 
-def _append_rows_sync(rows: list[list[str]]) -> None:
-    from googleapiclient.discovery import build  # lazy import
+def _append_rows_sync(rows: list[list[str]]) -> int:
+    """Write rows into the first empty rows, skipping the protected columns.
 
-    service = build("sheets", "v4", credentials=_credentials(), cache_discovery=False)
-    service.spreadsheets().values().append(
+    The Order Sheet protects column A and the COA columns (K/L/M) because they
+    are array formulas that auto-extend to new rows. So we can't use
+    values.append (it would write a full contiguous block over A/K/L/M and be
+    rejected). Instead we find the next empty row and write only the two
+    unprotected column segments — B:J and N:Y — at explicit ranges. The
+    protected formulas fill A/K/L/M for the new rows on their own.
+    """
+    service = _sheets_service()
+    # len of the used range = last row that has any data (column A's formula
+    # fills every data row, so nothing is missed).
+    used = (
+        service.spreadsheets()
+        .values()
+        .get(spreadsheetId=SHEET_ID, range=f"'{ORDER_TAB}'!A:Y")
+        .execute()
+        .get("values", [])
+    )
+    start = len(used) + 1
+    end = start + len(rows) - 1
+    data = [
+        {"range": f"'{ORDER_TAB}'!B{start}:J{end}", "values": [r[1:10] for r in rows]},
+        {"range": f"'{ORDER_TAB}'!N{start}:Y{end}", "values": [r[13:25] for r in rows]},
+    ]
+    service.spreadsheets().values().batchUpdate(
         spreadsheetId=SHEET_ID,
-        range=f"'{ORDER_TAB}'!A1",
-        valueInputOption="USER_ENTERED",
-        insertDataOption="INSERT_ROWS",
-        body={"values": rows},
+        body={"valueInputOption": "USER_ENTERED", "data": data},
     ).execute()
+    return start
 
 
 def leaflife_items(items: list[dict]) -> list[dict]:
