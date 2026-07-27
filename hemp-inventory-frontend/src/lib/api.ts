@@ -774,4 +774,94 @@ export const coaFileUrl = (ref?: string | null): string => {
 // Ecommerce products (public, HQ catalog)
 export const getEcommerceProducts = () => api.get("/api/ecommerce/products");
 
+// ── Production planning & tracking ───────────────────────────────────────────
+export interface ProductionFlag {
+  sku: string;
+  product_name: string;
+}
+
+export interface ProductionPlanItem {
+  sku: string;
+  name: string;
+  categories: string[];
+  in_stock: number;
+  units_sold: number;
+  units_per_month: number;
+  needed: number;
+  already_planned: number;
+  to_produce: number;
+}
+
+export interface ProductionBatch {
+  id: number;
+  sku: string | null;
+  product_name: string;
+  size: string | null;
+  planned_qty: number;
+  produced_qty: number;
+  status: "planned" | "in_production" | "ready" | "done";
+  batch_no: string | null;
+  expiration_date: string | null;
+  made_by: string | null;
+  qa_check: boolean;
+  label_ordered: boolean;
+  label_qty: number | null;
+  notes: string | null;
+  source: string;
+  plan_date: string | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BatchPayload {
+  product_name?: string;
+  sku?: string | null;
+  size?: string | null;
+  planned_qty?: number;
+  produced_qty?: number;
+  status?: string;
+  batch_no?: string | null;
+  expiration_date?: string | null;
+  made_by?: string | null;
+  qa_check?: boolean;
+  label_ordered?: boolean;
+  label_qty?: number | null;
+  notes?: string | null;
+  source?: string;
+  plan_date?: string | null;
+}
+
+export const getProductionFlags = () =>
+  api.get<{ flags: ProductionFlag[] }>("/api/production/flags");
+
+export const setProductionFlag = (sku: string, madeInHouse: boolean, productName?: string) =>
+  api.put(`/api/production/flags/${encodeURIComponent(sku)}`, {
+    made_in_house: madeInHouse,
+    product_name: productName,
+  });
+
+export const seedProductionFlags = () =>
+  api.post<{ added: number; already_flagged: number; matched: ProductionFlag[] }>(
+    "/api/production/seed-flags"
+  );
+
+export const getProductionPlan = (months: number) =>
+  api.get<{ items: ProductionPlanItem[]; meta: { months: number; flagged: number; days_of_data: number | null } }>(
+    "/api/production/plan",
+    { params: { months } }
+  );
+
+export const getProductionBatches = (status?: string) =>
+  api.get<{ batches: ProductionBatch[] }>("/api/production/batches", { params: status ? { status } : undefined });
+
+export const createProductionBatch = (payload: BatchPayload) =>
+  api.post<ProductionBatch>("/api/production/batches", payload);
+
+export const updateProductionBatch = (id: number, payload: BatchPayload) =>
+  api.put<ProductionBatch>(`/api/production/batches/${id}`, payload);
+
+export const deleteProductionBatch = (id: number) =>
+  api.delete(`/api/production/batches/${id}`);
+
 export default api;

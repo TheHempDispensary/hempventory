@@ -728,6 +728,40 @@ async def init_db():
             )
         """)
 
+        # Production: "made in-house" product flags (presence = flagged)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS production_flags (
+                sku TEXT PRIMARY KEY,
+                product_name TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Production: batch tracking board (merges the old "plan" + "done" sheets)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS production_batches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sku TEXT,
+                product_name TEXT NOT NULL,
+                size TEXT,
+                planned_qty REAL DEFAULT 0,
+                produced_qty REAL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'planned',
+                batch_no TEXT,
+                expiration_date TEXT,
+                made_by TEXT,
+                qa_check INTEGER DEFAULT 0,
+                label_ordered INTEGER DEFAULT 0,
+                label_qty INTEGER,
+                notes TEXT,
+                source TEXT DEFAULT 'manual',
+                plan_date TEXT,
+                completed_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Seed FIRST10 if promo_codes table is empty
         cursor = await db.execute("SELECT COUNT(*) FROM promo_codes")
         count = (await cursor.fetchone())[0]

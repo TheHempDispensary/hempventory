@@ -17,6 +17,7 @@ import Discounts from "./components/Discounts";
 import ProductScraper from "./components/ProductScraper";
 import Conversations from "./components/Conversations";
 import SmartPar from "./components/SmartPar";
+import Production from "./components/Production";
 import LabResults from "./components/LabResults";
 
 // Detect which domain we're on to separate login state
@@ -189,6 +190,8 @@ function App() {
         return <Conversations />;
       case "smart-par":
         return <SmartPar />;
+      case "production":
+        return <Production />;
       case "lab-results":
         return <LabResults />;
       default:
