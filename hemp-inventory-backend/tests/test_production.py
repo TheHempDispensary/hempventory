@@ -78,6 +78,70 @@ async def test_plan_empty_without_flags(db):
     assert res["meta"]["flagged"] == 0
 
 
+async def test_done_adds_to_hq_inventory(db, monkeypatch):
+    calls = []
+
+    async def fake_add(sku, qty):
+        calls.append((sku, qty))
+        return {"ok": True, "previous": 5, "new": 5 + qty, "added": qty, "item_id": "X"}
+
+    monkeypatch.setattr(pr, "_add_to_hq_inventory", fake_add)
+
+    created = await pr.create_batch(
+        pr.BatchCreate(product_name="Gummies", sku="G-100", planned_qty=50, status="planned"),
+        user={}, db=db,
+    )
+    done = await pr.update_batch(
+        created["id"], pr.BatchUpdate(status="done", produced_qty=48), user={}, db=db,
+    )
+    assert calls == [("G-100", 48)]
+    assert done["inventoried"] is True
+    assert done["inventoried_qty"] == 48
+    assert done["inventory_result"]["ok"] is True
+
+    # Re-saving a done+inventoried batch must not add stock again.
+    calls.clear()
+    again = await pr.update_batch(created["id"], pr.BatchUpdate(notes="touch"), user={}, db=db)
+    assert calls == []
+    assert again["inventoried"] is True
+
+
+async def test_done_respects_skip_and_missing_sku(db, monkeypatch):
+    calls = []
+
+    async def fake_add(sku, qty):
+        calls.append((sku, qty))
+        return {"ok": True, "added": qty}
+
+    monkeypatch.setattr(pr, "_add_to_hq_inventory", fake_add)
+
+    # add_to_inventory=False skips.
+    b1 = await pr.create_batch(pr.BatchCreate(product_name="A", sku="A1", planned_qty=10), user={}, db=db)
+    r1 = await pr.update_batch(b1["id"], pr.BatchUpdate(status="done", add_to_inventory=False), user={}, db=db)
+    assert calls == []
+    assert r1["inventoried"] is False
+
+    # No SKU → nothing to add.
+    b2 = await pr.create_batch(pr.BatchCreate(product_name="B", planned_qty=10), user={}, db=db)
+    r2 = await pr.update_batch(b2["id"], pr.BatchUpdate(status="done"), user={}, db=db)
+    assert calls == []
+    assert r2["inventoried"] is False
+
+
+async def test_manual_add_to_inventory_endpoint(db, monkeypatch):
+    async def fake_add(sku, qty):
+        return {"ok": True, "previous": 0, "new": qty, "added": qty, "item_id": "Z"}
+
+    monkeypatch.setattr(pr, "_add_to_hq_inventory", fake_add)
+    b = await pr.create_batch(pr.BatchCreate(product_name="C", sku="C1", produced_qty=7, status="done", add_to_inventory=False), user={}, db=db)
+    assert b["inventoried"] is False
+    res = await pr.add_batch_to_inventory(b["id"], user={}, db=db)
+    assert res["inventoried"] is True
+    assert res["inventoried_qty"] == 7
+    with pytest.raises(Exception):
+        await pr.add_batch_to_inventory(b["id"], user={}, db=db)  # already done
+
+
 async def test_plan_subtracts_open_batches(db, monkeypatch):
     # Flag a product and stub Smart PAR to report it needs 100 units.
     await pr.set_flag("SKU-A", pr.FlagSet(made_in_house=True, product_name="Widget"), user={}, db=db)

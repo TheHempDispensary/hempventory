@@ -14,9 +14,44 @@ import aiosqlite
 
 from app.auth import get_current_user
 from app.database import get_db
+from app.clover_client import CloverClient
 from app.routers.inventory_router import smart_par, _do_sync
 
 router = APIRouter(prefix="/api/production", tags=["production"])
+
+
+async def _add_to_hq_inventory(sku: str, qty: float) -> dict:
+    """Add `qty` units to a product's stock at HQ (Clover). Returns a result dict.
+
+    Matches on Clover SKU first, then Clover item id (Smart PAR uses the raw SKU
+    when present, otherwise the item id). Never lowers stock.
+    """
+    from app.routers.ecommerce_router import (
+        HQ_MERCHANT_ID, HQ_API_TOKEN, invalidate_product_cache,
+    )
+    if not sku:
+        return {"ok": False, "reason": "batch has no linked product/SKU"}
+    if qty <= 0:
+        return {"ok": False, "reason": "quantity must be greater than 0"}
+    if not HQ_MERCHANT_ID or not HQ_API_TOKEN:
+        return {"ok": False, "reason": "HQ Clover credentials not configured"}
+
+    client = CloverClient(HQ_MERCHANT_ID, HQ_API_TOKEN)
+    data = await client.get_items(expand="itemStock")
+    match = None
+    for it in data.get("elements", []):
+        if (it.get("sku") or "") == sku or it.get("id") == sku:
+            match = it
+            break
+    if not match:
+        return {"ok": False, "reason": f"'{sku}' not found in HQ inventory"}
+
+    stock = match.get("itemStock") or {}
+    current = stock.get("quantity", 0) or 0
+    new_q = current + qty
+    await client.update_item_stock(match["id"], new_q)
+    invalidate_product_cache()
+    return {"ok": True, "item_id": match["id"], "previous": current, "new": new_q, "added": qty}
 
 # Valid batch lifecycle stages.
 _STATUSES = {"planned", "in_production", "ready", "done"}
@@ -312,6 +347,7 @@ class BatchCreate(BaseModel):
     notes: Optional[str] = None
     source: str = "manual"
     plan_date: Optional[str] = None
+    add_to_inventory: Optional[bool] = None
 
 
 class BatchUpdate(BaseModel):
@@ -329,6 +365,9 @@ class BatchUpdate(BaseModel):
     label_qty: Optional[int] = None
     notes: Optional[str] = None
     plan_date: Optional[str] = None
+    # When a batch first becomes 'done', its output is added to HQ Clover stock.
+    # Set False to skip (e.g. moving stock rather than making new units).
+    add_to_inventory: Optional[bool] = None
 
 
 def _batch_row(row: aiosqlite.Row) -> dict:
@@ -350,6 +389,9 @@ def _batch_row(row: aiosqlite.Row) -> dict:
         "source": row["source"],
         "plan_date": row["plan_date"],
         "completed_at": row["completed_at"],
+        "inventoried": bool(row["inventoried"]),
+        "inventoried_at": row["inventoried_at"],
+        "inventoried_qty": row["inventoried_qty"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -399,7 +441,27 @@ async def create_batch(
     await db.commit()
     new_id = cursor.lastrowid
     cursor = await db.execute("SELECT * FROM production_batches WHERE id = ?", (new_id,))
-    return _batch_row(await cursor.fetchone())
+    row = await cursor.fetchone()
+
+    inventory_result = None
+    if body.status == "done" and body.add_to_inventory is not False and body.sku:
+        qty = row["produced_qty"] or row["planned_qty"] or 0
+        inventory_result = await _add_to_hq_inventory(body.sku, qty)
+        if inventory_result.get("ok"):
+            await db.execute(
+                """UPDATE production_batches
+                   SET inventoried = 1, inventoried_at = CURRENT_TIMESTAMP, inventoried_qty = ?
+                   WHERE id = ?""",
+                (qty, new_id),
+            )
+            await db.commit()
+            cursor = await db.execute("SELECT * FROM production_batches WHERE id = ?", (new_id,))
+            row = await cursor.fetchone()
+
+    result = _batch_row(row)
+    if inventory_result is not None:
+        result["inventory_result"] = inventory_result
+    return result
 
 
 @router.put("/batches/{batch_id}")
@@ -447,7 +509,60 @@ async def update_batch(
     )
     await db.commit()
     cursor = await db.execute("SELECT * FROM production_batches WHERE id = ?", (batch_id,))
-    return _batch_row(await cursor.fetchone())
+    row = await cursor.fetchone()
+
+    # On first transition into 'done', add the produced output to HQ stock
+    # (unless explicitly skipped or already inventoried).
+    inventory_result = None
+    became_done = fields.get("status") == "done" and existing["status"] != "done"
+    if became_done and body.add_to_inventory is not False and not row["inventoried"] and row["sku"]:
+        qty = row["produced_qty"] or row["planned_qty"] or 0
+        inventory_result = await _add_to_hq_inventory(row["sku"], qty)
+        if inventory_result.get("ok"):
+            await db.execute(
+                """UPDATE production_batches
+                   SET inventoried = 1, inventoried_at = CURRENT_TIMESTAMP, inventoried_qty = ?
+                   WHERE id = ?""",
+                (qty, batch_id),
+            )
+            await db.commit()
+            cursor = await db.execute("SELECT * FROM production_batches WHERE id = ?", (batch_id,))
+            row = await cursor.fetchone()
+
+    result = _batch_row(row)
+    if inventory_result is not None:
+        result["inventory_result"] = inventory_result
+    return result
+
+
+@router.post("/batches/{batch_id}/add-to-inventory")
+async def add_batch_to_inventory(
+    batch_id: int,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Manually push a batch's produced qty into HQ stock (retry / ad-hoc)."""
+    cursor = await db.execute("SELECT * FROM production_batches WHERE id = ?", (batch_id,))
+    row = await cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    if row["inventoried"]:
+        raise HTTPException(status_code=400, detail="Batch already added to inventory")
+    qty = row["produced_qty"] or row["planned_qty"] or 0
+    inv = await _add_to_hq_inventory(row["sku"] or "", qty)
+    if not inv.get("ok"):
+        raise HTTPException(status_code=400, detail=inv.get("reason", "Could not add to inventory"))
+    await db.execute(
+        """UPDATE production_batches
+           SET inventoried = 1, inventoried_at = CURRENT_TIMESTAMP, inventoried_qty = ?
+           WHERE id = ?""",
+        (qty, batch_id),
+    )
+    await db.commit()
+    cursor = await db.execute("SELECT * FROM production_batches WHERE id = ?", (batch_id,))
+    result = _batch_row(await cursor.fetchone())
+    result["inventory_result"] = inv
+    return result
 
 
 @router.delete("/batches/{batch_id}")

@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   Factory, RefreshCw, Search, Plus, Trash2, X, Check, ClipboardList,
-  Beaker, PackageCheck, CheckCircle2,
+  Beaker, PackageCheck, CheckCircle2, Boxes,
 } from "lucide-react";
 import {
   getProductionPlan, getProductionBatches, createProductionBatch,
   updateProductionBatch, deleteProductionBatch, getProductionFlags,
-  setProductionFlag, seedProductionFlags, getCachedInventory,
+  setProductionFlag, seedProductionFlags, getCachedInventory, addBatchToInventory,
   type ProductionPlanItem, type ProductionBatch, type BatchPayload,
 } from "../lib/api";
 
@@ -48,6 +48,7 @@ export default function Production() {
   const [seedMsg, setSeedMsg] = useState("");
 
   const [editing, setEditing] = useState<ProductionBatch | null>(null);
+  const [toast, setToast] = useState("");
 
   const loadPlan = async (m: number) => {
     setLoading(true); setError("");
@@ -85,8 +86,12 @@ export default function Production() {
   };
 
   useEffect(() => { loadPlan(months); }, [months]);
-  useEffect(() => { loadBatches(); loadFlags(); }, []);
-  useEffect(() => { if (tab === "products" && inventory.length === 0) loadInventory(); }, [tab]);
+  useEffect(() => { loadBatches(); loadFlags(); loadInventory(); }, []);
+
+  const flash = (msg: string) => {
+    setToast(msg);
+    window.setTimeout(() => setToast(""), 6000);
+  };
 
   const toggleFlag = async (sku: string, name: string) => {
     const on = !flags.has(sku);
@@ -136,6 +141,26 @@ export default function Production() {
     if (!next) return;
     const res = await updateProductionBatch(b.id, { status: next });
     setBatches((prev) => prev.map((x) => (x.id === b.id ? res.data : x)));
+    const inv = res.data.inventory_result;
+    if (inv) {
+      flash(inv.ok
+        ? `Added ${inv.added} of "${b.product_name}" to HQ stock (${inv.previous} → ${inv.new}).`
+        : `Couldn't add "${b.product_name}" to HQ stock: ${inv.reason}`);
+    }
+    loadPlan(months);
+  };
+
+  const pushToInventory = async (b: ProductionBatch) => {
+    try {
+      const res = await addBatchToInventory(b.id);
+      setBatches((prev) => prev.map((x) => (x.id === b.id ? res.data : x)));
+      const inv = res.data.inventory_result;
+      if (inv?.ok) flash(`Added ${inv.added} of "${b.product_name}" to HQ stock (${inv.previous} → ${inv.new}).`);
+      loadPlan(months);
+    } catch (e: unknown) {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      flash(msg || "Could not add to HQ stock.");
+    }
   };
 
   const removeBatch = async (id: number) => {
@@ -205,6 +230,12 @@ export default function Production() {
 
       {error && (
         <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">{error}</div>
+      )}
+      {toast && (
+        <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-sm text-emerald-800 flex items-start justify-between gap-3">
+          <span>{toast}</span>
+          <button onClick={() => setToast("")} className="text-emerald-500 hover:text-emerald-700"><X className="w-4 h-4" /></button>
+        </div>
       )}
 
       {/* ── PLAN ─────────────────────────────────────────────────── */}
@@ -322,7 +353,9 @@ export default function Production() {
                 id: 0, sku: null, product_name: "", size: null, planned_qty: 0, produced_qty: 0,
                 status: "planned", batch_no: null, expiration_date: null, made_by: null,
                 qa_check: false, label_ordered: false, label_qty: null, notes: null,
-                source: "manual", plan_date: null, completed_at: null, created_at: "", updated_at: "",
+                source: "manual", plan_date: null, completed_at: null,
+                inventoried: false, inventoried_at: null, inventoried_qty: null,
+                created_at: "", updated_at: "",
               })}
               className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium bg-green-600 text-white rounded-lg hover:bg-green-700"
             >
@@ -364,6 +397,7 @@ export default function Production() {
                           {b.qa_check && <span className="inline-flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 rounded bg-green-100 text-green-700"><Check className="w-2.5 h-2.5" />QA</span>}
                           {b.label_ordered && <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-700">Label</span>}
                           {b.source === "smart_par" && <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-100 text-purple-700">Smart PAR</span>}
+                          {b.inventoried && <span className="inline-flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700"><Boxes className="w-2.5 h-2.5" />In HQ stock</span>}
                         </div>
                         {NEXT_STATUS[b.status] && (
                           <button
@@ -371,6 +405,14 @@ export default function Production() {
                             className="mt-2 w-full text-xs font-medium text-green-700 border border-green-200 rounded-md py-1 hover:bg-green-50"
                           >
                             Move to {STATUS_COLUMNS.find((c) => c.id === NEXT_STATUS[b.status])?.label}
+                          </button>
+                        )}
+                        {b.status === "done" && !b.inventoried && (
+                          <button
+                            onClick={() => pushToInventory(b)}
+                            className="mt-2 w-full inline-flex items-center justify-center gap-1 text-xs font-medium text-emerald-700 border border-emerald-200 rounded-md py-1 hover:bg-emerald-50"
+                          >
+                            <Boxes className="w-3 h-3" /> Add to HQ stock
                           </button>
                         )}
                       </div>
@@ -440,10 +482,17 @@ export default function Production() {
       {editing && (
         <BatchModal
           batch={editing}
+          products={inventory}
           onClose={() => setEditing(null)}
           onSaved={(saved, isNew) => {
             setBatches((prev) => isNew ? [saved, ...prev] : prev.map((b) => (b.id === saved.id ? saved : b)));
             setEditing(null);
+            const inv = saved.inventory_result;
+            if (inv) {
+              flash(inv.ok
+                ? `Added ${inv.added} of "${saved.product_name}" to HQ stock (${inv.previous} → ${inv.new}).`
+                : `Couldn't add "${saved.product_name}" to HQ stock: ${inv.reason}`);
+            }
             loadPlan(months);
           }}
         />
@@ -452,8 +501,9 @@ export default function Production() {
   );
 }
 
-function BatchModal({ batch, onClose, onSaved }: {
+function BatchModal({ batch, products, onClose, onSaved }: {
   batch: ProductionBatch;
+  products: InvItem[];
   onClose: () => void;
   onSaved: (b: ProductionBatch, isNew: boolean) => void;
 }) {
@@ -461,9 +511,22 @@ function BatchModal({ batch, onClose, onSaved }: {
   const [form, setForm] = useState<ProductionBatch>(batch);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
+  const [addToInventory, setAddToInventory] = useState(true);
+  const [prodQuery, setProdQuery] = useState("");
+  const [showList, setShowList] = useState(false);
 
   const set = <K extends keyof ProductionBatch>(k: K, v: ProductionBatch[K]) =>
     setForm((f) => ({ ...f, [k]: v }));
+
+  const matches = useMemo(() => {
+    const q = prodQuery.trim().toLowerCase();
+    if (!q) return [];
+    return products
+      .filter((p) => p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q))
+      .slice(0, 8);
+  }, [prodQuery, products]);
+
+  const willInventory = addToInventory && form.status === "done" && !form.inventoried && !!form.sku;
 
   const save = async () => {
     if (!form.product_name.trim()) { setErr("Product name is required"); return; }
@@ -482,6 +545,7 @@ function BatchModal({ batch, onClose, onSaved }: {
       label_ordered: form.label_ordered,
       label_qty: form.label_qty,
       notes: form.notes,
+      add_to_inventory: addToInventory,
     };
     try {
       const res = isNew ? await createProductionBatch(payload) : await updateProductionBatch(form.id, payload);
@@ -506,7 +570,32 @@ function BatchModal({ batch, onClose, onSaved }: {
           {err && <div className="bg-red-50 border border-red-200 rounded-lg p-2.5 text-sm text-red-700">{err}</div>}
           <div>
             <label className={label}>Product</label>
-            <input className={input} value={form.product_name} onChange={(e) => set("product_name", e.target.value)} />
+            <input className={input} value={form.product_name} onChange={(e) => { set("product_name", e.target.value); set("sku", null); }} />
+            {form.sku && <p className="text-xs text-emerald-600 mt-1">Linked to {form.sku} &mdash; "Done" can add to HQ stock</p>}
+            <div className="relative mt-2">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
+              <input
+                className="w-full pl-8 pr-3 py-1.5 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-1 focus:ring-green-500"
+                placeholder="Link to a catalog product (for repackaged / ad-hoc items)..."
+                value={prodQuery}
+                onChange={(e) => { setProdQuery(e.target.value); setShowList(true); }}
+                onFocus={() => setShowList(true)}
+              />
+              {showList && matches.length > 0 && (
+                <div className="absolute z-10 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto">
+                  {matches.map((p) => (
+                    <button
+                      key={p.sku}
+                      onClick={() => { set("product_name", p.name); set("sku", p.sku); setProdQuery(""); setShowList(false); }}
+                      className="block w-full text-left px-3 py-2 text-xs hover:bg-gray-50"
+                    >
+                      <div className="text-gray-900">{p.name}</div>
+                      <div className="text-gray-400">{p.sku}</div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
@@ -558,6 +647,27 @@ function BatchModal({ batch, onClose, onSaved }: {
             <label className={label}>Notes</label>
             <textarea className={input} rows={2} value={form.notes || ""} onChange={(e) => set("notes", e.target.value)} />
           </div>
+          {!form.inventoried && (
+            <div className="bg-emerald-50 border border-emerald-100 rounded-lg p-3">
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" checked={addToInventory} onChange={(e) => setAddToInventory(e.target.checked)} className="w-4 h-4 accent-emerald-600" />
+                Add produced qty to HQ stock when marked <strong>Done</strong>
+              </label>
+              {willInventory && (
+                <p className="text-xs text-emerald-700 mt-1">
+                  Will add {Number(form.produced_qty) || Number(form.planned_qty) || 0} to HQ inventory on save.
+                </p>
+              )}
+              {addToInventory && form.status === "done" && !form.sku && (
+                <p className="text-xs text-amber-600 mt-1">Link a catalog product above so it can be added to HQ stock.</p>
+              )}
+            </div>
+          )}
+          {form.inventoried && (
+            <div className="bg-emerald-50 border border-emerald-100 rounded-lg p-3 text-sm text-emerald-700">
+              Already added {form.inventoried_qty} to HQ stock{form.inventoried_at ? ` on ${form.inventoried_at}` : ""}.
+            </div>
+          )}
         </div>
         <div className="flex justify-end gap-2 px-5 py-4 border-t border-gray-100 sticky bottom-0 bg-white">
           <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg">Cancel</button>
