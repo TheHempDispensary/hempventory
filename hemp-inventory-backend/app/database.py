@@ -761,6 +761,16 @@ async def init_db():
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Track whether a finished batch's output was added to HQ Clover stock.
+        for _col, _decl in [
+            ("inventoried", "INTEGER DEFAULT 0"),
+            ("inventoried_at", "TIMESTAMP"),
+            ("inventoried_qty", "REAL"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE production_batches ADD COLUMN {_col} {_decl}")
+            except Exception:
+                pass
 
         # Seed FIRST10 if promo_codes table is empty
         cursor = await db.execute("SELECT COUNT(*) FROM promo_codes")

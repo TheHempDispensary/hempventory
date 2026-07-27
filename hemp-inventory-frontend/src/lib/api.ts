@@ -810,8 +810,12 @@ export interface ProductionBatch {
   source: string;
   plan_date: string | null;
   completed_at: string | null;
+  inventoried: boolean;
+  inventoried_at: string | null;
+  inventoried_qty: number | null;
   created_at: string;
   updated_at: string;
+  inventory_result?: { ok: boolean; reason?: string; previous?: number; new?: number; added?: number };
 }
 
 export interface BatchPayload {
@@ -830,6 +834,7 @@ export interface BatchPayload {
   notes?: string | null;
   source?: string;
   plan_date?: string | null;
+  add_to_inventory?: boolean;
 }
 
 export const getProductionFlags = () =>
@@ -863,5 +868,8 @@ export const updateProductionBatch = (id: number, payload: BatchPayload) =>
 
 export const deleteProductionBatch = (id: number) =>
   api.delete(`/api/production/batches/${id}`);
+
+export const addBatchToInventory = (id: number) =>
+  api.post<ProductionBatch>(`/api/production/batches/${id}/add-to-inventory`);
 
 export default api;
