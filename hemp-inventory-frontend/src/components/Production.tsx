@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   Factory, RefreshCw, Search, Plus, Trash2, X, Check, ClipboardList,
-  Beaker, PackageCheck, CheckCircle2, Boxes,
+  Beaker, PackageCheck, CheckCircle2, Boxes, Pencil,
 } from "lucide-react";
 import {
   getProductionPlan, getProductionBatches, createProductionBatch,
@@ -50,8 +50,12 @@ export default function Production() {
   const [editing, setEditing] = useState<ProductionBatch | null>(null);
   const [toast, setToast] = useState("");
 
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkAdding, setBulkAdding] = useState(false);
+
   const loadPlan = async (m: number) => {
     setLoading(true); setError("");
+    setSelected(new Set());
     try {
       const res = await getProductionPlan(m);
       setPlan(res.data.items);
@@ -136,6 +140,38 @@ export default function Production() {
     await loadPlan(months); // refresh already_planned
   };
 
+  const toggleSelect = (sku: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(sku)) next.delete(sku); else next.add(sku);
+      return next;
+    });
+  };
+
+  const addSelectedToPlan = async () => {
+    const items = filteredPlan.filter((p) => p.to_produce > 0 && selected.has(p.sku));
+    if (items.length === 0) return;
+    setBulkAdding(true);
+    try {
+      const created: ProductionBatch[] = [];
+      for (const item of items) {
+        const res = await createProductionBatch({
+          product_name: item.name,
+          sku: item.sku,
+          planned_qty: item.to_produce,
+          status: "planned",
+          source: "smart_par",
+        });
+        created.push(res.data);
+      }
+      setBatches((prev) => [...created, ...prev]);
+      flash(`Added ${created.length} batch${created.length === 1 ? "" : "es"} to the board.`);
+      await loadPlan(months);
+    } catch (e: unknown) {
+      flash(e instanceof Error ? e.message : "Couldn't create batches.");
+    } finally { setBulkAdding(false); }
+  };
+
   const advance = async (b: ProductionBatch) => {
     const next = NEXT_STATUS[b.status];
     if (!next) return;
@@ -174,6 +210,20 @@ export default function Production() {
     const q = planSearch.toLowerCase();
     return plan.filter((p) => p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q));
   }, [plan, planSearch]);
+
+  const selectablePlan = useMemo(
+    () => filteredPlan.filter((p) => p.to_produce > 0),
+    [filteredPlan],
+  );
+  const allSelected = selectablePlan.length > 0 && selectablePlan.every((p) => selected.has(p.sku));
+  const selectedCount = selectablePlan.filter((p) => selected.has(p.sku)).length;
+
+  const toggleSelectAll = () => {
+    setSelected((prev) => {
+      if (selectablePlan.every((p) => prev.has(p.sku))) return new Set();
+      return new Set(selectablePlan.map((p) => p.sku));
+    });
+  };
 
   const filteredInventory = useMemo(() => {
     let list = inventory;
@@ -287,13 +337,44 @@ export default function Production() {
                 </div>
               ) : (
                 <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-                  <div className="px-4 py-3 border-b border-gray-100 text-sm text-gray-500">
-                    <strong>{filteredPlan.length}</strong> in-house products &mdash; <strong>To Produce</strong> = need (from Smart PAR) minus what's already planned
-                  </div>
+                  {selectedCount > 0 ? (
+                    <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between gap-3 bg-green-50">
+                      <span className="text-sm text-green-800 font-medium">{selectedCount} selected</span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => setSelected(new Set())}
+                          className="px-2.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-100 rounded-md"
+                        >
+                          Clear
+                        </button>
+                        <button
+                          onClick={addSelectedToPlan}
+                          disabled={bulkAdding}
+                          className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium bg-green-600 text-white rounded-md hover:bg-green-700 disabled:opacity-50"
+                        >
+                          <Plus className="w-3.5 h-3.5" /> {bulkAdding ? "Adding..." : `Create ${selectedCount} batch${selectedCount === 1 ? "" : "es"}`}
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="px-4 py-3 border-b border-gray-100 text-sm text-gray-500">
+                      <strong>{filteredPlan.length}</strong> in-house products &mdash; <strong>To Produce</strong> = need (from Smart PAR) minus what's already planned. Tick rows to create several batches at once.
+                    </div>
+                  )}
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm">
                       <thead className="bg-gray-50 text-left">
                         <tr>
+                          <th className="px-4 py-3 w-10">
+                            <input
+                              type="checkbox"
+                              checked={allSelected}
+                              disabled={selectablePlan.length === 0}
+                              onChange={toggleSelectAll}
+                              className="w-4 h-4 accent-green-600 disabled:opacity-40"
+                              title="Select all"
+                            />
+                          </th>
                           <th className="px-4 py-3 font-medium text-gray-600">Product</th>
                           <th className="px-4 py-3 font-medium text-gray-600 text-right whitespace-nowrap">In Stock</th>
                           <th className="px-4 py-3 font-medium text-gray-600 text-right whitespace-nowrap">Sold/mo</th>
@@ -305,7 +386,17 @@ export default function Production() {
                       </thead>
                       <tbody className="divide-y divide-gray-100">
                         {filteredPlan.map((p) => (
-                          <tr key={p.sku} className="hover:bg-gray-50">
+                          <tr key={p.sku} className={`hover:bg-gray-50 ${selected.has(p.sku) ? "bg-green-50/60" : ""}`}>
+                            <td className="px-4 py-3">
+                              {p.to_produce > 0 && (
+                                <input
+                                  type="checkbox"
+                                  checked={selected.has(p.sku)}
+                                  onChange={() => toggleSelect(p.sku)}
+                                  className="w-4 h-4 accent-green-600"
+                                />
+                              )}
+                            </td>
                             <td className="px-4 py-3">
                               <div className="font-medium text-gray-900">{p.name}</div>
                               <div className="text-xs text-gray-400">{p.categories.join(", ")}</div>
@@ -332,7 +423,7 @@ export default function Production() {
                           </tr>
                         ))}
                         {filteredPlan.length === 0 && (
-                          <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-500">Nothing to produce right now.</td></tr>
+                          <tr><td colSpan={8} className="px-4 py-8 text-center text-gray-500">Nothing to produce right now.</td></tr>
                         )}
                       </tbody>
                     </table>
@@ -380,9 +471,14 @@ export default function Production() {
                           <button onClick={() => setEditing(b)} className="text-left font-medium text-sm text-gray-900 hover:text-green-700">
                             {b.product_name}
                           </button>
-                          <button onClick={() => removeBatch(b.id)} className="text-gray-300 hover:text-red-500">
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button onClick={() => setEditing(b)} title="Edit / rename / add note" className="text-gray-300 hover:text-green-600">
+                              <Pencil className="w-3.5 h-3.5" />
+                            </button>
+                            <button onClick={() => removeBatch(b.id)} title="Delete batch" className="text-gray-300 hover:text-red-500">
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
                         </div>
                         <div className="text-xs text-gray-500 mt-1 space-y-0.5">
                           {b.size && <div>Size: {b.size}</div>}
@@ -392,6 +488,7 @@ export default function Production() {
                           {b.batch_no && <div>Batch #{b.batch_no}</div>}
                           {b.expiration_date && <div>Exp: {b.expiration_date}</div>}
                           {b.made_by && <div>By: {b.made_by}</div>}
+                          {b.notes && <div className="mt-1 text-gray-600 bg-gray-50 rounded px-1.5 py-1 whitespace-pre-wrap break-words">{b.notes}</div>}
                         </div>
                         <div className="flex flex-wrap items-center gap-1.5 mt-2">
                           {b.qa_check && <span className="inline-flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 rounded bg-green-100 text-green-700"><Check className="w-2.5 h-2.5" />QA</span>}
@@ -569,8 +666,9 @@ function BatchModal({ batch, products, onClose, onSaved }: {
         <div className="p-5 space-y-4">
           {err && <div className="bg-red-50 border border-red-200 rounded-lg p-2.5 text-sm text-red-700">{err}</div>}
           <div>
-            <label className={label}>Product</label>
+            <label className={label}>Product name / title</label>
             <input className={input} value={form.product_name} onChange={(e) => { set("product_name", e.target.value); set("sku", null); }} />
+            <p className="text-xs text-gray-400 mt-1">Rename freely (e.g. making a different strain in place of one you're out of). Editing the name unlinks the catalog SKU &mdash; re-link below if you want "Done" to add it to HQ stock.</p>
             {form.sku && <p className="text-xs text-emerald-600 mt-1">Linked to {form.sku} &mdash; "Done" can add to HQ stock</p>}
             <div className="relative mt-2">
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
