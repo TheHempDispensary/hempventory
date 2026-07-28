@@ -142,7 +142,7 @@ async def test_manual_add_to_inventory_endpoint(db, monkeypatch):
         await pr.add_batch_to_inventory(b["id"], user={}, db=db)  # already done
 
 
-async def test_plan_subtracts_open_batches(db, monkeypatch):
+async def test_plan_reports_full_need_without_deducting_open_batches(db, monkeypatch):
     # Flag a product and stub Smart PAR to report it needs 100 units.
     await pr.set_flag("SKU-A", pr.FlagSet(made_in_house=True, product_name="Widget"), user={}, db=db)
 
@@ -163,11 +163,12 @@ async def test_plan_subtracts_open_batches(db, monkeypatch):
     assert item["needed"] == 100
     assert item["to_produce"] == 100
 
-    # An open batch of 30 reduces to_produce to 70; a done batch does not.
+    # Open batches are surfaced in "already_planned" but do NOT reduce
+    # to_produce — the plan always shows the full Smart PAR need.
     await pr.create_batch(pr.BatchCreate(product_name="Widget", sku="SKU-A", planned_qty=30, status="in_production"), user={}, db=db)
     await pr.create_batch(pr.BatchCreate(product_name="Widget", sku="SKU-A", planned_qty=999, status="done"), user={}, db=db)
 
     res = await pr.production_plan(months=3, user={}, db=db)
     item = res["items"][0]
     assert item["already_planned"] == 30
-    assert item["to_produce"] == 70
+    assert item["to_produce"] == 100

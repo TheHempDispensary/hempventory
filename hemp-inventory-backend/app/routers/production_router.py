@@ -274,8 +274,8 @@ async def production_plan(
     """What to produce, per in-house product, derived from Smart PAR.
 
     needed        = Smart PAR order qty (par − current stock)
-    already_planned = open batch quantity not yet finished
-    to_produce    = max(needed − already_planned, 0)
+    already_planned = open batch quantity not yet finished (shown for reference)
+    to_produce    = max(needed, 0)   # full need; does NOT deduct already_planned
     """
     cursor = await db.execute("SELECT sku, product_name FROM production_flags")
     flag_rows = await cursor.fetchall()
@@ -305,7 +305,10 @@ async def production_plan(
         units_per_month = p["units_per_month"] if p else 0
         categories = p["categories"] if p else []
         already_planned = planned_by_sku.get(sku, 0)
-        to_produce = max(needed - already_planned, 0)
+        # "To produce" reflects the full Smart PAR need and does NOT deduct
+        # batches already planned — open batches are shown separately in the
+        # "Planned" column for visibility, but shouldn't hide the recommendation.
+        to_produce = max(needed, 0)
         items.append({
             "sku": sku,
             "name": p["name"] if p else name,
