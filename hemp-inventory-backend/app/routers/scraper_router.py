@@ -1,5 +1,6 @@
 """Product scraper router for pulling packaging product data from manufacturer websites."""
 
+import asyncio
 import json
 import re
 import urllib.parse
@@ -41,6 +42,9 @@ MANUFACTURER_CATALOG: dict[str, dict] = {
     "sana": {"domain": "sanapackaging.com", "platform": "shopify"},
     "n2 packaging": {"domain": "n2packagingsystems.com", "platform": "shopify"},
     "n2": {"domain": "n2packagingsystems.com", "platform": "shopify"},
+    "marijuana packaging": {"domain": "marijuanapackaging.com", "platform": "shopify"},
+    "marijuanapackaging": {"domain": "marijuanapackaging.com", "platform": "shopify"},
+    "marijuanapackaging.com": {"domain": "marijuanapackaging.com", "platform": "shopify"},
 }
 
 # Known packaging distributor sites to search directly
@@ -71,17 +75,52 @@ class ProductResult(BaseModel):
     error: Optional[str] = None
 
 
+# HTTP status codes that indicate the site is actively blocking automated
+# access (bot protection / rate limiting) rather than the product being absent.
+BLOCK_STATUSES = {401, 403, 429, 503}
+
+
+def _extract_domain(manufacturer: str) -> Optional[str]:
+    """Return the bare hostname if the input looks like a domain or URL.
+
+    Users often paste a full site (e.g. "marijuanapackaging.com" or
+    "https://www.greentechpackaging.com/"). We must scrape that exact domain
+    instead of mangling it into a guessed name.
+    """
+    text = (manufacturer or "").strip().lower()
+    if "://" in text:
+        text = text.split("://", 1)[1]
+    text = text.split("/", 1)[0].strip().strip(".")
+    if re.match(r"^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$", text):
+        return text
+    return None
+
+
+async def _get_with_retry(client: httpx.AsyncClient, url: str) -> httpx.Response:
+    """GET a URL, retrying briefly on transient rate-limit / throttle responses."""
+    last: Optional[httpx.Response] = None
+    for attempt in range(3):
+        resp = await client.get(url, headers=HEADERS, follow_redirects=True, timeout=15.0)
+        if resp.status_code not in BLOCK_STATUSES:
+            resp.raise_for_status()
+            return resp
+        last = resp
+        if attempt < 2:
+            await asyncio.sleep(1.5 * (attempt + 1))
+    assert last is not None
+    last.raise_for_status()
+    return last
+
+
 async def _fetch_page(client: httpx.AsyncClient, url: str) -> BeautifulSoup:
     """Fetch a URL and return parsed BeautifulSoup."""
-    resp = await client.get(url, headers=HEADERS, follow_redirects=True, timeout=15.0)
-    resp.raise_for_status()
+    resp = await _get_with_retry(client, url)
     return BeautifulSoup(resp.text, "html.parser")
 
 
 async def _fetch_json(client: httpx.AsyncClient, url: str) -> dict:
     """Fetch a URL and return parsed JSON."""
-    resp = await client.get(url, headers=HEADERS, follow_redirects=True, timeout=15.0)
-    resp.raise_for_status()
+    resp = await _get_with_retry(client, url)
     return resp.json()
 
 
@@ -246,6 +285,12 @@ async def scrape_shopify(
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
             result.error = f"Product catalog not available on {domain}."
+        elif e.response.status_code in BLOCK_STATUSES:
+            result.error = (
+                f"{domain} is blocking automated access (bot protection / rate limit), "
+                "so its catalog can't be scraped from the server. Add this product's "
+                "image and description manually."
+            )
         else:
             result.error = f"Error accessing {domain}: {e.response.status_code}"
     except Exception as e:
@@ -417,15 +462,21 @@ async def scrape_by_domain_guess(
 ) -> ProductResult:
     """Try to guess the manufacturer domain and scrape it."""
     result = ProductResult(manufacturer=manufacturer, model_number=model_number)
-    clean_name = re.sub(r"[^a-z0-9]", "", manufacturer.lower())
 
-    domain_guesses = [
-        f"{clean_name}.com",
-        f"www.{clean_name}.com",
-        f"{clean_name}packaging.com",
-        f"{clean_name}containers.com",
-    ]
+    typed_domain = _extract_domain(manufacturer)
+    if typed_domain:
+        bare = typed_domain[4:] if typed_domain.startswith("www.") else typed_domain
+        domain_guesses = [bare, f"www.{bare}"]
+    else:
+        clean_name = re.sub(r"[^a-z0-9]", "", manufacturer.lower())
+        domain_guesses = [
+            f"{clean_name}.com",
+            f"www.{clean_name}.com",
+            f"{clean_name}packaging.com",
+            f"{clean_name}containers.com",
+        ]
 
+    blocked = False
     for domain in domain_guesses:
         # First try Shopify products.json
         try:
@@ -434,6 +485,9 @@ async def scrape_by_domain_guess(
             products = data.get("products", [])
             if products:
                 return await scrape_shopify(client, domain, manufacturer, model_number)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in BLOCK_STATUSES:
+                blocked = True
         except Exception:
             pass
 
@@ -477,6 +531,10 @@ async def scrape_by_domain_guess(
                         return result
                 except Exception:
                     continue
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in BLOCK_STATUSES:
+                blocked = True
+            continue
         except Exception:
             continue
 
@@ -496,10 +554,19 @@ async def scrape_by_domain_guess(
         result.error = f"Search error: {str(e)}"
 
     if not result.product_name and not result.image_urls:
-        result.error = (
-            f"Could not find manufacturer website for '{manufacturer}'. "
-            "Try one of the supported manufacturers or check the spelling."
-        )
+        if blocked:
+            site = typed_domain or manufacturer
+            result.error = (
+                f"{site} is blocking automated access (bot protection / rate limit), "
+                "so its catalog can't be scraped from the server. Add this product's "
+                "image and description manually, or try a supported manufacturer."
+            )
+        else:
+            result.error = (
+                f"Could not find manufacturer website for '{manufacturer}'. "
+                "Enter the full site (e.g. marijuanapackaging.com), pick a supported "
+                "manufacturer, or check the spelling."
+            )
     return result
 
 
