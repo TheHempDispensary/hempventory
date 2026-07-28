@@ -327,15 +327,29 @@ class CloverClient:
     # === Item Groups / Variants ===
 
     async def get_item_groups(self) -> dict:
-        """Get all item groups (items with variants)."""
+        """Get all item groups (items with variants), paging past Clover's 1000-row cap."""
+        limit = 1000
+        offset = 0
+        all_groups: list[dict] = []
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await self._request_with_retry(
-                client, "get",
-                f"{self.base_url}/item_groups",
-                headers=self._headers(),
-                params={"expand": "attributes,attributes.options,items", "limit": 1000},
-            )
-            return resp.json()
+            while True:
+                resp = await self._request_with_retry(
+                    client, "get",
+                    f"{self.base_url}/item_groups",
+                    headers=self._headers(),
+                    params={
+                        "expand": "attributes,attributes.options,items",
+                        "limit": limit,
+                        "offset": offset,
+                    },
+                )
+                elements = resp.json().get("elements", [])
+                all_groups.extend(elements)
+                if len(elements) < limit:
+                    break
+                offset += limit
+                await asyncio.sleep(0.3)
+        return {"elements": all_groups}
 
     async def create_item_group(self, name: str) -> dict:
         """Create an item group for variants."""

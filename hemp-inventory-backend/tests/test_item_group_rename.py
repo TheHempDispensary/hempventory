@@ -119,6 +119,38 @@ async def test_rename_refuses_leaflife(fake_clover):
     assert _FakeClover.store["HQ"]["g3"]["name"] == "SOUR DIESEL EVERYDAY"
 
 
+async def test_rename_covers_duplicate_named_groups(monkeypatch):
+    # Clover holds several groups with the same name (a stale empty one + the
+    # active one); the rename must hit every match so the live group is covered.
+    _FakeClover.store = {
+        "WEST": {
+            "stale": {"name": "THC FLOWER BLUE DREAM", "items": []},
+            "live": {"name": "THC FLOWER BLUE DREAM",
+                     "items": [{"size": "3.5 GRAMS", "sku": "BD-3.5"}]},
+        },
+    }
+
+    async def fake_locations(db, location_ids=None):
+        return [(1, "West", "WEST", "tok")]
+
+    monkeypatch.setattr(ir, "CloverClient", _FakeClover)
+    monkeypatch.setattr(ir, "_get_locations", fake_locations)
+
+    res = await ir.rename_item_group(
+        ir.ItemGroupRename(
+            current_name="THC FLOWER BLUE DREAM",
+            new_name="THC FLOWER BLUE DREAM SATIVA",
+        ),
+        user={}, db=None,
+    )
+    west = next(r for r in res["results"] if r["location"] == "West")
+    assert west["status"] == "renamed"
+    assert west["groups_renamed"] == 2
+    assert "THC FLOWER BLUE DREAM SATIVA 3.5 GRAMS" in west["item_names"]
+    assert _FakeClover.store["WEST"]["stale"]["name"] == "THC FLOWER BLUE DREAM SATIVA"
+    _FakeClover.store = {}
+
+
 async def test_rename_rejects_noop(fake_clover):
     with pytest.raises(ir.HTTPException) as exc:
         await ir.rename_item_group(

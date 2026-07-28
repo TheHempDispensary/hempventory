@@ -2638,37 +2638,50 @@ async def rename_item_group(
             client = CloverClient(merchant_id, api_token)
             data = await client.get_item_groups()
             groups = data.get("elements", [])
-            match = next(
-                (g for g in groups if _normalise_name(g.get("name", "")) == norm_current),
-                None,
-            )
-            if not match:
+            # Clover often holds several groups with the same name (stale
+            # duplicates + the active one); rename every match so the live
+            # group is always covered.
+            matches = [
+                g for g in groups
+                if _normalise_name(g.get("name", "")) == norm_current
+            ]
+            if not matches:
                 results.append({"location": loc_name, "status": "not_found"})
                 continue
 
-            group_id = match.get("id", "")
-            variant_skus = [
-                it.get("sku", "")
-                for it in match.get("items", {}).get("elements", [])
-            ]
-            if _is_leaflife_group(match.get("name", ""), variant_skus):
-                results.append({"location": loc_name, "status": "skipped_leaflife"})
-                continue
+            loc_item_names: list[str] = []
+            loc_renamed = 0
+            loc_skipped_ll = False
+            for match in matches:
+                variant_skus = [
+                    it.get("sku", "")
+                    for it in match.get("items", {}).get("elements", [])
+                ]
+                if _is_leaflife_group(match.get("name", ""), variant_skus):
+                    loc_skipped_ll = True
+                    continue
+                await client.update_item_group(match.get("id", ""), new_name)
+                # Re-fetch to confirm Clover cascaded the rename to the items.
+                refreshed = await client.get_item_group(match.get("id", ""))
+                loc_item_names.extend(
+                    " ".join((it.get("name", "") or "").split())
+                    for it in refreshed.get("items", {}).get("elements", [])
+                )
+                loc_renamed += 1
 
-            await client.update_item_group(group_id, new_name)
-            # Re-fetch to confirm Clover cascaded the rename to the variant items.
-            refreshed = await client.get_item_group(group_id)
-            item_names = [
-                " ".join((it.get("name", "") or "").split())
-                for it in refreshed.get("items", {}).get("elements", [])
-            ]
-            renamed_any = True
-            results.append({
-                "location": loc_name,
-                "status": "renamed",
-                "group_name": refreshed.get("name", new_name),
-                "item_names": item_names,
-            })
+            if loc_renamed:
+                renamed_any = True
+                results.append({
+                    "location": loc_name,
+                    "status": "renamed",
+                    "group_name": new_name,
+                    "groups_renamed": loc_renamed,
+                    "item_names": loc_item_names,
+                })
+            elif loc_skipped_ll:
+                results.append({"location": loc_name, "status": "skipped_leaflife"})
+            else:
+                results.append({"location": loc_name, "status": "not_found"})
         except httpx.HTTPStatusError as e:
             error_detail = str(e)
             try:
