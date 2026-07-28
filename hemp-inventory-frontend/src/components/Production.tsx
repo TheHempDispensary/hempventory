@@ -29,6 +29,11 @@ const NEXT_STATUS: Record<ProductionBatch["status"], ProductionBatch["status"] |
 
 type Tab = "plan" | "board" | "products";
 
+// Some Clover products share a SKU (e.g. a "BATCH ..." duplicate), so selection
+// and React keys must use name too — otherwise duplicate-SKU rows collide and
+// one silently disappears from the list.
+const planKey = (p: ProductionPlanItem) => `${p.sku}::${p.name}`;
+
 interface InvItem { sku: string; name: string; categories?: string[]; }
 
 export default function Production() {
@@ -182,16 +187,16 @@ export default function Production() {
     });
   };
 
-  const toggleSelect = (sku: string) => {
+  const toggleSelect = (key: string) => {
     setSelected((prev) => {
       const next = new Set(prev);
-      if (next.has(sku)) next.delete(sku); else next.add(sku);
+      if (next.has(key)) next.delete(key); else next.add(key);
       return next;
     });
   };
 
   const addSelectedToPlan = async () => {
-    const items = filteredPlan.filter((p) => p.to_produce > 0 && selected.has(p.sku));
+    const items = filteredPlan.filter((p) => p.to_produce > 0 && selected.has(planKey(p)));
     if (items.length === 0) return;
     setBulkAdding(true);
     try {
@@ -257,13 +262,13 @@ export default function Production() {
     () => filteredPlan.filter((p) => p.to_produce > 0),
     [filteredPlan],
   );
-  const allSelected = selectablePlan.length > 0 && selectablePlan.every((p) => selected.has(p.sku));
-  const selectedCount = selectablePlan.filter((p) => selected.has(p.sku)).length;
+  const allSelected = selectablePlan.length > 0 && selectablePlan.every((p) => selected.has(planKey(p)));
+  const selectedCount = selectablePlan.filter((p) => selected.has(planKey(p))).length;
 
   const toggleSelectAll = () => {
     setSelected((prev) => {
-      if (selectablePlan.every((p) => prev.has(p.sku))) return new Set();
-      return new Set(selectablePlan.map((p) => p.sku));
+      if (selectablePlan.every((p) => prev.has(planKey(p)))) return new Set();
+      return new Set(selectablePlan.map(planKey));
     });
   };
 
@@ -425,13 +430,13 @@ export default function Production() {
                       </thead>
                       <tbody className="divide-y divide-gray-100">
                         {filteredPlan.map((p) => (
-                          <tr key={p.sku} className={`hover:bg-gray-50 ${selected.has(p.sku) ? "bg-green-50/60" : ""}`}>
+                          <tr key={planKey(p)} className={`hover:bg-gray-50 ${selected.has(planKey(p)) ? "bg-green-50/60" : ""}`}>
                             <td className="px-4 py-3">
                               {p.to_produce > 0 && (
                                 <input
                                   type="checkbox"
-                                  checked={selected.has(p.sku)}
-                                  onChange={() => toggleSelect(p.sku)}
+                                  checked={selected.has(planKey(p))}
+                                  onChange={() => toggleSelect(planKey(p))}
                                   className="w-4 h-4 accent-green-600"
                                 />
                               )}
@@ -632,7 +637,7 @@ export default function Production() {
             {filteredInventory.map((i) => {
               const on = flags.has(i.sku);
               return (
-                <label key={i.sku} className="flex items-center gap-3 px-4 py-2.5 cursor-pointer hover:bg-gray-50">
+                <label key={`${i.sku}::${i.name}`} className="flex items-center gap-3 px-4 py-2.5 cursor-pointer hover:bg-gray-50">
                   <input type="checkbox" checked={on} onChange={() => toggleFlag(i.sku, i.name)} className="w-4 h-4 accent-green-600" />
                   <div className="min-w-0 flex-1">
                     <div className="text-sm text-gray-900 truncate">{i.name}</div>
