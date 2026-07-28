@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Factory, RefreshCw, Search, Plus, Trash2, X, Check, ClipboardList,
   Beaker, PackageCheck, CheckCircle2, Boxes, Pencil, GripVertical,
@@ -54,22 +54,26 @@ export default function Production() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bulkAdding, setBulkAdding] = useState(false);
 
+  const dragIdRef = useRef<number | null>(null);
   const [dragId, setDragId] = useState<number | null>(null);
   const [dragOverId, setDragOverId] = useState<number | null>(null);
 
-  const reorderWithinColumn = async (status: ProductionBatch["status"], targetId: number) => {
-    const draggedId = dragId;
+  // Reorder the dragged card to sit before `targetId` (or at the end when
+  // targetId is null) within its own status column, then persist the order.
+  const reorderWithinColumn = async (status: ProductionBatch["status"], targetId: number | null) => {
+    const draggedId = dragIdRef.current;
+    dragIdRef.current = null;
     setDragId(null);
     setDragOverId(null);
     if (draggedId == null || draggedId === targetId) return;
     const colItems = batches.filter((b) => b.status === status);
     const others = batches.filter((b) => b.status !== status);
     const fromIdx = colItems.findIndex((b) => b.id === draggedId);
-    const toIdx = colItems.findIndex((b) => b.id === targetId);
-    if (fromIdx < 0 || toIdx < 0) return;
+    if (fromIdx < 0) return; // dragged card is in a different column — ignore
     const reordered = [...colItems];
     const [moved] = reordered.splice(fromIdx, 1);
-    reordered.splice(toIdx, 0, moved);
+    const toIdx = targetId == null ? reordered.length : reordered.findIndex((b) => b.id === targetId);
+    reordered.splice(toIdx < 0 ? reordered.length : toIdx, 0, moved);
     const withOrder = reordered.map((b, i) => ({ ...b, sort_order: i }));
     setBatches([...others, ...withOrder]);
     try {
@@ -264,7 +268,9 @@ export default function Production() {
   };
 
   const filteredInventory = useMemo(() => {
-    let list = inventory;
+    // Made In-House covers every product except LeafLife (LF-) items, which
+    // ship from the partner and are never produced in-house.
+    let list = inventory.filter((i) => !(i.sku || "").toUpperCase().startsWith("LF-"));
     if (prodSearch) {
       const q = prodSearch.toLowerCase();
       list = list.filter((i) => i.name.toLowerCase().includes(q) || i.sku.toLowerCase().includes(q));
@@ -499,22 +505,32 @@ export default function Production() {
               const Icon = col.icon;
               const colBatches = batches.filter((b) => b.status === col.id);
               return (
-                <div key={col.id} className="bg-gray-50 rounded-xl border border-gray-200 p-3">
+                <div
+                  key={col.id}
+                  className="bg-gray-50 rounded-xl border border-gray-200 p-3"
+                  onDragOver={(e) => { if (dragId !== null) e.preventDefault(); }}
+                  onDrop={(e) => { e.preventDefault(); reorderWithinColumn(col.id, null); }}
+                >
                   <div className="flex items-center gap-2 mb-3 px-1">
                     <Icon className={`w-4 h-4 ${col.color}`} />
                     <span className="font-semibold text-sm text-gray-700">{col.label}</span>
                     <span className="ml-auto text-xs text-gray-400">{colBatches.length}</span>
                   </div>
-                  <div className="space-y-2">
+                  <div className="space-y-2 min-h-[8px]">
                     {colBatches.map((b) => (
                       <div
                         key={b.id}
                         draggable
-                        onDragStart={() => setDragId(b.id)}
-                        onDragEnd={() => { setDragId(null); setDragOverId(null); }}
-                        onDragOver={(e) => { e.preventDefault(); if (dragId !== null && dragId !== b.id) setDragOverId(b.id); }}
+                        onDragStart={(e) => {
+                          dragIdRef.current = b.id;
+                          setDragId(b.id);
+                          e.dataTransfer.effectAllowed = "move";
+                          e.dataTransfer.setData("text/plain", String(b.id));
+                        }}
+                        onDragEnd={() => { dragIdRef.current = null; setDragId(null); setDragOverId(null); }}
+                        onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; if (dragId !== null && dragId !== b.id) setDragOverId(b.id); }}
                         onDragLeave={() => setDragOverId((cur) => (cur === b.id ? null : cur))}
-                        onDrop={(e) => { e.preventDefault(); reorderWithinColumn(col.id, b.id); }}
+                        onDrop={(e) => { e.preventDefault(); e.stopPropagation(); reorderWithinColumn(col.id, b.id); }}
                         className={`bg-white rounded-lg border p-3 shadow-sm transition ${
                           dragOverId === b.id ? "border-green-400 ring-2 ring-green-200" : "border-gray-200"
                         } ${dragId === b.id ? "opacity-50" : ""}`}
