@@ -3219,6 +3219,23 @@ def _normalise_name(name: str) -> str:
     return " ".join(name.lower().split())
 
 
+_STRAIN_TYPE_WORDS = frozenset({"indica", "sativa", "hybrid"})
+
+
+def _normalise_sales_name(name: str) -> str:
+    """Normalise for sales-velocity matching, ignoring the strain-type label.
+
+    The strain type (indica/sativa/hybrid) is a display label added to product
+    titles; it is not present in older sales records. Dropping it here keeps a
+    product connected to its historical sales even after its title is renamed to
+    include the type (e.g. "THC FLOWER TAHOE OG 3.5 GRAMS" and
+    "THC FLOWER TAHOE OG INDICA 3.5 GRAMS" match to the same sales bucket).
+    """
+    return " ".join(
+        w for w in name.lower().split() if w not in _STRAIN_TYPE_WORDS
+    )
+
+
 def _order_group_cannabinoid(up: str) -> str:
     """Derive the cannabinoid family from an upper-cased product name."""
     if up.startswith("DELTA 8"):
@@ -3629,7 +3646,7 @@ async def smart_par(
                         continue
                     raw_qty = li.get("unitQty", 1000)
                     qty = max(round(raw_qty / 1000), 1)
-                    norm = _normalise_name(li_name)
+                    norm = _normalise_sales_name(li_name)
                     sales_by_product[norm] = sales_by_product.get(norm, 0) + qty
 
         # 2b. Ecommerce orders (website)
@@ -3644,7 +3661,7 @@ async def smart_par(
             p_name, qty, created_at = row[0], row[1], row[2]
             if not p_name:
                 continue
-            norm = _normalise_name(p_name)
+            norm = _normalise_sales_name(p_name)
             sales_by_product[norm] = sales_by_product.get(norm, 0) + (qty or 1)
             # Parse created_at for date range
             if created_at:
@@ -3692,7 +3709,7 @@ async def smart_par(
         # partner and shouldn't drive our reorder recommendations.
         if (item.get("sku") or "").upper().startswith("LF-"):
             continue
-        norm = _normalise_name(item["name"])
+        norm = _normalise_sales_name(item["name"])
         units_sold = sales_by_product.get(norm, 0)
         units_per_day = units_sold / days_of_data
         units_per_month = units_per_day * 30.44  # avg days/month

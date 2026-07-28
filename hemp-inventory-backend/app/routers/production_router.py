@@ -15,21 +15,23 @@ import aiosqlite
 from app.auth import get_current_user
 from app.database import get_db
 from app.clover_client import CloverClient
-from app.routers.inventory_router import smart_par, _do_sync
+from app.routers.inventory_router import smart_par, _do_sync, _normalise_sales_name
 
 router = APIRouter(prefix="/api/production", tags=["production"])
 
 
-async def _add_to_hq_inventory(sku: str, qty: float) -> dict:
+async def _add_to_hq_inventory(sku: str, qty: float, name: str = "") -> dict:
     """Add `qty` units to a product's stock at HQ (Clover). Returns a result dict.
 
-    Matches on Clover SKU first, then Clover item id (Smart PAR uses the raw SKU
-    when present, otherwise the item id). Never lowers stock.
+    Matches on Clover SKU first, then Clover item id. Products without a
+    user-assigned SKU are identified by a per-location Clover item id, which
+    differs from the HQ id, so as a last resort we match by normalised name
+    (ignoring the strain-type label). Never lowers stock.
     """
     from app.routers.ecommerce_router import (
         HQ_MERCHANT_ID, HQ_API_TOKEN, invalidate_product_cache,
     )
-    if not sku:
+    if not sku and not name:
         return {"ok": False, "reason": "batch has no linked product/SKU"}
     if qty <= 0:
         return {"ok": False, "reason": "quantity must be greater than 0"}
@@ -38,13 +40,21 @@ async def _add_to_hq_inventory(sku: str, qty: float) -> dict:
 
     client = CloverClient(HQ_MERCHANT_ID, HQ_API_TOKEN)
     data = await client.get_items(expand="itemStock")
+    elements = data.get("elements", [])
     match = None
-    for it in data.get("elements", []):
-        if (it.get("sku") or "") == sku or it.get("id") == sku:
-            match = it
-            break
+    if sku:
+        for it in elements:
+            if (it.get("sku") or "") == sku or it.get("id") == sku:
+                match = it
+                break
+    if not match and name:
+        target = _normalise_sales_name(name)
+        for it in elements:
+            if _normalise_sales_name(it.get("name") or "") == target:
+                match = it
+                break
     if not match:
-        return {"ok": False, "reason": f"'{sku}' not found in HQ inventory"}
+        return {"ok": False, "reason": f"'{name or sku}' not found in HQ inventory"}
 
     stock = match.get("itemStock") or {}
     current = stock.get("quantity", 0) or 0
@@ -392,6 +402,7 @@ def _batch_row(row: aiosqlite.Row) -> dict:
         "inventoried": bool(row["inventoried"]),
         "inventoried_at": row["inventoried_at"],
         "inventoried_qty": row["inventoried_qty"],
+        "sort_order": row["sort_order"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -405,15 +416,37 @@ async def list_batches(
 ):
     if status:
         cursor = await db.execute(
-            "SELECT * FROM production_batches WHERE status = ? ORDER BY updated_at DESC",
+            "SELECT * FROM production_batches WHERE status = ? "
+            "ORDER BY sort_order ASC, updated_at DESC",
             (status,),
         )
     else:
         cursor = await db.execute(
-            "SELECT * FROM production_batches ORDER BY updated_at DESC"
+            "SELECT * FROM production_batches ORDER BY sort_order ASC, updated_at DESC"
         )
     rows = await cursor.fetchall()
     return {"batches": [_batch_row(r) for r in rows]}
+
+
+class BatchReorder(BaseModel):
+    # Batch ids in the desired top-to-bottom order for a status column.
+    ids: list[int]
+
+
+@router.post("/batches/reorder")
+async def reorder_batches(
+    body: BatchReorder,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Persist the manual top-to-bottom order of cards within a column."""
+    for position, batch_id in enumerate(body.ids):
+        await db.execute(
+            "UPDATE production_batches SET sort_order = ? WHERE id = ?",
+            (position, batch_id),
+        )
+    await db.commit()
+    return {"ok": True, "count": len(body.ids)}
 
 
 @router.post("/batches")
@@ -444,9 +477,9 @@ async def create_batch(
     row = await cursor.fetchone()
 
     inventory_result = None
-    if body.status == "done" and body.add_to_inventory is not False and body.sku:
+    if body.status == "done" and body.add_to_inventory is not False and (body.sku or body.product_name):
         qty = row["produced_qty"] or row["planned_qty"] or 0
-        inventory_result = await _add_to_hq_inventory(body.sku, qty)
+        inventory_result = await _add_to_hq_inventory(body.sku or "", qty, body.product_name or "")
         if inventory_result.get("ok"):
             await db.execute(
                 """UPDATE production_batches
@@ -515,9 +548,9 @@ async def update_batch(
     # (unless explicitly skipped or already inventoried).
     inventory_result = None
     became_done = fields.get("status") == "done" and existing["status"] != "done"
-    if became_done and body.add_to_inventory is not False and not row["inventoried"] and row["sku"]:
+    if became_done and body.add_to_inventory is not False and not row["inventoried"] and (row["sku"] or row["product_name"]):
         qty = row["produced_qty"] or row["planned_qty"] or 0
-        inventory_result = await _add_to_hq_inventory(row["sku"], qty)
+        inventory_result = await _add_to_hq_inventory(row["sku"] or "", qty, row["product_name"] or "")
         if inventory_result.get("ok"):
             await db.execute(
                 """UPDATE production_batches
@@ -549,7 +582,7 @@ async def add_batch_to_inventory(
     if row["inventoried"]:
         raise HTTPException(status_code=400, detail="Batch already added to inventory")
     qty = row["produced_qty"] or row["planned_qty"] or 0
-    inv = await _add_to_hq_inventory(row["sku"] or "", qty)
+    inv = await _add_to_hq_inventory(row["sku"] or "", qty, row["product_name"] or "")
     if not inv.get("ok"):
         raise HTTPException(status_code=400, detail=inv.get("reason", "Could not add to inventory"))
     await db.execute(

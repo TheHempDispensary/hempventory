@@ -828,6 +828,7 @@ export interface ProductionBatch {
   inventoried: boolean;
   inventoried_at: string | null;
   inventoried_qty: number | null;
+  sort_order: number;
   created_at: string;
   updated_at: string;
   inventory_result?: { ok: boolean; reason?: string; previous?: number; new?: number; added?: number };
@@ -886,5 +887,8 @@ export const deleteProductionBatch = (id: number) =>
 
 export const addBatchToInventory = (id: number) =>
   api.post<ProductionBatch>(`/api/production/batches/${id}/add-to-inventory`);
+
+export const reorderProductionBatches = (ids: number[]) =>
+  api.post<{ ok: boolean; count: number }>("/api/production/batches/reorder", { ids });
 
 export default api;

@@ -5,6 +5,7 @@ import pytest
 
 from app.database import DB_PATH, init_db
 from app.routers import production_router as pr
+from app.routers.inventory_router import _normalise_sales_name
 
 
 @pytest.fixture
@@ -101,7 +102,7 @@ async def test_plan_lists_all_products_flagged_or_not(db, monkeypatch):
 async def test_done_adds_to_hq_inventory(db, monkeypatch):
     calls = []
 
-    async def fake_add(sku, qty):
+    async def fake_add(sku, qty, name=""):
         calls.append((sku, qty))
         return {"ok": True, "previous": 5, "new": 5 + qty, "added": qty, "item_id": "X"}
 
@@ -129,7 +130,7 @@ async def test_done_adds_to_hq_inventory(db, monkeypatch):
 async def test_done_respects_skip_and_missing_sku(db, monkeypatch):
     calls = []
 
-    async def fake_add(sku, qty):
+    async def fake_add(sku, qty, name=""):
         calls.append((sku, qty))
         return {"ok": True, "added": qty}
 
@@ -141,15 +142,15 @@ async def test_done_respects_skip_and_missing_sku(db, monkeypatch):
     assert calls == []
     assert r1["inventoried"] is False
 
-    # No SKU → nothing to add.
+    # No SKU but a product name → falls back to matching HQ stock by name.
     b2 = await pr.create_batch(pr.BatchCreate(product_name="B", planned_qty=10), user={}, db=db)
     r2 = await pr.update_batch(b2["id"], pr.BatchUpdate(status="done"), user={}, db=db)
-    assert calls == []
-    assert r2["inventoried"] is False
+    assert calls == [("", 10)]
+    assert r2["inventoried"] is True
 
 
 async def test_manual_add_to_inventory_endpoint(db, monkeypatch):
-    async def fake_add(sku, qty):
+    async def fake_add(sku, qty, name=""):
         return {"ok": True, "previous": 0, "new": qty, "added": qty, "item_id": "Z"}
 
     monkeypatch.setattr(pr, "_add_to_hq_inventory", fake_add)
@@ -192,3 +193,67 @@ async def test_plan_reports_full_need_without_deducting_open_batches(db, monkeyp
     item = res["items"][0]
     assert item["already_planned"] == 30
     assert item["to_produce"] == 100
+
+
+def test_normalise_sales_name_ignores_strain_type():
+    # A renamed title (with the strain type) matches its historical sales name.
+    assert (
+        _normalise_sales_name("THC FLOWER NERDS HYBRID 1 GRAM")
+        == _normalise_sales_name("THC FLOWER NERDS 1 GRAM")
+    )
+    assert (
+        _normalise_sales_name("THC FLOWER TAHOE OG INDICA 3.5 GRAMS")
+        == _normalise_sales_name("THC FLOWER TAHOE OG 3.5 GRAMS")
+    )
+    # Non-type words are preserved; different products stay distinct.
+    assert (
+        _normalise_sales_name("THC FLOWER NERDS HYBRID 1 GRAM")
+        != _normalise_sales_name("THC FLOWER GUAVA HYBRID 1 GRAM")
+    )
+
+
+async def test_reorder_persists_sort_order(db):
+    a = await pr.create_batch(pr.BatchCreate(product_name="A", planned_qty=1, status="planned"), user={}, db=db)
+    b = await pr.create_batch(pr.BatchCreate(product_name="B", planned_qty=1, status="planned"), user={}, db=db)
+    c = await pr.create_batch(pr.BatchCreate(product_name="C", planned_qty=1, status="planned"), user={}, db=db)
+
+    await pr.reorder_batches(pr.BatchReorder(ids=[c["id"], a["id"], b["id"]]), user={}, db=db)
+
+    res = await pr.list_batches(status="planned", user={}, db=db)
+    assert [x["product_name"] for x in res["batches"]] == ["C", "A", "B"]
+
+
+async def test_add_to_hq_inventory_name_fallback(monkeypatch):
+    import app.routers.production_router as prod
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def get_items(self, expand=""):
+            return {"elements": [
+                {"id": "HQID1", "sku": "", "name": "THC FLOWER SKYWALKER OG INDICA 1 GRAM",
+                 "itemStock": {"quantity": 4}},
+            ]}
+
+        async def update_item_stock(self, item_id, qty):
+            self.updated = (item_id, qty)
+
+    monkeypatch.setattr(prod, "CloverClient", FakeClient)
+    monkeypatch.setattr(
+        "app.routers.ecommerce_router.HQ_MERCHANT_ID", "M", raising=False
+    )
+    monkeypatch.setattr(
+        "app.routers.ecommerce_router.HQ_API_TOKEN", "T", raising=False
+    )
+    monkeypatch.setattr(
+        "app.routers.ecommerce_router.invalidate_product_cache", lambda: None, raising=False
+    )
+
+    # SKU/id don't match, but the (type-stripped) name does.
+    res = await prod._add_to_hq_inventory(
+        "Z6NE10A9F5WM8", 10, "THC FLOWER SKYWALKER OG 1 GRAM"
+    )
+    assert res["ok"] is True
+    assert res["item_id"] == "HQID1"
+    assert res["new"] == 14
