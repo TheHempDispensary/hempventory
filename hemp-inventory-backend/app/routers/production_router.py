@@ -281,11 +281,8 @@ async def production_plan(
     flag_rows = await cursor.fetchall()
     flags = {r[0]: r[1] for r in flag_rows}
 
-    if not flags:
-        return {"items": [], "meta": {"months": months, "flagged": 0}}
-
     par = await smart_par(months=months, user=user, db=db)
-    par_by_sku = {p["sku"]: p for p in par.get("products", [])}
+    par_products = par.get("products", [])
 
     # Open (not-yet-done) batch quantities already in the pipeline, per sku.
     cursor = await db.execute(
@@ -296,14 +293,13 @@ async def production_plan(
     )
     planned_by_sku = {r[0]: r[1] for r in await cursor.fetchall()}
 
+    # The plan lists every product Smart PAR tracks (which already excludes
+    # LeafLife LF- items). The "Made In-House" flag is now just a label —
+    # it no longer gates whether a product appears here.
     items: list[dict] = []
-    for sku, name in flags.items():
-        p = par_by_sku.get(sku)
-        needed = int(p["order_qty"]) if p else 0
-        in_stock = p["total_stock"] if p else 0
-        units_sold = p["units_sold"] if p else 0
-        units_per_month = p["units_per_month"] if p else 0
-        categories = p["categories"] if p else []
+    for p in par_products:
+        sku = p["sku"]
+        needed = int(p["order_qty"])
         already_planned = planned_by_sku.get(sku, 0)
         # "To produce" reflects the full Smart PAR need and does NOT deduct
         # batches already planned — open batches are shown separately in the
@@ -311,14 +307,15 @@ async def production_plan(
         to_produce = max(needed, 0)
         items.append({
             "sku": sku,
-            "name": p["name"] if p else name,
-            "categories": categories,
-            "in_stock": in_stock,
-            "units_sold": units_sold,
-            "units_per_month": units_per_month,
+            "name": p["name"],
+            "categories": p["categories"],
+            "in_stock": p["total_stock"],
+            "units_sold": p["units_sold"],
+            "units_per_month": p["units_per_month"],
             "needed": needed,
             "already_planned": already_planned,
             "to_produce": to_produce,
+            "made_in_house": sku in flags,
         })
 
     items.sort(key=lambda x: (-x["to_produce"], x["name"]))

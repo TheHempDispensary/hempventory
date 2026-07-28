@@ -37,7 +37,7 @@ export default function Production() {
   const [error, setError] = useState("");
 
   const [plan, setPlan] = useState<ProductionPlanItem[]>([]);
-  const [flaggedCount, setFlaggedCount] = useState(0);
+  const [, setFlaggedCount] = useState(0);
   const [batches, setBatches] = useState<ProductionBatch[]>([]);
 
   const [flags, setFlags] = useState<Set<string>>(new Set());
@@ -324,12 +324,7 @@ export default function Production() {
             </div>
           </div>
 
-          {flaggedCount === 0 && !loading ? (
-            <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-800">
-              No products are flagged as made in-house yet. Go to the <strong>Made In-House</strong> tab and hit
-              <strong> Auto-detect from sheets</strong> (or flag products manually) to build the plan.
-            </div>
-          ) : (
+          {(
             <>
               <div className="relative">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
@@ -370,7 +365,7 @@ export default function Production() {
                     </div>
                   ) : (
                     <div className="px-4 py-3 border-b border-gray-100 text-sm text-gray-500">
-                      <strong>{filteredPlan.length}</strong> in-house products &mdash; <strong>To Produce</strong> = need from Smart PAR (<strong>Planned</strong> shows batches already in the pipeline). Tick rows to create several batches at once.
+                      <strong>{filteredPlan.length}</strong> products (all except LeafLife) &mdash; <strong>To Produce</strong> = need from Smart PAR (<strong>Planned</strong> shows batches already in the pipeline). Tick rows to create several batches at once.
                     </div>
                   )}
                   <div className="overflow-x-auto">

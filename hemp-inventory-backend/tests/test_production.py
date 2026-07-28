@@ -72,10 +72,30 @@ async def test_create_batch_rejects_bad_status(db):
         )
 
 
-async def test_plan_empty_without_flags(db):
+async def test_plan_lists_all_products_flagged_or_not(db, monkeypatch):
+    # Only SKU-A is flagged made-in-house; both products must still appear.
+    await pr.set_flag("SKU-A", pr.FlagSet(made_in_house=True, product_name="Widget"), user={}, db=db)
+
+    async def fake_smart_par(months, user, db):
+        return {
+            "products": [
+                {"sku": "SKU-A", "name": "Widget", "categories": ["Edibles"],
+                 "total_stock": 5, "units_sold": 200, "units_per_month": 50, "order_qty": 45},
+                {"sku": "SKU-B", "name": "Bought Thing", "categories": ["Flower"],
+                 "total_stock": 1, "units_sold": 30, "units_per_month": 8, "order_qty": 7},
+            ],
+            "meta": {"days_of_data": 120},
+        }
+
+    monkeypatch.setattr(pr, "smart_par", fake_smart_par)
+
     res = await pr.production_plan(months=3, user={}, db=db)
-    assert res["items"] == []
-    assert res["meta"]["flagged"] == 0
+    by_sku = {i["sku"]: i for i in res["items"]}
+    assert set(by_sku) == {"SKU-A", "SKU-B"}
+    assert by_sku["SKU-A"]["made_in_house"] is True
+    assert by_sku["SKU-B"]["made_in_house"] is False
+    assert by_sku["SKU-B"]["to_produce"] == 7
+    assert res["meta"]["flagged"] == 1
 
 
 async def test_done_adds_to_hq_inventory(db, monkeypatch):
