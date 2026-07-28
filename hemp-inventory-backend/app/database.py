@@ -782,6 +782,8 @@ async def init_db():
             ("inventoried", "INTEGER DEFAULT 0"),
             ("inventoried_at", "TIMESTAMP"),
             ("inventoried_qty", "REAL"),
+            # Manual ordering of cards within a status column (lower = higher up).
+            ("sort_order", "INTEGER DEFAULT 0"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE production_batches ADD COLUMN {_col} {_decl}")

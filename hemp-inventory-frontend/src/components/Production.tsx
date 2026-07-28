@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   Factory, RefreshCw, Search, Plus, Trash2, X, Check, ClipboardList,
-  Beaker, PackageCheck, CheckCircle2, Boxes, Pencil,
+  Beaker, PackageCheck, CheckCircle2, Boxes, Pencil, GripVertical,
 } from "lucide-react";
 import {
   getProductionPlan, getProductionBatches, createProductionBatch,
   updateProductionBatch, deleteProductionBatch, getProductionFlags,
   setProductionFlag, seedProductionFlags, getCachedInventory, addBatchToInventory,
+  reorderProductionBatches,
   type ProductionPlanItem, type ProductionBatch, type BatchPayload,
 } from "../lib/api";
 
@@ -52,6 +53,31 @@ export default function Production() {
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bulkAdding, setBulkAdding] = useState(false);
+
+  const [dragId, setDragId] = useState<number | null>(null);
+  const [dragOverId, setDragOverId] = useState<number | null>(null);
+
+  const reorderWithinColumn = async (status: ProductionBatch["status"], targetId: number) => {
+    const draggedId = dragId;
+    setDragId(null);
+    setDragOverId(null);
+    if (draggedId == null || draggedId === targetId) return;
+    const colItems = batches.filter((b) => b.status === status);
+    const others = batches.filter((b) => b.status !== status);
+    const fromIdx = colItems.findIndex((b) => b.id === draggedId);
+    const toIdx = colItems.findIndex((b) => b.id === targetId);
+    if (fromIdx < 0 || toIdx < 0) return;
+    const reordered = [...colItems];
+    const [moved] = reordered.splice(fromIdx, 1);
+    reordered.splice(toIdx, 0, moved);
+    const withOrder = reordered.map((b, i) => ({ ...b, sort_order: i }));
+    setBatches([...others, ...withOrder]);
+    try {
+      await reorderProductionBatches(withOrder.map((b) => b.id));
+    } catch {
+      loadBatches();
+    }
+  };
 
   const loadPlan = async (m: number) => {
     setLoading(true); setError("");
@@ -148,7 +174,7 @@ export default function Production() {
       qa_check: false, label_ordered: false, label_qty: null, notes: null,
       source: "smart_par", plan_date: null, completed_at: null,
       inventoried: false, inventoried_at: null, inventoried_qty: null,
-      created_at: "", updated_at: "",
+      sort_order: 0, created_at: "", updated_at: "",
     });
   };
 
@@ -461,7 +487,7 @@ export default function Production() {
                 qa_check: false, label_ordered: false, label_qty: null, notes: null,
                 source: "manual", plan_date: null, completed_at: null,
                 inventoried: false, inventoried_at: null, inventoried_qty: null,
-                created_at: "", updated_at: "",
+                sort_order: 0, created_at: "", updated_at: "",
               })}
               className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium bg-green-600 text-white rounded-lg hover:bg-green-700"
             >
@@ -481,11 +507,27 @@ export default function Production() {
                   </div>
                   <div className="space-y-2">
                     {colBatches.map((b) => (
-                      <div key={b.id} className="bg-white rounded-lg border border-gray-200 p-3 shadow-sm">
+                      <div
+                        key={b.id}
+                        draggable
+                        onDragStart={() => setDragId(b.id)}
+                        onDragEnd={() => { setDragId(null); setDragOverId(null); }}
+                        onDragOver={(e) => { e.preventDefault(); if (dragId !== null && dragId !== b.id) setDragOverId(b.id); }}
+                        onDragLeave={() => setDragOverId((cur) => (cur === b.id ? null : cur))}
+                        onDrop={(e) => { e.preventDefault(); reorderWithinColumn(col.id, b.id); }}
+                        className={`bg-white rounded-lg border p-3 shadow-sm transition ${
+                          dragOverId === b.id ? "border-green-400 ring-2 ring-green-200" : "border-gray-200"
+                        } ${dragId === b.id ? "opacity-50" : ""}`}
+                      >
                         <div className="flex items-start justify-between gap-2">
-                          <button onClick={() => setEditing(b)} className="text-left font-medium text-sm text-gray-900 hover:text-green-700">
-                            {b.product_name}
-                          </button>
+                          <div className="flex items-start gap-1.5 min-w-0">
+                            <span title="Drag to reorder" className="shrink-0 cursor-grab">
+                              <GripVertical className="w-3.5 h-3.5 mt-0.5 text-gray-300" />
+                            </span>
+                            <button onClick={() => setEditing(b)} className="text-left font-medium text-sm text-gray-900 hover:text-green-700">
+                              {b.product_name}
+                            </button>
+                          </div>
                           <div className="flex items-center gap-1 shrink-0">
                             <button onClick={() => setEditing(b)} title="Edit / rename / add note" className="text-gray-300 hover:text-green-600">
                               <Pencil className="w-3.5 h-3.5" />
