@@ -140,6 +140,18 @@ export default function Production() {
     await loadPlan(months); // refresh already_planned
   };
 
+  const openBatchForPlanItem = (item: ProductionPlanItem) => {
+    setEditing({
+      id: 0, sku: item.sku, product_name: item.name, size: null,
+      planned_qty: item.to_produce || 0, produced_qty: 0,
+      status: "planned", batch_no: null, expiration_date: null, made_by: null,
+      qa_check: false, label_ordered: false, label_qty: null, notes: null,
+      source: "smart_par", plan_date: null, completed_at: null,
+      inventoried: false, inventoried_at: null, inventoried_qty: null,
+      created_at: "", updated_at: "",
+    });
+  };
+
   const toggleSelect = (sku: string) => {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -411,10 +423,18 @@ export default function Production() {
                                 : <span className="text-gray-300">&mdash;</span>}
                             </td>
                             <td className="px-4 py-3 text-right">
-                              {p.to_produce > 0 && (
+                              {p.to_produce > 0 ? (
                                 <button
                                   onClick={() => addToPlan(p)}
                                   className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium bg-green-600 text-white rounded-md hover:bg-green-700"
+                                >
+                                  <Plus className="w-3.5 h-3.5" /> Add batch
+                                </button>
+                              ) : (
+                                <button
+                                  onClick={() => openBatchForPlanItem(p)}
+                                  title="Set a quantity and add this product to the board"
+                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-green-700 border border-green-200 rounded-md hover:bg-green-50"
                                 >
                                   <Plus className="w-3.5 h-3.5" /> Add batch
                                 </button>
