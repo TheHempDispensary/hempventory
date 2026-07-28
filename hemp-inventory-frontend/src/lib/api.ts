@@ -317,6 +317,20 @@ export const createItemGroup = (data: {
   default_tax_rates?: boolean;
 }) => api.post("/api/inventory/item-groups", data);
 
+export interface ItemGroupRenameResult {
+  location: string;
+  status: "renamed" | "not_found" | "skipped_leaflife" | "error";
+  group_name?: string;
+  item_names?: string[];
+  error?: string;
+}
+
+export const renameItemGroup = (current_name: string, new_name: string) =>
+  api.post<{ new_name: string; results: ItemGroupRenameResult[] }>(
+    "/api/inventory/item-groups/rename",
+    { current_name, new_name },
+  );
+
 // Time Clock
 export const getEmployees = () => api.get("/api/timeclock/employees");
 

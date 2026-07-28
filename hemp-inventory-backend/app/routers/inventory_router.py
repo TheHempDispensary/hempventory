@@ -2584,6 +2584,110 @@ class ItemGroupCreate(BaseModel):
     default_tax_rates: Optional[bool] = True
 
 
+class ItemGroupRename(BaseModel):
+    current_name: str
+    new_name: str
+
+
+# LeafLife retail flower is tagged with these pricing tiers in the group name.
+# We never rename LeafLife products, so groups ending in one of these are skipped
+# (belt-and-suspenders alongside the LF- SKU guard).
+_LEAFLIFE_TIER_WORDS = ("EVERYDAY", "PREMIUM", "ESSENTIAL")
+
+
+def _is_leaflife_group(name: str, variant_skus: list[str]) -> bool:
+    """A group is LeafLife if any variant SKU is LF- or its name ends in a tier word."""
+    if any((s or "").upper().startswith("LF-") for s in variant_skus):
+        return True
+    up = " ".join((name or "").upper().split())
+    return any(up.endswith(" " + t) or up == t for t in _LEAFLIFE_TIER_WORDS)
+
+
+@router.post("/item-groups/rename")
+async def rename_item_group(
+    req: ItemGroupRename,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Rename a variant group across all locations.
+
+    Clover forbids editing the name of an item that belongs to a group; the
+    supported path is to rename the *group*, which regenerates every variant
+    item's name (group name + size option). LeafLife (LF-) groups are refused.
+    Returns each location's resulting variant item names so the cascade can be
+    verified.
+    """
+    current = " ".join((req.current_name or "").split())
+    new_name = " ".join((req.new_name or "").split())
+    if not current or not new_name:
+        raise HTTPException(status_code=400, detail="current_name and new_name are required")
+    if current == new_name:
+        raise HTTPException(status_code=400, detail="New name is the same as the current name")
+
+    locations = await _get_locations(db)
+    if not locations:
+        raise HTTPException(status_code=400, detail="No locations configured")
+
+    norm_current = _normalise_name(current)
+    results: list[dict] = []
+    renamed_any = False
+
+    for loc in locations:
+        loc_name, merchant_id, api_token = loc[1], loc[2], loc[3]
+        try:
+            client = CloverClient(merchant_id, api_token)
+            data = await client.get_item_groups()
+            groups = data.get("elements", [])
+            match = next(
+                (g for g in groups if _normalise_name(g.get("name", "")) == norm_current),
+                None,
+            )
+            if not match:
+                results.append({"location": loc_name, "status": "not_found"})
+                continue
+
+            group_id = match.get("id", "")
+            variant_skus = [
+                it.get("sku", "")
+                for it in match.get("items", {}).get("elements", [])
+            ]
+            if _is_leaflife_group(match.get("name", ""), variant_skus):
+                results.append({"location": loc_name, "status": "skipped_leaflife"})
+                continue
+
+            await client.update_item_group(group_id, new_name)
+            # Re-fetch to confirm Clover cascaded the rename to the variant items.
+            refreshed = await client.get_item_group(group_id)
+            item_names = [
+                " ".join((it.get("name", "") or "").split())
+                for it in refreshed.get("items", {}).get("elements", [])
+            ]
+            renamed_any = True
+            results.append({
+                "location": loc_name,
+                "status": "renamed",
+                "group_name": refreshed.get("name", new_name),
+                "item_names": item_names,
+            })
+        except httpx.HTTPStatusError as e:
+            error_detail = str(e)
+            try:
+                error_detail = e.response.json().get("message", str(e))
+            except Exception:
+                pass
+            results.append({"location": loc_name, "status": "error", "error": error_detail})
+        except Exception as e:
+            results.append({"location": loc_name, "status": "error", "error": str(e)})
+
+    if any(r["status"] == "skipped_leaflife" for r in results) and not renamed_any:
+        raise HTTPException(
+            status_code=400,
+            detail="This is a LeafLife product and cannot be renamed here.",
+        )
+
+    return {"new_name": new_name, "results": results}
+
+
 @router.get("/item-groups")
 async def get_item_groups(
     user: dict = Depends(get_current_user),

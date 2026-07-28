@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, useCallback } from "react";
-import { syncInventory, getCachedInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, getTransferHistory, bulkAssignCategory, bulkAssignImages, syncRefunds, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup, bulkStockUpdate, addVariantsToItem, getInventoryChanges, getProductAttributes, updateProductAttributes, getImageGallery, uploadGalleryImage, getGalleryImageUrl, deleteGalleryImage, bulkHideItems, bulkUnhideItems, syncLeafLife } from "../lib/api";
+import { syncInventory, getCachedInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, getTransferHistory, bulkAssignCategory, bulkAssignImages, syncRefunds, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup, bulkStockUpdate, addVariantsToItem, getInventoryChanges, getProductAttributes, updateProductAttributes, getImageGallery, uploadGalleryImage, getGalleryImageUrl, deleteGalleryImage, bulkHideItems, bulkUnhideItems, syncLeafLife, renameItemGroup } from "../lib/api";
 import { RefreshCw, Search, Plus, ChevronDown, ChevronUp, X, Save, Package, Trash2, CheckSquare, Square, Minus, Image, Download, Upload, Settings, ArrowRightLeft, Images, Layers, Tag, ChevronsLeft, ChevronsRight, ChevronLeft, ChevronRight, History, AlertCircle, CheckCircle2, EyeOff, Eye } from "lucide-react";
 
 interface LocationStock {
@@ -123,6 +123,9 @@ export default function Inventory() {
   // Edit modal state
   const [editItem, setEditItem] = useState<InventoryItem | null>(null);
   const [editTab, setEditTab] = useState("details");
+  const [groupNameInput, setGroupNameInput] = useState("");
+  const [groupRenaming, setGroupRenaming] = useState(false);
+  const [groupRenameMsg, setGroupRenameMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [editForm, setEditForm] = useState<{
     name: string;
     price: string;
@@ -642,6 +645,9 @@ export default function Inventory() {
     });
     setEditTab("details");
     setSaveMessage(null);
+    setGroupNameInput(item.item_group_name || "");
+    setGroupRenaming(false);
+    setGroupRenameMsg(null);
     setEditImageFile(null);
     setEditImagePreview(item.has_image ? getImageUrl(item.sku, imageCacheBust) : null);
     setEditVariantAttrs([{ attribute_name: "", option_names: [""] }]);
@@ -649,6 +655,45 @@ export default function Inventory() {
     setGalleryImages([]);
     loadGalleryImages(item.sku);
     setEditItem(item);
+  };
+
+  const handleRenameGroup = async () => {
+    if (!editItem?.item_group_name) return;
+    const current = editItem.item_group_name;
+    const next = groupNameInput.trim();
+    if (!next || next === current) return;
+    setGroupRenaming(true);
+    setGroupRenameMsg(null);
+    try {
+      const res = await renameItemGroup(current, next);
+      const results = res.data.results || [];
+      const renamed = results.filter((r) => r.status === "renamed");
+      const errors = results.filter((r) => r.status === "error");
+      if (renamed.length === 0) {
+        const skippedLL = results.some((r) => r.status === "skipped_leaflife");
+        setGroupRenameMsg({
+          type: "error",
+          text: skippedLL
+            ? "This is a LeafLife product and cannot be renamed here."
+            : errors[0]?.error || "Could not rename the group. Please try again.",
+        });
+      } else {
+        const sample = renamed[0]?.item_names?.[0];
+        setGroupRenameMsg({
+          type: "success",
+          text: sample
+            ? `Renamed all sizes across ${renamed.map((r) => r.location).join(", ")}. Example: "${sample}"`
+            : `Renamed all sizes across ${renamed.map((r) => r.location).join(", ")}.`,
+        });
+        await loadData();
+        setEditItem(null);
+      }
+    } catch (err) {
+      console.error("Error renaming group:", err);
+      setGroupRenameMsg({ type: "error", text: "Failed to rename the group. Please try again." });
+    } finally {
+      setGroupRenaming(false);
+    }
   };
 
   const handleAddVariantsToExisting = async () => {
@@ -2160,7 +2205,31 @@ export default function Inventory() {
                       className={`w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 outline-none ${editItem?.item_group_name ? "bg-gray-100 cursor-not-allowed" : ""}`}
                     />
                     {editItem?.item_group_name && (
-                      <p className="text-xs text-amber-600 mt-1">Name is controlled by the variant group &quot;{editItem.item_group_name}&quot; in Clover and cannot be changed here.</p>
+                      <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-3">
+                        <p className="text-xs text-amber-700">
+                          This item is part of the variant group &quot;<strong>{editItem.item_group_name}</strong>&quot;, so Clover won&apos;t let you rename the individual size. Rename the <strong>group</strong> instead and every size updates together (e.g. add <strong>Indica / Sativa / Hybrid</strong> — it lands before the size, like &quot;… INDICA 3.5 GRAMS&quot;).
+                        </p>
+                        <label className="block text-xs font-medium text-gray-700 mt-2 mb-1">Variant group name (applies to all sizes)</label>
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            value={groupNameInput}
+                            onChange={(e) => setGroupNameInput(e.target.value)}
+                            className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 outline-none"
+                          />
+                          <button
+                            type="button"
+                            onClick={handleRenameGroup}
+                            disabled={groupRenaming || !groupNameInput.trim() || groupNameInput.trim() === editItem.item_group_name}
+                            className="px-3 py-2 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                          >
+                            {groupRenaming ? "Renaming…" : "Rename group"}
+                          </button>
+                        </div>
+                        {groupRenameMsg && (
+                          <p className={`text-xs mt-2 ${groupRenameMsg.type === "success" ? "text-green-700" : "text-red-600"}`}>{groupRenameMsg.text}</p>
+                        )}
+                      </div>
                     )}
                   </div>
                   <div className="grid grid-cols-2 gap-3">

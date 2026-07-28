@@ -348,6 +348,30 @@ class CloverClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def update_item_group(self, group_id: str, name: str) -> dict:
+        """Rename an item group. Clover regenerates the variant items' names
+        (group name + option), which is the only supported way to rename items
+        that belong to a group."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{self.base_url}/item_groups/{group_id}",
+                headers=self._headers(),
+                json={"name": name},
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    async def get_item_group(self, group_id: str) -> dict:
+        """Get a single item group with its variant items expanded."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await self._request_with_retry(
+                client, "get",
+                f"{self.base_url}/item_groups/{group_id}",
+                headers=self._headers(),
+                params={"expand": "items", "limit": 1000},
+            )
+            return resp.json()
+
     async def delete_item_group(self, group_id: str) -> None:
         """Delete an item group."""
         async with httpx.AsyncClient(timeout=30.0) as client:
