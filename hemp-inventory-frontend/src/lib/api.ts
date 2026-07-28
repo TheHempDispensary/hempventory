@@ -790,6 +790,7 @@ export interface ProductionPlanItem {
   needed: number;
   already_planned: number;
   to_produce: number;
+  made_in_house: boolean;
 }
 
 export interface ProductionBatch {
