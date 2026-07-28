@@ -370,7 +370,7 @@ export default function Production() {
                     </div>
                   ) : (
                     <div className="px-4 py-3 border-b border-gray-100 text-sm text-gray-500">
-                      <strong>{filteredPlan.length}</strong> in-house products &mdash; <strong>To Produce</strong> = need (from Smart PAR) minus what's already planned. Tick rows to create several batches at once.
+                      <strong>{filteredPlan.length}</strong> in-house products &mdash; <strong>To Produce</strong> = need from Smart PAR (<strong>Planned</strong> shows batches already in the pipeline). Tick rows to create several batches at once.
                     </div>
                   )}
                   <div className="overflow-x-auto">
