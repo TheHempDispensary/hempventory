@@ -1,12 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Factory, RefreshCw, Search, Plus, Trash2, X, Check, ClipboardList,
-  Beaker, PackageCheck, CheckCircle2, Boxes, Pencil, GripVertical,
+  Beaker, PackageCheck, CheckCircle2, Boxes, Pencil, ChevronUp, ChevronDown,
 } from "lucide-react";
 import {
   getProductionPlan, getProductionBatches, createProductionBatch,
-  updateProductionBatch, deleteProductionBatch, getProductionFlags,
-  setProductionFlag, seedProductionFlags, getCachedInventory, addBatchToInventory,
+  updateProductionBatch, deleteProductionBatch, getCachedInventory, addBatchToInventory,
   reorderProductionBatches,
   type ProductionPlanItem, type ProductionBatch, type BatchPayload,
 } from "../lib/api";
@@ -27,7 +26,12 @@ const NEXT_STATUS: Record<ProductionBatch["status"], ProductionBatch["status"] |
   done: null,
 };
 
-type Tab = "plan" | "board" | "products";
+type Tab = "plan" | "board";
+
+// Some Clover products share a SKU (e.g. a "BATCH ..." duplicate), so selection
+// and React keys must use name too — otherwise duplicate-SKU rows collide and
+// one silently disappears from the list.
+const planKey = (p: ProductionPlanItem) => `${p.sku}::${p.name}`;
 
 interface InvItem { sku: string; name: string; categories?: string[]; }
 
@@ -38,15 +42,10 @@ export default function Production() {
   const [error, setError] = useState("");
 
   const [plan, setPlan] = useState<ProductionPlanItem[]>([]);
-  const [, setFlaggedCount] = useState(0);
   const [batches, setBatches] = useState<ProductionBatch[]>([]);
 
-  const [flags, setFlags] = useState<Set<string>>(new Set());
   const [inventory, setInventory] = useState<InvItem[]>([]);
-  const [prodSearch, setProdSearch] = useState("");
   const [planSearch, setPlanSearch] = useState("");
-  const [seeding, setSeeding] = useState(false);
-  const [seedMsg, setSeedMsg] = useState("");
 
   const [editing, setEditing] = useState<ProductionBatch | null>(null);
   const [toast, setToast] = useState("");
@@ -83,13 +82,32 @@ export default function Production() {
     }
   };
 
+  // Move a card up/down within its status column via explicit buttons — the
+  // reliable, cross-browser alternative to native drag (which iOS/Safari and
+  // some setups don't fire). dir = -1 (up) or +1 (down).
+  const moveCard = async (status: ProductionBatch["status"], id: number, dir: -1 | 1) => {
+    const colItems = batches.filter((b) => b.status === status);
+    const others = batches.filter((b) => b.status !== status);
+    const idx = colItems.findIndex((b) => b.id === id);
+    const swap = idx + dir;
+    if (idx < 0 || swap < 0 || swap >= colItems.length) return;
+    const reordered = [...colItems];
+    [reordered[idx], reordered[swap]] = [reordered[swap], reordered[idx]];
+    const withOrder = reordered.map((b, i) => ({ ...b, sort_order: i }));
+    setBatches([...others, ...withOrder]);
+    try {
+      await reorderProductionBatches(withOrder.map((b) => b.id));
+    } catch {
+      loadBatches();
+    }
+  };
+
   const loadPlan = async (m: number) => {
     setLoading(true); setError("");
     setSelected(new Set());
     try {
       const res = await getProductionPlan(m);
       setPlan(res.data.items);
-      setFlaggedCount(res.data.meta.flagged);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to load production plan");
     } finally { setLoading(false); }
@@ -99,13 +117,6 @@ export default function Production() {
     try {
       const res = await getProductionBatches();
       setBatches(res.data.batches);
-    } catch { /* non-fatal */ }
-  };
-
-  const loadFlags = async () => {
-    try {
-      const res = await getProductionFlags();
-      setFlags(new Set(res.data.flags.map((f) => f.sku)));
     } catch { /* non-fatal */ }
   };
 
@@ -120,41 +131,11 @@ export default function Production() {
   };
 
   useEffect(() => { loadPlan(months); }, [months]);
-  useEffect(() => { loadBatches(); loadFlags(); loadInventory(); }, []);
+  useEffect(() => { loadBatches(); loadInventory(); }, []);
 
   const flash = (msg: string) => {
     setToast(msg);
     window.setTimeout(() => setToast(""), 6000);
-  };
-
-  const toggleFlag = async (sku: string, name: string) => {
-    const on = !flags.has(sku);
-    setFlags((prev) => {
-      const next = new Set(prev);
-      if (on) next.add(sku); else next.delete(sku);
-      return next;
-    });
-    try {
-      await setProductionFlag(sku, on, name);
-    } catch {
-      // revert on failure
-      setFlags((prev) => {
-        const next = new Set(prev);
-        if (on) next.delete(sku); else next.add(sku);
-        return next;
-      });
-    }
-  };
-
-  const runSeed = async () => {
-    setSeeding(true); setSeedMsg("");
-    try {
-      const res = await seedProductionFlags();
-      setSeedMsg(`Flagged ${res.data.added} product${res.data.added === 1 ? "" : "s"} (${res.data.already_flagged} already flagged).`);
-      await loadFlags();
-    } catch (e: unknown) {
-      setSeedMsg(e instanceof Error ? e.message : "Seeding failed");
-    } finally { setSeeding(false); }
   };
 
   const addToPlan = async (item: ProductionPlanItem) => {
@@ -182,16 +163,16 @@ export default function Production() {
     });
   };
 
-  const toggleSelect = (sku: string) => {
+  const toggleSelect = (key: string) => {
     setSelected((prev) => {
       const next = new Set(prev);
-      if (next.has(sku)) next.delete(sku); else next.add(sku);
+      if (next.has(key)) next.delete(key); else next.add(key);
       return next;
     });
   };
 
   const addSelectedToPlan = async () => {
-    const items = filteredPlan.filter((p) => p.to_produce > 0 && selected.has(p.sku));
+    const items = filteredPlan.filter((p) => p.to_produce > 0 && selected.has(planKey(p)));
     if (items.length === 0) return;
     setBulkAdding(true);
     try {
@@ -257,32 +238,15 @@ export default function Production() {
     () => filteredPlan.filter((p) => p.to_produce > 0),
     [filteredPlan],
   );
-  const allSelected = selectablePlan.length > 0 && selectablePlan.every((p) => selected.has(p.sku));
-  const selectedCount = selectablePlan.filter((p) => selected.has(p.sku)).length;
+  const allSelected = selectablePlan.length > 0 && selectablePlan.every((p) => selected.has(planKey(p)));
+  const selectedCount = selectablePlan.filter((p) => selected.has(planKey(p))).length;
 
   const toggleSelectAll = () => {
     setSelected((prev) => {
-      if (selectablePlan.every((p) => prev.has(p.sku))) return new Set();
-      return new Set(selectablePlan.map((p) => p.sku));
+      if (selectablePlan.every((p) => prev.has(planKey(p)))) return new Set();
+      return new Set(selectablePlan.map(planKey));
     });
   };
-
-  const filteredInventory = useMemo(() => {
-    // Made In-House covers every product except LeafLife (LF-) items, which
-    // ship from the partner and are never produced in-house.
-    let list = inventory.filter((i) => !(i.sku || "").toUpperCase().startsWith("LF-"));
-    if (prodSearch) {
-      const q = prodSearch.toLowerCase();
-      list = list.filter((i) => i.name.toLowerCase().includes(q) || i.sku.toLowerCase().includes(q));
-    }
-    // flagged first, then alphabetical
-    return [...list].sort((a, b) => {
-      const fa = flags.has(a.sku) ? 0 : 1;
-      const fb = flags.has(b.sku) ? 0 : 1;
-      if (fa !== fb) return fa - fb;
-      return a.name.localeCompare(b.name);
-    });
-  }, [inventory, prodSearch, flags]);
 
   return (
     <div className="space-y-6">
@@ -309,7 +273,7 @@ export default function Production() {
 
       {/* Tabs */}
       <div className="inline-flex rounded-lg border border-gray-300 overflow-hidden bg-white">
-        {([["plan", "Plan"], ["board", "Board"], ["products", "Made In-House"]] as [Tab, string][]).map(([id, label], idx) => (
+        {([["plan", "Plan"], ["board", "Board"]] as [Tab, string][]).map(([id, label], idx) => (
           <button
             key={id}
             onClick={() => setTab(id)}
@@ -425,13 +389,13 @@ export default function Production() {
                       </thead>
                       <tbody className="divide-y divide-gray-100">
                         {filteredPlan.map((p) => (
-                          <tr key={p.sku} className={`hover:bg-gray-50 ${selected.has(p.sku) ? "bg-green-50/60" : ""}`}>
+                          <tr key={planKey(p)} className={`hover:bg-gray-50 ${selected.has(planKey(p)) ? "bg-green-50/60" : ""}`}>
                             <td className="px-4 py-3">
                               {p.to_produce > 0 && (
                                 <input
                                   type="checkbox"
-                                  checked={selected.has(p.sku)}
-                                  onChange={() => toggleSelect(p.sku)}
+                                  checked={selected.has(planKey(p))}
+                                  onChange={() => toggleSelect(planKey(p))}
                                   className="w-4 h-4 accent-green-600"
                                 />
                               )}
@@ -517,7 +481,7 @@ export default function Production() {
                     <span className="ml-auto text-xs text-gray-400">{colBatches.length}</span>
                   </div>
                   <div className="space-y-2 min-h-[8px]">
-                    {colBatches.map((b) => (
+                    {colBatches.map((b, idx) => (
                       <div
                         key={b.id}
                         draggable
@@ -537,8 +501,23 @@ export default function Production() {
                       >
                         <div className="flex items-start justify-between gap-2">
                           <div className="flex items-start gap-1.5 min-w-0">
-                            <span title="Drag to reorder" className="shrink-0 cursor-grab">
-                              <GripVertical className="w-3.5 h-3.5 mt-0.5 text-gray-300" />
+                            <span className="shrink-0 flex flex-col -my-0.5">
+                              <button
+                                onClick={() => moveCard(col.id, b.id, -1)}
+                                disabled={idx === 0}
+                                title="Move up"
+                                className="text-gray-300 hover:text-green-600 disabled:opacity-30 disabled:hover:text-gray-300 leading-none"
+                              >
+                                <ChevronUp className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                onClick={() => moveCard(col.id, b.id, 1)}
+                                disabled={idx === colBatches.length - 1}
+                                title="Move down"
+                                className="text-gray-300 hover:text-green-600 disabled:opacity-30 disabled:hover:text-gray-300 leading-none"
+                              >
+                                <ChevronDown className="w-3.5 h-3.5" />
+                              </button>
                             </span>
                             <button onClick={() => setEditing(b)} className="text-left font-medium text-sm text-gray-900 hover:text-green-700">
                               {b.product_name}
@@ -594,57 +573,6 @@ export default function Production() {
                 </div>
               );
             })}
-          </div>
-        </div>
-      )}
-
-      {/* ── MADE IN-HOUSE ────────────────────────────────────────── */}
-      {tab === "products" && (
-        <div className="space-y-4">
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div>
-              <p className="text-sm font-medium text-gray-900">{flags.size} products flagged as made in-house</p>
-              <p className="text-xs text-gray-400">These drive the production plan. Auto-detect matches your two production sheets, then adjust below.</p>
-            </div>
-            <button
-              onClick={runSeed}
-              disabled={seeding}
-              className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 whitespace-nowrap"
-            >
-              <RefreshCw className={`w-4 h-4 ${seeding ? "animate-spin" : ""}`} />
-              Auto-detect from sheets
-            </button>
-          </div>
-          {seedMsg && <div className="text-sm text-gray-600">{seedMsg}</div>}
-
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-            <input
-              type="text"
-              placeholder="Search products..."
-              value={prodSearch}
-              onChange={(e) => setProdSearch(e.target.value)}
-              className="w-full pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
-            />
-          </div>
-
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 divide-y divide-gray-100 max-h-[600px] overflow-y-auto">
-            {filteredInventory.map((i) => {
-              const on = flags.has(i.sku);
-              return (
-                <label key={i.sku} className="flex items-center gap-3 px-4 py-2.5 cursor-pointer hover:bg-gray-50">
-                  <input type="checkbox" checked={on} onChange={() => toggleFlag(i.sku, i.name)} className="w-4 h-4 accent-green-600" />
-                  <div className="min-w-0 flex-1">
-                    <div className="text-sm text-gray-900 truncate">{i.name}</div>
-                    <div className="text-xs text-gray-400">{i.sku}{i.categories?.length ? ` · ${i.categories.join(", ")}` : ""}</div>
-                  </div>
-                  {on && <span className="text-xs text-green-600 font-medium whitespace-nowrap">In-house</span>}
-                </label>
-              );
-            })}
-            {filteredInventory.length === 0 && (
-              <p className="px-4 py-8 text-center text-sm text-gray-500">No products found.</p>
-            )}
           </div>
         </div>
       )}
