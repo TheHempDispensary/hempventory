@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { getParAlerts, checkAndNotify, getAlertHistory } from "../lib/api";
-import { AlertTriangle, Bell, RefreshCw, Clock, Send } from "lucide-react";
+import { getParAlerts, checkAndNotify, getAlertHistory, autoSetPar } from "../lib/api";
+import { AlertTriangle, Bell, RefreshCw, Clock, Send, Calculator } from "lucide-react";
 
 interface Alert {
   sku: string;
@@ -32,6 +32,24 @@ export default function Alerts() {
   const [loading, setLoading] = useState(true);
   const [checking, setChecking] = useState(false);
   const [checkResult, setCheckResult] = useState<string | null>(null);
+  const [parMonths, setParMonths] = useState(1);
+  const [settingPar, setSettingPar] = useState(false);
+  const [parResult, setParResult] = useState<string | null>(null);
+
+  const handleAutoSetPar = async () => {
+    setSettingPar(true);
+    setParResult(null);
+    try {
+      const res = await autoSetPar(parMonths);
+      setParResult(res.data.message || "PAR levels set.");
+      await loadData();
+    } catch (err) {
+      setParResult("Error setting PAR levels. Please try again.");
+      console.error(err);
+    } finally {
+      setSettingPar(false);
+    }
+  };
 
   const loadData = async () => {
     setLoading(true);
@@ -93,15 +111,44 @@ export default function Alerts() {
           <h2 className="text-2xl font-bold text-gray-900">PAR Alerts</h2>
           <p className="text-gray-500 text-sm">Monitor stock levels and send notifications</p>
         </div>
-        <button
-          onClick={handleCheckAndNotify}
-          disabled={checking}
-          className="flex items-center gap-2 px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 disabled:opacity-50 text-sm transition-colors"
-        >
-          <Send className={`w-4 h-4 ${checking ? "animate-pulse" : ""}`} />
-          {checking ? "Checking..." : "Check & Send Alerts"}
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-1.5 bg-white border border-gray-200 rounded-lg px-2 py-1">
+            <span className="text-xs text-gray-500">Supply</span>
+            <select
+              value={parMonths}
+              onChange={(e) => setParMonths(Number(e.target.value))}
+              className="text-sm bg-transparent focus:outline-none"
+            >
+              <option value={0.5}>2 weeks</option>
+              <option value={1}>1 month</option>
+              <option value={2}>2 months</option>
+              <option value={3}>3 months</option>
+            </select>
+          </div>
+          <button
+            onClick={handleAutoSetPar}
+            disabled={settingPar}
+            className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 text-sm transition-colors"
+          >
+            <Calculator className={`w-4 h-4 ${settingPar ? "animate-pulse" : ""}`} />
+            {settingPar ? "Setting PAR..." : "Auto-set PAR from sales"}
+          </button>
+          <button
+            onClick={handleCheckAndNotify}
+            disabled={checking}
+            className="flex items-center gap-2 px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 disabled:opacity-50 text-sm transition-colors"
+          >
+            <Send className={`w-4 h-4 ${checking ? "animate-pulse" : ""}`} />
+            {checking ? "Checking..." : "Check & Send Alerts"}
+          </button>
+        </div>
       </div>
+
+      {parResult && (
+        <div className={`p-4 rounded-lg text-sm ${parResult.includes("Error") ? "bg-red-50 text-red-700" : "bg-green-50 text-green-700"}`}>
+          {parResult}
+        </div>
+      )}
 
       {checkResult && (
         <div className={`p-4 rounded-lg text-sm ${checkResult.includes("Error") || checkResult.includes("could not") ? "bg-red-50 text-red-700" : checkResult.includes("No alerts") || checkResult.includes("above PAR") ? "bg-green-50 text-green-700" : "bg-blue-50 text-blue-700"}`}>
@@ -119,7 +166,7 @@ export default function Alerts() {
           <div className="text-center py-12 text-gray-500">
             <Bell className="w-10 h-10 mx-auto mb-3 text-gray-300" />
             <p>No items below PAR levels</p>
-            <p className="text-xs mt-1">Set PAR levels in the Inventory page to start monitoring</p>
+            <p className="text-xs mt-1">Click "Auto-set PAR from sales" to set every item's PAR from its sales velocity, or set them per item in the Inventory page</p>
           </div>
         ) : (
           <div className="divide-y divide-gray-100">
