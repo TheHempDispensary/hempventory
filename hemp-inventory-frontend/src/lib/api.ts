@@ -167,6 +167,9 @@ export const setBulkParLevels = (
   levels: { sku: string; location_id: number; par_level: number }[]
 ) => api.post("/api/par/bulk", levels);
 
+export const autoSetPar = (months: number = 1) =>
+  api.post("/api/inventory/auto-set-par", { months });
+
 export const getParAlerts = () => api.get("/api/par/alerts");
 
 // Alerts

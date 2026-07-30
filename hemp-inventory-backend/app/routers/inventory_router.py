@@ -3764,6 +3764,127 @@ async def smart_par(
     }
 
 
+class AutoSetParRequest(BaseModel):
+    months: float = 1.0  # supply window each PAR level should cover
+
+
+@router.post("/auto-set-par")
+async def auto_set_par(
+    req: AutoSetParRequest,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Set every item's PAR level, per location, from that location's own sales velocity.
+
+    For each Clover location we tally its paid, non-refunded POS sales by product
+    name, derive units/day over the location's own order history, and store
+    PAR = round(units_per_month * months) for each item at that location. Re-running
+    recomputes from the latest sales, so as an item sells faster its PAR (and the
+    reorder/production need it drives) rises automatically.
+
+    LeafLife (LF-) items are skipped — they ship from the partner and don't sit on
+    our shelves.
+    """
+    months = max(0.25, min(req.months, 24))
+
+    locations = await _get_locations(db)
+    if not locations:
+        raise HTTPException(status_code=500, detail="No locations configured")
+
+    par_rows: list[tuple[str, int, float]] = []  # (sku, location_id, par_level)
+    per_location_summary: list[dict] = []
+
+    for loc in locations:
+        loc_id, loc_name, merchant_id, api_token = loc[0], loc[1], loc[2], loc[3]
+        client = CloverClient(merchant_id, api_token)
+
+        # 1. Tally this location's own sales by normalised product name.
+        sales_by_name: dict[str, int] = {}
+        earliest_ts = float("inf")
+        latest_ts = 0.0
+        try:
+            orders = await _fetch_all_clover_orders(client)
+        except Exception as e:
+            print(f"[auto-set-par] order fetch failed for {loc_name}: {e}")
+            orders = []
+        for order in orders:
+            if order.get("deletedTime") or order.get("isRefund"):
+                continue
+            if order.get("total", 0) < 0:
+                continue
+            order_ts = order.get("createdTime", 0) / 1000
+            if order_ts > 0:
+                earliest_ts = min(earliest_ts, order_ts)
+                latest_ts = max(latest_ts, order_ts)
+            for li in (order.get("lineItems") or {}).get("elements", []):
+                if li.get("refunded") or li.get("isRefund"):
+                    continue
+                li_name = " ".join((li.get("name") or "").split())
+                if not li_name:
+                    continue
+                qty = max(round(li.get("unitQty", 1000) / 1000), 1)
+                norm = _normalise_sales_name(li_name)
+                sales_by_name[norm] = sales_by_name.get(norm, 0) + qty
+
+        if earliest_ts >= latest_ts or earliest_ts == float("inf"):
+            days_of_data = 1.0
+        else:
+            days_of_data = max((latest_ts - earliest_ts) / 86400, 1.0)
+
+        # 2. Compute PAR for each item currently at this location.
+        try:
+            data = await client.get_items(expand="itemStock")
+            items = data.get("elements", [])
+        except Exception as e:
+            print(f"[auto-set-par] item fetch failed for {loc_name}: {e}")
+            items = []
+
+        loc_items = 0
+        loc_with_par = 0
+        for item in items:
+            raw_sku = item.get("sku", "") or ""
+            clover_id = item.get("id", "")
+            if raw_sku.upper().startswith("LF-"):
+                continue
+            display_sku = raw_sku or clover_id
+            if not display_sku:
+                continue
+            name = " ".join((item.get("name") or "").split())
+            norm = _normalise_sales_name(name)
+            units_sold = sales_by_name.get(norm, 0)
+            units_per_month = (units_sold / days_of_data) * 30.44
+            par_level = round(units_per_month * months)
+            par_rows.append((display_sku, loc_id, float(par_level)))
+            loc_items += 1
+            if par_level > 0:
+                loc_with_par += 1
+
+        per_location_summary.append({
+            "location": loc_name,
+            "items": loc_items,
+            "with_par": loc_with_par,
+            "days_of_data": round(days_of_data, 1),
+        })
+
+    # 3. Persist. Upsert so re-running refreshes existing PAR levels.
+    for sku, loc_id, par_level in par_rows:
+        await db.execute(
+            """INSERT INTO par_levels (sku, location_id, par_level, updated_at)
+               VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(sku, location_id)
+               DO UPDATE SET par_level = ?, updated_at = CURRENT_TIMESTAMP""",
+            (sku, loc_id, par_level, par_level),
+        )
+    await db.commit()
+
+    return {
+        "message": f"Set PAR levels for {len(par_rows)} item/location pairs from {months}-month sales velocity",
+        "months": months,
+        "total_set": len(par_rows),
+        "by_location": per_location_summary,
+    }
+
+
 # ── LeafLife Product Import ──────────────────────────────────────────────────
 
 # Standard retail prices (in cents) by tier and weight
