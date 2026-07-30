@@ -9,6 +9,7 @@ import {
   reorderProductionBatches,
   type ProductionPlanItem, type ProductionBatch, type BatchPayload,
 } from "../lib/api";
+import { matchesSearch } from "../lib/utils";
 
 const MONTH_OPTIONS = [1, 3, 4, 6, 12];
 
@@ -230,8 +231,7 @@ export default function Production() {
 
   const filteredPlan = useMemo(() => {
     if (!planSearch) return plan;
-    const q = planSearch.toLowerCase();
-    return plan.filter((p) => p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q));
+    return plan.filter((p) => matchesSearch(planSearch, p.name, p.sku));
   }, [plan, planSearch]);
 
   const selectablePlan = useMemo(
@@ -626,10 +626,10 @@ function BatchModal({ batch, products, onClose, onSaved }: {
     setForm((f) => ({ ...f, [k]: v }));
 
   const matches = useMemo(() => {
-    const q = prodQuery.trim().toLowerCase();
+    const q = prodQuery.trim();
     if (!q) return [];
     return products
-      .filter((p) => p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q))
+      .filter((p) => matchesSearch(q, p.name, p.sku))
       .slice(0, 8);
   }, [prodQuery, products]);
 
