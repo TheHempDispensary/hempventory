@@ -1,6 +1,7 @@
 import { useEffect, useState, useMemo, useCallback } from "react";
 import { syncInventory, getCachedInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, getTransferHistory, bulkAssignCategory, bulkAssignImages, syncRefunds, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup, bulkStockUpdate, addVariantsToItem, getInventoryChanges, getProductAttributes, updateProductAttributes, getImageGallery, uploadGalleryImage, getGalleryImageUrl, deleteGalleryImage, bulkHideItems, bulkUnhideItems, syncLeafLife, renameItemGroup } from "../lib/api";
 import { RefreshCw, Search, Plus, ChevronDown, ChevronUp, X, Save, Package, Trash2, CheckSquare, Square, Minus, Image, Download, Upload, Settings, ArrowRightLeft, Images, Layers, Tag, ChevronsLeft, ChevronsRight, ChevronLeft, ChevronRight, History, AlertCircle, CheckCircle2, EyeOff, Eye } from "lucide-react";
+import { matchesSearch } from "../lib/utils";
 
 interface LocationStock {
   location_id: number;
@@ -316,12 +317,7 @@ export default function Inventory() {
     }
 
     if (search) {
-      const s = search.toLowerCase();
-      filtered = filtered.filter(
-        (i) =>
-          i.name.toLowerCase().includes(s) ||
-          i.sku.toLowerCase().includes(s)
-      );
+      filtered = filtered.filter((i) => matchesSearch(search, i.name, i.sku));
     }
 
     if (categoryFilter !== "all") {
@@ -1058,10 +1054,7 @@ export default function Inventory() {
 
   const transferSearchResults = useMemo(() => {
     if (!transferSearch || transferSearch.length < 2) return [];
-    const q = transferSearch.toLowerCase();
-    return items.filter(i =>
-      i.name.toLowerCase().includes(q) || i.sku.toLowerCase().includes(q)
-    ).slice(0, 50);
+    return items.filter(i => matchesSearch(transferSearch, i.name, i.sku)).slice(0, 50);
   }, [transferSearch, items]);
 
   const toggleTransferItem = (item: InventoryItem) => {

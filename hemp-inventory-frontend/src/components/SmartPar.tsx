@@ -1,5 +1,6 @@
 import { useEffect, useState, useMemo } from "react";
 import { getSmartPar } from "../lib/api";
+import { matchesSearch } from "../lib/utils";
 import { RefreshCw, Search, ChevronUp, ChevronDown, Download, Calculator, Layers, List } from "lucide-react";
 
 interface ParProduct {
@@ -85,12 +86,7 @@ export default function SmartPar() {
   const filtered = useMemo(() => {
     let list = products;
     if (search) {
-      const q = search.toLowerCase();
-      list = list.filter(
-        (p) =>
-          p.name.toLowerCase().includes(q) ||
-          p.sku.toLowerCase().includes(q)
-      );
+      list = list.filter((p) => matchesSearch(search, p.name, p.sku));
     }
     if (categoryFilter !== "All") {
       list = list.filter((p) => p.categories.includes(categoryFilter));
@@ -136,8 +132,7 @@ export default function SmartPar() {
   const filteredGroups = useMemo(() => {
     let list = groups;
     if (search) {
-      const q = search.toLowerCase();
-      list = list.filter((g) => g.group.toLowerCase().includes(q));
+      list = list.filter((g) => matchesSearch(search, g.group));
     }
     const copy = [...list];
     copy.sort((a, b) => {
