@@ -81,7 +81,8 @@ async def test_plan_lists_all_products_flagged_or_not(db, monkeypatch):
         return {
             "products": [
                 {"sku": "SKU-A", "name": "Widget", "categories": ["Edibles"],
-                 "total_stock": 5, "units_sold": 200, "units_per_month": 50, "order_qty": 45},
+                 "total_stock": 5, "stock_by_location": {"East": 2, "West": 3},
+                 "units_sold": 200, "units_per_month": 50, "order_qty": 45},
                 {"sku": "SKU-B", "name": "Bought Thing", "categories": ["Flower"],
                  "total_stock": 1, "units_sold": 30, "units_per_month": 8, "order_qty": 7},
             ],
@@ -96,6 +97,8 @@ async def test_plan_lists_all_products_flagged_or_not(db, monkeypatch):
     assert by_sku["SKU-A"]["made_in_house"] is True
     assert by_sku["SKU-B"]["made_in_house"] is False
     assert by_sku["SKU-B"]["to_produce"] == 7
+    assert by_sku["SKU-A"]["stock_by_location"] == {"East": 2, "West": 3}
+    assert by_sku["SKU-B"]["stock_by_location"] == {}
     assert res["meta"]["flagged"] == 1
 
 
@@ -257,3 +260,38 @@ async def test_add_to_hq_inventory_name_fallback(monkeypatch):
     assert res["ok"] is True
     assert res["item_id"] == "HQID1"
     assert res["new"] == 14
+
+
+async def test_add_to_hq_inventory_name_wins_over_shared_sku(monkeypatch):
+    """When two products share a SKU, the batch name must pick the right one."""
+    import app.routers.production_router as prod
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            self.updated = None
+
+        async def get_items(self, expand=""):
+            # Green Crack and Blue Dream share SKU "S123" (bad Clover data).
+            return {"elements": [
+                {"id": "BLUE", "sku": "S123", "name": "THC FLOWER SMALLS BLUE DREAM Sativa 2 GRAMS",
+                 "itemStock": {"quantity": 100}},
+                {"id": "GREEN", "sku": "S123", "name": "THC FLOWER SMALLS GREEN CRACK Sativa 2 GRAMS",
+                 "itemStock": {"quantity": 40}},
+            ]}
+
+        async def update_item_stock(self, item_id, qty):
+            self.updated = (item_id, qty)
+
+    monkeypatch.setattr(prod, "CloverClient", FakeClient)
+    monkeypatch.setattr("app.routers.ecommerce_router.HQ_MERCHANT_ID", "M", raising=False)
+    monkeypatch.setattr("app.routers.ecommerce_router.HQ_API_TOKEN", "T", raising=False)
+    monkeypatch.setattr(
+        "app.routers.ecommerce_router.invalidate_product_cache", lambda: None, raising=False
+    )
+
+    res = await prod._add_to_hq_inventory(
+        "S123", 10, "THC FLOWER SMALLS GREEN CRACK 2 GRAMS"
+    )
+    assert res["ok"] is True
+    assert res["item_id"] == "GREEN"  # not BLUE, despite the shared SKU
+    assert res["new"] == 50
