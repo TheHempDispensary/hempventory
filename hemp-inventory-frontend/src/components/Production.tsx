@@ -404,7 +404,16 @@ export default function Production() {
                               <div className="font-medium text-gray-900">{p.name}</div>
                               <div className="text-xs text-gray-400">{p.categories.join(", ")}</div>
                             </td>
-                            <td className="px-4 py-3 text-right text-gray-600">{p.in_stock}</td>
+                            <td className="px-4 py-3 text-right text-gray-600">
+                              {p.in_stock}
+                              {p.stock_by_location && Object.keys(p.stock_by_location).length > 0 && (
+                                <div className="text-xs text-gray-400 mt-0.5">
+                                  {Object.entries(p.stock_by_location)
+                                    .map(([loc, qty]) => `${loc.replace(" Location", "").replace("Hemp Dispensary ", "")}: ${qty}`)
+                                    .join(" · ")}
+                                </div>
+                              )}
+                            </td>
                             <td className="px-4 py-3 text-right text-gray-600">{p.units_per_month}</td>
                             <td className="px-4 py-3 text-right text-gray-600">{p.needed}</td>
                             <td className="px-4 py-3 text-right text-gray-500">{p.already_planned || <span className="text-gray-300">&mdash;</span>}</td>

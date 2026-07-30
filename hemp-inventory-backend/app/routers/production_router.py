@@ -41,18 +41,25 @@ async def _add_to_hq_inventory(sku: str, qty: float, name: str = "") -> dict:
     client = CloverClient(HQ_MERCHANT_ID, HQ_API_TOKEN)
     data = await client.get_items(expand="itemStock")
     elements = data.get("elements", [])
-    match = None
-    if sku:
-        for it in elements:
-            if (it.get("sku") or "") == sku or it.get("id") == sku:
-                match = it
-                break
-    if not match and name:
-        target = _normalise_sales_name(name)
-        for it in elements:
-            if _normalise_sales_name(it.get("name") or "") == target:
-                match = it
-                break
+
+    target = _normalise_sales_name(name) if name else ""
+
+    def _sku_hit(it: dict) -> bool:
+        return bool(sku) and ((it.get("sku") or "") == sku or it.get("id") == sku)
+
+    def _name_hit(it: dict) -> bool:
+        return bool(target) and _normalise_sales_name(it.get("name") or "") == target
+
+    # Prefer an item that matches BOTH the stored id/SKU and the name; then an
+    # exact name match; then the SKU/id alone. Flower items frequently have no
+    # user SKU (so the batch carries a Clover item id) and some products share
+    # a duplicate SKU, which makes the SKU alone unreliable — the product name
+    # is the dependable identifier, so it wins over a SKU-only hit.
+    match = (
+        next((it for it in elements if _sku_hit(it) and _name_hit(it)), None)
+        or next((it for it in elements if _name_hit(it)), None)
+        or next((it for it in elements if _sku_hit(it)), None)
+    )
     if not match:
         return {"ok": False, "reason": f"'{name or sku}' not found in HQ inventory"}
 
@@ -320,6 +327,7 @@ async def production_plan(
             "name": p["name"],
             "categories": p["categories"],
             "in_stock": p["total_stock"],
+            "stock_by_location": p.get("stock_by_location", {}),
             "units_sold": p["units_sold"],
             "units_per_month": p["units_per_month"],
             "needed": needed,

@@ -802,6 +802,7 @@ export interface ProductionPlanItem {
   name: string;
   categories: string[];
   in_stock: number;
+  stock_by_location: Record<string, number>;
   units_sold: number;
   units_per_month: number;
   needed: number;

@@ -44,7 +44,7 @@ const MONTH_OPTIONS = [1, 3, 4, 6, 12];
 export default function SmartPar() {
   const [products, setProducts] = useState<ParProduct[]>([]);
   const [groups, setGroups] = useState<ParGroup[]>([]);
-  const [view, setView] = useState<"groups" | "items">("groups");
+  const [view, setView] = useState<"groups" | "items">("items");
   const [meta, setMeta] = useState<ParMeta | null>(null);
   const [loading, setLoading] = useState(false);
   const [months, setMonths] = useState(3);
