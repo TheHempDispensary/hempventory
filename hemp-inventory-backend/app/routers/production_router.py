@@ -530,6 +530,20 @@ async def update_batch(
     if body.label_ordered is not None:
         fields["label_ordered"] = int(body.label_ordered)
 
+    # Renaming a batch to a different product must not keep the previous
+    # product's SKU. Production repurposes a card (e.g. Blue Dream -> Green
+    # Crack) by editing its name; the stale SKU would otherwise still show on
+    # the card and could steer Add-to-HQ to the wrong Clover item. If the name
+    # actually changes and the caller didn't supply a new SKU in the same
+    # request, clear it so Done/Add-to-HQ resolves purely by the new name.
+    if (
+        "product_name" in fields
+        and body.sku is None
+        and _normalise_sales_name(fields["product_name"] or "")
+        != _normalise_sales_name(existing["product_name"] or "")
+    ):
+        fields["sku"] = None
+
     if "status" in fields and fields["status"] not in _STATUSES:
         raise HTTPException(status_code=400, detail=f"Invalid status '{fields['status']}'")
 
