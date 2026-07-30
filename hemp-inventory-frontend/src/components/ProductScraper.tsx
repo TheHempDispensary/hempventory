@@ -202,7 +202,7 @@ export default function ProductScraper({ onNavigate }: ProductScraperProps) {
           </button>
         </div>
         <p className="mt-2 text-xs text-gray-400">
-          Supported: Chubby Gorilla, Calyx Containers, CRC, Loud Lock, Dispensary Supply, Kush Supply, Sana Packaging, N2 Packaging, Marijuana Packaging. Or enter a full site (e.g. marijuanapackaging.com). Some sites block automated access and can't be scraped.
+          Supported: Chubby Gorilla, Calyx Containers, CRC, Loud Lock, Dispensary Supply, Kush Supply, Sana Packaging, N2 Packaging, Marijuana Packaging, Green Tech Packaging. Or enter a full site (e.g. marijuanapackaging.com). Some sites block automated access and can't be scraped.
         </p>
       </div>
 

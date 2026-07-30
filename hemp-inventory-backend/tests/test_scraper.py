@@ -4,6 +4,7 @@ from app.routers.scraper_router import (
     BLOCK_STATUSES,
     MANUFACTURER_CATALOG,
     _extract_domain,
+    _is_block_page,
 )
 
 
@@ -33,3 +34,21 @@ def test_marijuana_packaging_registered_as_shopify():
 def test_block_statuses_cover_common_bot_protection():
     assert 429 in BLOCK_STATUSES
     assert 403 in BLOCK_STATUSES
+
+
+def test_greentech_registered_as_shopify():
+    entry = MANUFACTURER_CATALOG.get("greentechpackaging.com")
+    assert entry is not None
+    assert entry["domain"] == "www.greentechpackaging.com"
+    assert entry["platform"] == "shopify"
+
+
+def test_is_block_page_detects_challenge_interstitials():
+    assert _is_block_page("<html><h1>Robot or human?</h1></html>")
+    assert _is_block_page("<title>Just a moment...</title>")
+    assert _is_block_page("<div>Please verify you are a human</div>")
+
+
+def test_is_block_page_passes_real_product_pages():
+    assert not _is_block_page("<html><h1>1/4 Ounce Child Resistant Bags</h1></html>")
+    assert not _is_block_page("")
