@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import re
 import urllib.parse
 from typing import Optional
@@ -45,6 +46,10 @@ MANUFACTURER_CATALOG: dict[str, dict] = {
     "marijuana packaging": {"domain": "marijuanapackaging.com", "platform": "shopify"},
     "marijuanapackaging": {"domain": "marijuanapackaging.com", "platform": "shopify"},
     "marijuanapackaging.com": {"domain": "marijuanapackaging.com", "platform": "shopify"},
+    "greentech": {"domain": "www.greentechpackaging.com", "platform": "shopify"},
+    "greentech packaging": {"domain": "www.greentechpackaging.com", "platform": "shopify"},
+    "greentechpackaging": {"domain": "www.greentechpackaging.com", "platform": "shopify"},
+    "greentechpackaging.com": {"domain": "www.greentechpackaging.com", "platform": "shopify"},
 }
 
 # Known packaging distributor sites to search directly
@@ -79,6 +84,64 @@ class ProductResult(BaseModel):
 # access (bot protection / rate limiting) rather than the product being absent.
 BLOCK_STATUSES = {401, 403, 429, 503}
 
+# Phrases that identify a bot-challenge / "are you human" interstitial served
+# with a 200 status (Cloudflare, Akamai, PerimeterX, DataDome, Walmart, etc.).
+# Without this, a challenge page's <h1> ("Robot or human?") gets scraped and
+# offered as if it were a real product.
+_BLOCK_PAGE_MARKERS = (
+    "robot or human",
+    "just a moment",
+    "checking your browser",
+    "enable javascript and cookies to continue",
+    "attention required",
+    "cf-browser-verification",
+    "cf_chl_opt",
+    "challenge-platform",
+    "you have been blocked",
+    "please verify you are a human",
+    "verify you are human",
+    "verifying you are human",
+    "pardon our interruption",
+    "px-captcha",
+    "captcha-delivery",
+    "access to this page has been denied",
+)
+
+
+class SiteBlockedError(Exception):
+    """Raised when a site serves a bot-protection challenge instead of content."""
+
+    def __init__(self, host: str):
+        self.host = host
+        super().__init__(f"{host} is blocking automated access")
+
+
+def _is_block_page(html_str: str) -> bool:
+    """True if an HTML body looks like a bot-check / challenge interstitial."""
+    if not html_str:
+        return False
+    low = html_str[:20000].lower()
+    return any(marker in low for marker in _BLOCK_PAGE_MARKERS)
+
+
+def _blocked_message(site: str) -> str:
+    """Standard user-facing message when a site blocks the server's requests."""
+    return (
+        f"{site} is blocking automated access (bot protection / rate limit), "
+        "so its catalog can't be scraped from the server. Add this product's "
+        "image and description manually."
+    )
+
+
+def _client_kwargs() -> dict:
+    """AsyncClient kwargs. Routes through SCRAPER_PROXY_URL when configured so a
+    clean outbound IP can reach sites that block the server's own IP."""
+    kwargs: dict = {"timeout": httpx.Timeout(20.0), "follow_redirects": True}
+    proxy = os.environ.get("SCRAPER_PROXY_URL", "").strip()
+    if proxy:
+        kwargs["proxy"] = proxy
+    return kwargs
+
 
 def _extract_domain(manufacturer: str) -> Optional[str]:
     """Return the bare hostname if the input looks like a domain or URL.
@@ -97,19 +160,26 @@ def _extract_domain(manufacturer: str) -> Optional[str]:
 
 
 async def _get_with_retry(client: httpx.AsyncClient, url: str) -> httpx.Response:
-    """GET a URL, retrying briefly on transient rate-limit / throttle responses."""
-    last: Optional[httpx.Response] = None
+    """GET a URL, retrying briefly on rate-limit / bot-challenge responses.
+
+    Raises SiteBlockedError if the site keeps returning a block status or a
+    200-status challenge page (so a challenge page is never parsed as a product).
+    """
+    host = urllib.parse.urlparse(url).netloc or url
     for attempt in range(3):
         resp = await client.get(url, headers=HEADERS, follow_redirects=True, timeout=15.0)
-        if resp.status_code not in BLOCK_STATUSES:
+        content_type = resp.headers.get("content-type", "").lower()
+        is_challenge = (
+            resp.status_code == 200
+            and "html" in content_type
+            and _is_block_page(resp.text)
+        )
+        if resp.status_code not in BLOCK_STATUSES and not is_challenge:
             resp.raise_for_status()
             return resp
-        last = resp
         if attempt < 2:
             await asyncio.sleep(1.5 * (attempt + 1))
-    assert last is not None
-    last.raise_for_status()
-    return last
+    raise SiteBlockedError(host)
 
 
 async def _fetch_page(client: httpx.AsyncClient, url: str) -> BeautifulSoup:
@@ -282,15 +352,13 @@ async def scrape_shopify(
 
         result.specifications = specs
 
+    except SiteBlockedError:
+        result.error = _blocked_message(domain)
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
             result.error = f"Product catalog not available on {domain}."
         elif e.response.status_code in BLOCK_STATUSES:
-            result.error = (
-                f"{domain} is blocking automated access (bot protection / rate limit), "
-                "so its catalog can't be scraped from the server. Add this product's "
-                "image and description manually."
-            )
+            result.error = _blocked_message(domain)
         else:
             result.error = f"Error accessing {domain}: {e.response.status_code}"
     except Exception as e:
@@ -485,6 +553,8 @@ async def scrape_by_domain_guess(
             products = data.get("products", [])
             if products:
                 return await scrape_shopify(client, domain, manufacturer, model_number)
+        except SiteBlockedError:
+            blocked = True
         except httpx.HTTPStatusError as e:
             if e.response.status_code in BLOCK_STATUSES:
                 blocked = True
@@ -529,8 +599,14 @@ async def scrape_by_domain_guess(
                     result.specifications = _extract_specs(page_soup)
                     if result.product_name and (result.image_urls or result.description):
                         return result
+                except SiteBlockedError:
+                    blocked = True
+                    continue
                 except Exception:
                     continue
+        except SiteBlockedError:
+            blocked = True
+            continue
         except httpx.HTTPStatusError as e:
             if e.response.status_code in BLOCK_STATUSES:
                 blocked = True
@@ -556,11 +632,7 @@ async def scrape_by_domain_guess(
     if not result.product_name and not result.image_urls:
         if blocked:
             site = typed_domain or manufacturer
-            result.error = (
-                f"{site} is blocking automated access (bot protection / rate limit), "
-                "so its catalog can't be scraped from the server. Add this product's "
-                "image and description manually, or try a supported manufacturer."
-            )
+            result.error = _blocked_message(site)
         else:
             result.error = (
                 f"Could not find manufacturer website for '{manufacturer}'. "
@@ -579,7 +651,7 @@ async def scrape_product(req: ScrapeRequest):
     if not manufacturer_key or not model:
         raise HTTPException(status_code=400, detail="Both manufacturer and model_number are required")
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(**_client_kwargs()) as client:
         catalog_entry = MANUFACTURER_CATALOG.get(manufacturer_key)
 
         if catalog_entry:
