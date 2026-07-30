@@ -154,6 +154,25 @@ async def _scheduled_leaflife_sync():
         print(f"[auto-sync] LeafLife sync failed: {e}")
 
 
+async def _scheduled_auto_par():
+    """Background job: recompute every item's PAR from sales velocity nightly.
+
+    PAR is fully sales-driven and self-updating — as a product starts selling
+    (or sells faster) its PAR appears and grows on its own, with no manual
+    setting or button-clicking required.
+    """
+    try:
+        db = await _connect_db()
+        try:
+            from app.routers.inventory_router import auto_set_par, AutoSetParRequest
+            result = await auto_set_par(AutoSetParRequest(months=1.0), user={}, db=db)
+            print(f"[auto-sync] PAR auto-set: {result.get('total_set', 0)} item/location pairs from 1-month velocity")
+        finally:
+            await db.close()
+    except Exception as e:
+        print(f"[auto-sync] PAR auto-set failed: {e}")
+
+
 async def _scheduled_coa_sync():
     """Background job: sync COA lab results from ACS Laboratory."""
     import os
@@ -182,6 +201,8 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(_scheduled_clover_order_sync, "interval", minutes=5, id="clover_order_sync", replace_existing=True)
     scheduler.add_job(_scheduled_coa_sync, "interval", minutes=30, id="coa_sync", replace_existing=True)
     scheduler.add_job(_scheduled_leaflife_sync, "interval", minutes=15, id="leaflife_sync", replace_existing=True)
+    # Recompute PAR from sales velocity once a night (heavy: pulls all orders).
+    scheduler.add_job(_scheduled_auto_par, "cron", hour=5, id="auto_par", replace_existing=True)
     scheduler.start()
     # Run initial inventory sync in background so server starts accepting requests immediately
     asyncio.create_task(_scheduled_inventory_sync())
