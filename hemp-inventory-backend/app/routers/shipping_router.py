@@ -122,19 +122,33 @@ def _is_leaflife_item(sku: str, name: str) -> bool:
     return False
 
 
+def _is_offered_rate(provider: str, service_name: str) -> bool:
+    """Decide whether a Shippo rate should be offered.
+
+    USPS: Ground Advantage / Priority (exclude Priority Mail Express).
+    UPS:  ground economy/standard, 3 Day Select, 2nd Day Air (exclude the
+          pricey Next Day / Worldwide / international tiers). UPS is important
+          for rural addresses USPS can't validate — it delivers by geocode.
+    """
+    pu = provider.upper()
+    if "USPS" in pu:
+        if "priority mail express" in service_name:
+            return False
+        return any(a in service_name for a in ("ground advantage", "priority"))
+    if "UPS" in pu:
+        if any(b in service_name for b in ("next day", "worldwide", "expedited", "express")):
+            return False
+        return any(a in service_name for a in ("ground", "3 day", "2nd day", "second day"))
+    return False
+
+
 def _filter_usps_rates(rates: list[dict]) -> list[dict]:
-    """Extract and format USPS Ground Advantage and Priority rates."""
-    ALLOWED_SERVICES = {"ground advantage", "priority"}
-    BLOCKED_SERVICES = {"priority mail express"}
+    """Extract and format offered USPS and UPS rates."""
     formatted: list[dict] = []
     for rate in rates:
         provider = rate.get("provider", "")
-        if "USPS" not in provider.upper():
-            continue
         service_name = rate.get("servicelevel", {}).get("name", "").lower()
-        if any(blocked in service_name for blocked in BLOCKED_SERVICES):
-            continue
-        if not any(allowed in service_name for allowed in ALLOWED_SERVICES):
+        if not _is_offered_rate(provider, service_name):
             continue
         formatted.append({
             "id": rate["object_id"],
@@ -169,6 +183,37 @@ async def _create_shippo_shipment(
             print(f"[shippo] Shipment creation failed: {resp.status_code} {resp.text}")
             raise HTTPException(status_code=resp.status_code, detail=f"Shippo error: {resp.text}")
         return resp.json()
+
+
+async def _validate_shippo_address(headers: dict, address: dict) -> dict:
+    """Validate a destination address with Shippo and return the result.
+
+    Returns ``{"is_valid": bool, "messages": [text, ...]}``.  Never raises —
+    if Shippo itself errors we treat the address as un-validated (valid=True)
+    so a transient validator failure can't block an otherwise-shippable order.
+    """
+    address_data = {
+        "name": address.get("name", ""),
+        "street1": address.get("street1", ""),
+        "street2": address.get("street2", ""),
+        "city": address.get("city", ""),
+        "state": address.get("state", ""),
+        "zip": address.get("zip", ""),
+        "country": address.get("country", "US"),
+        "validate": True,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(f"{SHIPPO_API_URL}/addresses/", headers=headers, json=address_data)
+        if resp.status_code not in (200, 201):
+            return {"is_valid": True, "messages": []}
+        validation = resp.json().get("validation_results", {})
+    except httpx.HTTPError:
+        return {"is_valid": True, "messages": []}
+    return {
+        "is_valid": validation.get("is_valid", True),
+        "messages": [m.get("text", "") for m in validation.get("messages", []) if m.get("text")],
+    }
 
 
 @router.post("/create-shipment")
@@ -273,10 +318,13 @@ async def create_shipment(
 
     await db.commit()
 
+    address_validation = await _validate_shippo_address(headers, to_address)
+
     return {
         "is_split": is_mixed,
         "shipment_groups": shipment_groups,
         "address_to": to_address,
+        "address_validation": address_validation,
         # Legacy fields for single-shipment orders (backwards compat)
         "shipment_id": shipment_groups[0].get("shippo_shipment_id", "") if shipment_groups else "",
         "rates": shipment_groups[0]["rates"] if len(shipment_groups) == 1 else [],
