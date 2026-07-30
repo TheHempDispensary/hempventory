@@ -171,6 +171,37 @@ async def _create_shippo_shipment(
         return resp.json()
 
 
+async def _validate_shippo_address(headers: dict, address: dict) -> dict:
+    """Validate a destination address with Shippo and return the result.
+
+    Returns ``{"is_valid": bool, "messages": [text, ...]}``.  Never raises —
+    if Shippo itself errors we treat the address as un-validated (valid=True)
+    so a transient validator failure can't block an otherwise-shippable order.
+    """
+    address_data = {
+        "name": address.get("name", ""),
+        "street1": address.get("street1", ""),
+        "street2": address.get("street2", ""),
+        "city": address.get("city", ""),
+        "state": address.get("state", ""),
+        "zip": address.get("zip", ""),
+        "country": address.get("country", "US"),
+        "validate": True,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(f"{SHIPPO_API_URL}/addresses/", headers=headers, json=address_data)
+        if resp.status_code not in (200, 201):
+            return {"is_valid": True, "messages": []}
+        validation = resp.json().get("validation_results", {})
+    except httpx.HTTPError:
+        return {"is_valid": True, "messages": []}
+    return {
+        "is_valid": validation.get("is_valid", True),
+        "messages": [m.get("text", "") for m in validation.get("messages", []) if m.get("text")],
+    }
+
+
 @router.post("/create-shipment")
 async def create_shipment(
     body: CreateShipmentRequest,
@@ -273,10 +304,13 @@ async def create_shipment(
 
     await db.commit()
 
+    address_validation = await _validate_shippo_address(headers, to_address)
+
     return {
         "is_split": is_mixed,
         "shipment_groups": shipment_groups,
         "address_to": to_address,
+        "address_validation": address_validation,
         # Legacy fields for single-shipment orders (backwards compat)
         "shipment_id": shipment_groups[0].get("shippo_shipment_id", "") if shipment_groups else "",
         "rates": shipment_groups[0]["rates"] if len(shipment_groups) == 1 else [],

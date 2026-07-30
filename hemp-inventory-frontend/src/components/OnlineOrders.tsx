@@ -296,6 +296,7 @@ export default function OnlineOrders() {
   const [parcelHeight, setParcelHeight] = useState("2");
   const [isHazmat, setIsHazmat] = useState(false);
   const [shipmentGroups, setShipmentGroups] = useState<ShipmentGroup[]>([]);
+  const [addressWarning, setAddressWarning] = useState<string[]>([]);
   const [, setIsSplitShipment] = useState(false);
   const [purchasingShipmentId, setPurchasingShipmentId] = useState<number | null>(null);
 
@@ -500,6 +501,7 @@ export default function OnlineOrders() {
     setShipmentGroups([]);
     setIsSplitShipment(false);
     setShippingError("");
+    setAddressWarning([]);
     setLoadingRates(true);
     try {
       const res = await createShipment({
@@ -514,54 +516,32 @@ export default function OnlineOrders() {
       const isSplit = res.data.is_split === true;
       setIsSplitShipment(isSplit);
 
+      // Surface Shippo/USPS address validation so a bad address is obvious
+      // before the admin buys a label (which USPS would reject).
+      const validation = res.data.address_validation;
+      if (validation && validation.is_valid === false) {
+        setAddressWarning(
+          validation.messages?.length
+            ? validation.messages
+            : ["USPS could not verify this shipping address."]
+        );
+      }
+
       if (isSplit && res.data.shipment_groups?.length > 1) {
-        // Split shipment: show rate groups per shipment
+        // Split shipment: show rate groups per shipment (no auto-purchase — the
+        // admin reviews the address warning, then clicks Buy Label per group).
         const groups: ShipmentGroup[] = res.data.shipment_groups;
         setShipmentGroups(groups);
 
-        // Auto-purchase all groups if customer-selected service matches
-        const orderObj = orders.find(o => o.id === orderId);
-        if (orderObj?.shipping_service) {
-          let allAutoMatched = true;
-          for (const group of groups) {
-            const match = group.rates.find(r => r.service_level === orderObj.shipping_service);
-            if (!match) { allAutoMatched = false; break; }
-          }
-          if (allAutoMatched) {
-            for (const group of groups) {
-              const match = group.rates.find(r => r.service_level === orderObj.shipping_service);
-              if (match) {
-                await handlePurchaseSplitLabel(match.id, orderId, group.shipment_id);
-              }
-            }
-            return;
-          }
-        }
-
-        // Check if any group has 0 rates
         if (groups.some(g => g.rates.length === 0)) {
           setShippingError("No shipping rates available for one or more shipment groups.");
         }
       } else {
         // Single shipment
         const fetchedRates = res.data.rates || [];
-        const singleGroup = res.data.shipment_groups?.[0];
         setRates(fetchedRates);
         if (fetchedRates.length === 0) {
           setShippingError("No shipping rates available for this address.");
-        } else {
-          const orderObj = orders.find(o => o.id === orderId);
-          if (orderObj?.shipping_service) {
-            const match = fetchedRates.find((r: ShippingRate) => r.service_level === orderObj.shipping_service);
-            if (match) {
-              if (singleGroup) {
-                handlePurchaseSplitLabel(match.id, orderId, singleGroup.shipment_id);
-              } else {
-                handlePurchaseLabel(match.id, orderId);
-              }
-              return;
-            }
-          }
         }
       }
     } catch (err: unknown) {
@@ -590,6 +570,7 @@ export default function OnlineOrders() {
       setShippingOrderId(null);
       setRates([]);
       setShipmentGroups([]);
+      setAddressWarning([]);
       if (label_url) {
         window.open(label_url, "_blank");
       }
@@ -638,6 +619,7 @@ export default function OnlineOrders() {
         setShippingOrderId(null);
         setRates([]);
         setShipmentGroups([]);
+        setAddressWarning([]);
         // Open all label URLs
         for (const s of updatedShipments) {
           if (s.label_url) window.open(s.label_url, "_blank");
@@ -1481,11 +1463,13 @@ export default function OnlineOrders() {
                                 setShippingOrderId(null);
                                 setRates([]);
                                 setShipmentGroups([]);
+                                setAddressWarning([]);
                               } else {
                                 setShippingOrderId(order.id);
                                 setRates([]);
                                 setShipmentGroups([]);
                                 setShippingError("");
+                                setAddressWarning([]);
                                 setIsHazmat(orderContainsHazmat(order.items));
                               }
                             }}
@@ -1808,6 +1792,24 @@ export default function OnlineOrders() {
                           {loadingRates ? <Loader2 className="w-4 h-4 animate-spin" /> : <Truck className="w-4 h-4" />}
                           {loadingRates ? "Getting Rates..." : "Get Shipping Rates"}
                         </button>
+
+                        {addressWarning.length > 0 && shippingOrderId === order.id && (
+                          <div className="text-sm bg-amber-50 border border-amber-200 text-amber-800 p-3 rounded-lg mb-3">
+                            <p className="font-semibold flex items-center gap-2">
+                              <AlertTriangle className="w-4 h-4" />
+                              USPS couldn't verify this address
+                            </p>
+                            <ul className="list-disc ml-5 mt-1 space-y-0.5">
+                              {addressWarning.map((m, i) => <li key={i}>{m}</li>)}
+                            </ul>
+                            <p className="mt-2 text-xs text-amber-700">
+                              USPS won't print a label to an address it can't verify. Fix it with{" "}
+                              <span className="font-semibold">Edit</span> above (check the street number, city and
+                              ZIP), then get rates again — or have the customer confirm their USPS-registered
+                              address (rural roads sometimes use a PO Box or Rural Route number).
+                            </p>
+                          </div>
+                        )}
 
                         {shippingError && (
                           <div className="text-sm text-red-600 bg-red-50 p-3 rounded-lg mb-3">{shippingError}</div>
