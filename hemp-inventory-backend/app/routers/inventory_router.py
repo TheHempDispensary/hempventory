@@ -3895,8 +3895,15 @@ async def auto_set_par(
             "days_of_data": round(days_of_data, 1),
         })
 
-    # 3. Persist. Upsert so re-running refreshes existing PAR levels.
+    # 3. Persist. Upsert so re-running refreshes PAR from sales — but never
+    # clobber an existing non-zero PAR with 0. A product with no sales yet
+    # (e.g. a brand-new strain) computes to 0; if someone set its PAR manually
+    # so it still gets stocked/produced, re-running must preserve that value.
+    existing = await _get_par_levels(db)
+    written = 0
     for sku, loc_id, par_level in par_rows:
+        if par_level == 0 and existing.get((sku, loc_id)):
+            continue  # keep the manually/previously set PAR
         await db.execute(
             """INSERT INTO par_levels (sku, location_id, par_level, updated_at)
                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
@@ -3904,12 +3911,13 @@ async def auto_set_par(
                DO UPDATE SET par_level = ?, updated_at = CURRENT_TIMESTAMP""",
             (sku, loc_id, par_level, par_level),
         )
+        written += 1
     await db.commit()
 
     return {
-        "message": f"Set PAR levels for {len(par_rows)} item/location pairs from {months}-month sales velocity",
+        "message": f"Set PAR levels for {written} item/location pairs from {months}-month sales velocity (manual PARs on unsold items preserved)",
         "months": months,
-        "total_set": len(par_rows),
+        "total_set": written,
         "by_location": per_location_summary,
     }
 

@@ -75,3 +75,44 @@ async def test_auto_set_par_uses_ecommerce_sales_for_hq(db, monkeypatch):
     )).fetchone()
     assert par is not None
     assert par["par_level"] > 0  # 12 units of website Green Crack -> non-zero PAR
+
+
+async def test_auto_set_par_preserves_manual_par_on_unsold_item(db, monkeypatch):
+    """A manual PAR on a never-sold product must survive re-running auto-set."""
+    await db.execute(
+        "INSERT INTO locations (name, merchant_id, api_token) VALUES (?, ?, ?)",
+        ("East", "EASTX", "tok"),
+    )
+    loc_id = (await (await db.execute("SELECT id FROM locations")).fetchone())["id"]
+
+    # Manually stocked, never sold: staff set PAR 8 so it still gets ordered.
+    await db.execute(
+        "INSERT INTO par_levels (sku, location_id, par_level) VALUES (?, ?, ?)",
+        ("NERDSSM2", loc_id, 8),
+    )
+    await db.commit()
+
+    async def fake_orders(client):
+        return []  # no sales at all
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def get_items(self, expand=""):
+            return {"elements": [
+                {"id": "cid1", "sku": "NERDSSM2",
+                 "name": "THC FLOWER SMALLS NERDS Hybrid 2 GRAMS",
+                 "itemStock": {"quantity": 44}},
+            ]}
+
+    monkeypatch.setattr(inv, "_fetch_all_clover_orders", fake_orders)
+    monkeypatch.setattr(inv, "CloverClient", FakeClient)
+
+    await inv.auto_set_par(inv.AutoSetParRequest(months=1), user={}, db=db)
+
+    par = await (await db.execute(
+        "SELECT par_level FROM par_levels WHERE sku = ? AND location_id = ?",
+        ("NERDSSM2", loc_id),
+    )).fetchone()
+    assert par["par_level"] == 8  # preserved, not reset to 0
