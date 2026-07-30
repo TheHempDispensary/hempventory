@@ -3785,6 +3785,9 @@ async def auto_set_par(
     LeafLife (LF-) items are skipped — they ship from the partner and don't sit on
     our shelves.
     """
+    from datetime import datetime
+    from app.routers.ecommerce_router import HQ_MERCHANT_ID
+
     months = max(0.25, min(req.months, 24))
 
     locations = await _get_locations(db)
@@ -3825,6 +3828,32 @@ async def auto_set_par(
                 qty = max(round(li.get("unitQty", 1000) / 1000), 1)
                 norm = _normalise_sales_name(li_name)
                 sales_by_name[norm] = sales_by_name.get(norm, 0) + qty
+
+        # HQ is the e-commerce/warehouse location: its real per-product demand
+        # lives in the website order tables. Clover records online sales as
+        # generic "item 1" lines with no product name, so without this every HQ
+        # item would get PAR 0. Fold the e-commerce sales in (same source Smart
+        # PAR uses) so HQ PAR reflects actual online sales.
+        if str(merchant_id) == str(HQ_MERCHANT_ID):
+            ec_cursor = await db.execute(
+                """SELECT oi.product_name, oi.quantity, eo.created_at
+                   FROM ecommerce_order_items oi
+                   JOIN ecommerce_orders eo ON oi.order_id = eo.id
+                   WHERE eo.status NOT IN ('cancelled', 'refunded')"""
+            )
+            for p_name, qty, created_at in await ec_cursor.fetchall():
+                if not p_name:
+                    continue
+                norm = _normalise_sales_name(" ".join(str(p_name).split()))
+                sales_by_name[norm] = sales_by_name.get(norm, 0) + (qty or 1)
+                if created_at:
+                    try:
+                        dt = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+                        ts = dt.timestamp()
+                        earliest_ts = min(earliest_ts, ts)
+                        latest_ts = max(latest_ts, ts)
+                    except (ValueError, TypeError):
+                        pass
 
         if earliest_ts >= latest_ts or earliest_ts == float("inf"):
             days_of_data = 1.0
