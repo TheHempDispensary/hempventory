@@ -122,19 +122,33 @@ def _is_leaflife_item(sku: str, name: str) -> bool:
     return False
 
 
+def _is_offered_rate(provider: str, service_name: str) -> bool:
+    """Decide whether a Shippo rate should be offered.
+
+    USPS: Ground Advantage / Priority (exclude Priority Mail Express).
+    UPS:  ground economy/standard, 3 Day Select, 2nd Day Air (exclude the
+          pricey Next Day / Worldwide / international tiers). UPS is important
+          for rural addresses USPS can't validate — it delivers by geocode.
+    """
+    pu = provider.upper()
+    if "USPS" in pu:
+        if "priority mail express" in service_name:
+            return False
+        return any(a in service_name for a in ("ground advantage", "priority"))
+    if "UPS" in pu:
+        if any(b in service_name for b in ("next day", "worldwide", "expedited", "express")):
+            return False
+        return any(a in service_name for a in ("ground", "3 day", "2nd day", "second day"))
+    return False
+
+
 def _filter_usps_rates(rates: list[dict]) -> list[dict]:
-    """Extract and format USPS Ground Advantage and Priority rates."""
-    ALLOWED_SERVICES = {"ground advantage", "priority"}
-    BLOCKED_SERVICES = {"priority mail express"}
+    """Extract and format offered USPS and UPS rates."""
     formatted: list[dict] = []
     for rate in rates:
         provider = rate.get("provider", "")
-        if "USPS" not in provider.upper():
-            continue
         service_name = rate.get("servicelevel", {}).get("name", "").lower()
-        if any(blocked in service_name for blocked in BLOCKED_SERVICES):
-            continue
-        if not any(allowed in service_name for allowed in ALLOWED_SERVICES):
+        if not _is_offered_rate(provider, service_name):
             continue
         formatted.append({
             "id": rate["object_id"],

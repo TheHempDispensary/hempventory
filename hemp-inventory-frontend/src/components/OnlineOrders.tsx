@@ -1886,6 +1886,12 @@ export default function OnlineOrders() {
                                 </div>
                               </div>
                             ))}
+                            {addressWarning.length > 0 && !rates.some(r => r.provider.toUpperCase().includes("UPS")) && (
+                              <p className="text-xs text-gray-500 mt-1">
+                                No UPS rates shown — connect a UPS account in your Shippo dashboard to ship
+                                rural addresses USPS can't verify.
+                              </p>
+                            )}
                           </div>
                         )}
                       </div>
