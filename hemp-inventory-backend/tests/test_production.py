@@ -66,6 +66,38 @@ async def test_batch_lifecycle_stamps_completion(db):
     assert not any(b["id"] == created["id"] for b in res["batches"])
 
 
+async def test_rename_batch_clears_stale_sku(db):
+    """Repurposing a card (Blue Dream -> Green Crack) drops the old SKU."""
+    created = await pr.create_batch(
+        pr.BatchCreate(
+            product_name="THC FLOWER SMALLS BLUE DREAM Sativa 2 GRAMS",
+            sku="BLUEDREAM-SM-2",
+            planned_qty=20,
+            status="planned",
+        ),
+        user={}, db=db,
+    )
+    assert created["sku"] == "BLUEDREAM-SM-2"
+
+    # Rename to a different product without supplying a new SKU.
+    renamed = await pr.update_batch(
+        created["id"],
+        pr.BatchUpdate(product_name="THC FLOWER SMALLS GREEN CRACK Sativa 2 GRAMS"),
+        user={}, db=db,
+    )
+    assert renamed["sku"] is None
+
+    # A cosmetic tweak that normalises to the same product keeps the SKU.
+    keep = await pr.create_batch(
+        pr.BatchCreate(product_name="Gummies", sku="G-1", status="planned"),
+        user={}, db=db,
+    )
+    same = await pr.update_batch(
+        keep["id"], pr.BatchUpdate(product_name="  Gummies  ", notes="x"), user={}, db=db,
+    )
+    assert same["sku"] == "G-1"
+
+
 async def test_create_batch_rejects_bad_status(db):
     with pytest.raises(Exception):
         await pr.create_batch(
