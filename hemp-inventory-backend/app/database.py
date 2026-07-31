@@ -663,6 +663,20 @@ async def init_db():
             )
         """)
 
+        # In-store discount redemptions pulled from Clover orders. Lets the
+        # promo "Uses" count reflect POS/register use (budtenders applying a
+        # synced discount in store), not just website orders.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS clover_discount_uses (
+                order_id TEXT NOT NULL,
+                merchant_id TEXT NOT NULL,
+                discount_code TEXT NOT NULL,
+                created_time INTEGER DEFAULT 0,
+                recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (order_id, merchant_id, discount_code)
+            )
+        """)
+
         # Transfer history table (logs every transfer attempt with per-item status)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS transfer_history (

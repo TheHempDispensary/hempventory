@@ -1090,6 +1090,94 @@ async def active_sale(db: aiosqlite.Connection = Depends(get_db)):
 
 # ── Promo Code Management (Admin) ────────────────────────────────────────────
 
+
+def _norm_discount_name(name: str) -> str:
+    return " ".join((name or "").strip().upper().split())
+
+
+def _extract_applied_discount_codes(order: dict, cdid_to_code: dict, name_to_code: dict) -> set:
+    """Return the set of our promo codes applied to a Clover order.
+
+    Register/POS discounts show up either at the order level or on individual
+    line items, each carrying a name and (usually) a reference to the discount
+    definition. Match by the definition id first, then fall back to the name.
+    """
+    codes: set = set()
+
+    def _match(d: dict):
+        ref_id = (d.get("discount") or {}).get("id") or d.get("id")
+        if ref_id and ref_id in cdid_to_code:
+            codes.add(cdid_to_code[ref_id])
+            return
+        code = name_to_code.get(_norm_discount_name(d.get("name", "")))
+        if code:
+            codes.add(code)
+
+    for d in (order.get("discounts") or {}).get("elements", []):
+        _match(d)
+    for li in (order.get("lineItems") or {}).get("elements", []):
+        for d in (li.get("discounts") or {}).get("elements", []):
+            _match(d)
+    return codes
+
+
+async def _sync_clover_discount_uses(db: aiosqlite.Connection, max_orders_per_location: int = 5000) -> dict:
+    """Scan Clover orders across all locations and record in-store redemptions
+    of our promo codes into ``clover_discount_uses`` (idempotent upserts) so the
+    promo "Uses" count reflects register use, not just website orders."""
+    cursor = await db.execute("SELECT id, code FROM promo_codes")
+    promo_rows = await cursor.fetchall()
+    if not promo_rows:
+        return {"recorded": 0, "scanned": 0}
+    code_by_id = {row["id"]: row["code"] for row in promo_rows}
+    name_to_code = {_norm_discount_name(row["code"]): row["code"] for row in promo_rows}
+
+    cursor = await db.execute(
+        "SELECT discount_id, clover_discount_id FROM clover_discount_map WHERE discount_type = 'promo'"
+    )
+    cdid_to_code = {}
+    for row in await cursor.fetchall():
+        code = code_by_id.get(row["discount_id"])
+        if code and row["clover_discount_id"]:
+            cdid_to_code[row["clover_discount_id"]] = code
+
+    clients = await _get_all_location_clients(db)
+    recorded = 0
+    scanned = 0
+    for merchant_id, loc_name, client in clients:
+        try:
+            offset = 0
+            while offset < max_orders_per_location:
+                data = await client.get_orders(
+                    limit=100, offset=offset,
+                    expand="discounts,lineItems.discounts",
+                    filters=["payType!=NULL"],
+                )
+                orders = data.get("elements", [])
+                if not orders:
+                    break
+                scanned += len(orders)
+                for o in orders:
+                    order_id = o.get("id", "")
+                    if not order_id:
+                        continue
+                    ctime = o.get("createdTime", 0) or 0
+                    for code in _extract_applied_discount_codes(o, cdid_to_code, name_to_code):
+                        cur = await db.execute(
+                            "INSERT OR IGNORE INTO clover_discount_uses "
+                            "(order_id, merchant_id, discount_code, created_time) VALUES (?, ?, ?, ?)",
+                            (order_id, merchant_id, code, ctime),
+                        )
+                        recorded += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+                await db.commit()
+                if len(orders) < 100:
+                    break
+                offset += 100
+        except Exception as e:
+            print(f"[discount-use-sync] {loc_name} ({merchant_id}): {e}")
+    return {"recorded": recorded, "scanned": scanned}
+
+
 @router.get("/promos")
 async def list_promos(db: aiosqlite.Connection = Depends(get_db)):
     """Admin: List all promo codes."""
@@ -1103,6 +1191,12 @@ async def list_promos(db: aiosqlite.Connection = Depends(get_db)):
             (row["code"],),
         )
         order_count = (await cursor2.fetchone())[0]
+        # In-store (Clover POS) redemptions, synced from Clover orders
+        cursor_is = await db.execute(
+            "SELECT COUNT(*) FROM clover_discount_uses WHERE discount_code = ?",
+            (row["code"],),
+        )
+        instore_count = (await cursor_is.fetchone())[0]
         promos.append({
             "id": row["id"],
             "code": row["code"],
@@ -1111,7 +1205,7 @@ async def list_promos(db: aiosqlite.Connection = Depends(get_db)):
             "single_use": bool(row["single_use"]),
             "is_active": bool(row["is_active"]),
             "max_uses": row["max_uses"],
-            "times_used": order_count,
+            "times_used": order_count + instore_count,
             "expires_at": row["expires_at"],
             "starts_at": row["starts_at"] if "starts_at" in row.keys() else None,
             "applies_to": row["applies_to"] if "applies_to" in row.keys() else "all",
@@ -1125,6 +1219,14 @@ async def list_promos(db: aiosqlite.Connection = Depends(get_db)):
             "created_at": row["created_at"] or "",
         })
     return promos
+
+
+@router.post("/promos/sync-uses")
+async def sync_promo_uses(db: aiosqlite.Connection = Depends(get_db)):
+    """Admin: pull in-store (Clover POS) discount redemptions now so the promo
+    "Uses" counts refresh immediately instead of waiting for the scheduled job."""
+    result = await _sync_clover_discount_uses(db)
+    return {"ok": True, **result}
 
 
 class PromoCreateRequest(BaseModel):
