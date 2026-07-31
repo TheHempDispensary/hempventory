@@ -145,6 +145,26 @@ async def _get_par_levels(db: aiosqlite.Connection) -> dict:
     return {(row[0], row[1]): row[2] for row in rows}
 
 
+_BATCH_SUFFIX_RE = re.compile(r"\s+batch\s+[\w-]+\s*$", re.IGNORECASE)
+
+
+def _strip_batch_suffix(name: str) -> str:
+    """Drop a trailing 'BATCH <code>' from a product name.
+
+    Production/staff sometimes append a lot code (e.g. "... PINEAPPLE EXPRESS
+    BATCH 01182515") to the Clover item at one store but not another, so the
+    same product (same SKU) would otherwise split into duplicate rows. Removing
+    the batch suffix lets those merge back into a single per-location row.
+    Applied repeatedly in case more than one suffix was appended.
+    """
+    prev = None
+    out = name
+    while out != prev:
+        prev = out
+        out = _BATCH_SUFFIX_RE.sub("", out).strip()
+    return out or name
+
+
 async def _do_sync(db: aiosqlite.Connection) -> dict:
     """Core sync logic: pull latest inventory from all Clover locations."""
     locations = await _get_locations(db)
@@ -187,15 +207,19 @@ async def _do_sync(db: aiosqlite.Connection) -> dict:
             raw_sku = item.get("sku", "") or ""
             clover_id = item.get("id", "")
             item_name = " ".join((item.get("name", "") or "").split())  # normalize whitespace
+            # Ignore a per-store "BATCH <code>" lot suffix so the same product
+            # (identified by SKU + base name) merges into ONE row even when one
+            # location appended a batch number to its name and another didn't.
+            base_name = _strip_batch_suffix(item_name)
             display_sku = raw_sku or clover_id
             # When an item has no user-assigned SKU, merge by name so that
             # the same product (e.g. item-group variants) created across
             # multiple locations shows as ONE row with stock at each location
             # instead of separate rows per location.
             if raw_sku:
-                merge_key = f"{raw_sku}::{item_name}"
+                merge_key = f"{raw_sku}::{base_name}"
             else:
-                merge_key = f"name::{item_name}"
+                merge_key = f"name::{base_name}"
 
             item_stock = item.get("itemStock", {})
             quantity = item_stock.get("quantity", 0) if item_stock else 0
@@ -215,7 +239,7 @@ async def _do_sync(db: aiosqlite.Connection) -> dict:
             if merge_key not in inventory:
                 inventory[merge_key] = {
                     "sku": display_sku,
-                    "name": item_name,
+                    "name": base_name,
                     "price": item.get("price", 0),
                     "categories": category_names,
                     "locations": {},
@@ -238,14 +262,23 @@ async def _do_sync(db: aiosqlite.Connection) -> dict:
                     "modified_time": item.get("modifiedTime", 0),
                 }
 
+            existing_loc = inventory[merge_key]["locations"].get(loc_name)
+            if existing_loc:
+                # Same product already recorded at this location under a
+                # different name (e.g. a separate batch item) — add the stock
+                # together instead of overwriting so the total is correct.
+                quantity = (existing_loc.get("stock") or 0) + quantity
+                if par is None:
+                    par = existing_loc.get("par_level")
             inventory[merge_key]["locations"][loc_name] = {
                 "location_id": loc_id,
                 "stock": quantity,
                 "par_level": par,
                 "status": _stock_status(quantity, par),
-                "clover_item_id": clover_id,
+                "clover_item_id": existing_loc.get("clover_item_id") if existing_loc else clover_id,
             }
-            inventory[merge_key]["clover_ids"][loc_name] = clover_id
+            if loc_name not in inventory[merge_key]["clover_ids"]:
+                inventory[merge_key]["clover_ids"][loc_name] = clover_id
 
     # Ensure LeafLife / HQ-only products appear at ALL locations with 0 stock
     # (LeafLife items only exist on HQ Clover, so East/West show "—" without this)
