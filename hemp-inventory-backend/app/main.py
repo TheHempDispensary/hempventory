@@ -173,6 +173,21 @@ async def _scheduled_auto_par():
         print(f"[auto-sync] PAR auto-set failed: {e}")
 
 
+async def _scheduled_discount_use_sync():
+    """Background job: pull in-store (Clover POS) discount redemptions so the
+    promo "Uses" count includes register use, not just website orders."""
+    try:
+        db = await _connect_db()
+        try:
+            from app.routers.ecommerce_router import _sync_clover_discount_uses
+            result = await _sync_clover_discount_uses(db)
+            print(f"[auto-sync] Discount uses: {result.get('recorded', 0)} new in-store redemptions ({result.get('scanned', 0)} orders scanned)")
+        finally:
+            await db.close()
+    except Exception as e:
+        print(f"[auto-sync] Discount use sync failed: {e}")
+
+
 async def _scheduled_coa_sync():
     """Background job: sync COA lab results from ACS Laboratory."""
     import os
@@ -203,6 +218,14 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(_scheduled_leaflife_sync, "interval", minutes=15, id="leaflife_sync", replace_existing=True)
     # Recompute PAR from sales velocity once a night (heavy: pulls all orders).
     scheduler.add_job(_scheduled_auto_par, "cron", hour=5, id="auto_par", replace_existing=True)
+    # Pull in-store discount redemptions from Clover so promo "Uses" is accurate
+    # (heavy: scans orders across locations). Runs shortly after startup too.
+    from datetime import datetime, timedelta
+    scheduler.add_job(
+        _scheduled_discount_use_sync, "interval", hours=3,
+        id="discount_use_sync", replace_existing=True,
+        next_run_time=datetime.now() + timedelta(minutes=2),
+    )
     scheduler.start()
     # Run initial inventory sync in background so server starts accepting requests immediately
     asyncio.create_task(_scheduled_inventory_sync())
