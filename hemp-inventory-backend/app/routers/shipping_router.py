@@ -143,14 +143,27 @@ def _is_offered_rate(provider: str, service_name: str) -> bool:
 
 
 def _filter_usps_rates(rates: list[dict]) -> list[dict]:
-    """Extract and format offered USPS and UPS rates."""
-    formatted: list[dict] = []
+    """Extract and format offered USPS and UPS rates.
+
+    Shippo returns one rate per connected carrier account, so the same
+    service can appear several times at different prices.  Only the cheapest
+    rate per provider/service is kept.
+    """
+    cheapest: dict[tuple[str, str], dict] = {}
     for rate in rates:
         provider = rate.get("provider", "")
         service_name = rate.get("servicelevel", {}).get("name", "").lower()
         if not _is_offered_rate(provider, service_name):
             continue
-        formatted.append({
+        key = (provider.upper(), service_name)
+        try:
+            amount = float(rate.get("amount", "0"))
+        except (TypeError, ValueError):
+            continue
+        existing = cheapest.get(key)
+        if existing is not None and float(existing["amount"]) <= amount:
+            continue
+        cheapest[key] = {
             "id": rate["object_id"],
             "provider": provider,
             "service_level": rate.get("servicelevel", {}).get("name", ""),
@@ -159,7 +172,8 @@ def _filter_usps_rates(rates: list[dict]) -> list[dict]:
             "estimated_days": rate.get("estimated_days"),
             "duration_terms": rate.get("duration_terms", ""),
             "arrives_by": rate.get("arrives_by"),
-        })
+        }
+    formatted = list(cheapest.values())
     formatted.sort(key=lambda r: float(r["amount"]))
     return formatted
 
