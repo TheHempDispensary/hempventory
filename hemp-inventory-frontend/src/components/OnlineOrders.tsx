@@ -75,6 +75,20 @@ interface ShippingRate {
   duration_terms: string;
 }
 
+const normalizeService = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+/** Find the rate matching the service the customer paid for, cheapest first. */
+const findMatchingRate = (rates: ShippingRate[], service: string): ShippingRate | undefined => {
+  const wanted = normalizeService(service);
+  if (!wanted) return undefined;
+  const candidates = rates.filter((r) => {
+    const level = normalizeService(r.service_level);
+    const full = normalizeService(`${r.provider} ${r.service_level}`);
+    return level === wanted || full === wanted || full.includes(wanted);
+  });
+  return candidates.sort((a, b) => parseFloat(a.amount) - parseFloat(b.amount))[0];
+};
+
 const STATUS_OPTIONS = [
   { value: "paid", label: "Paid", color: "bg-green-100 text-green-800", icon: CheckCircle },
   { value: "processing", label: "Processing", color: "bg-blue-100 text-blue-800", icon: Package },
@@ -519,7 +533,8 @@ export default function OnlineOrders() {
       // Surface Shippo/USPS address validation so a bad address is obvious
       // before the admin buys a label (which USPS would reject).
       const validation = res.data.address_validation;
-      if (validation && validation.is_valid === false) {
+      const addressUnverified = validation && validation.is_valid === false;
+      if (addressUnverified) {
         setAddressWarning(
           validation.messages?.length
             ? validation.messages
@@ -527,21 +542,42 @@ export default function OnlineOrders() {
         );
       }
 
+      // Auto-buy is only attempted for a verified address; an unverified one
+      // needs a human to fix it before money is spent on a label.
+      const orderObj = orders.find(o => o.id === orderId);
+      const customerService = orderObj?.shipping_service;
+      const canAutoBuy = !addressUnverified && !!customerService;
+
       if (isSplit && res.data.shipment_groups?.length > 1) {
-        // Split shipment: show rate groups per shipment (no auto-purchase — the
-        // admin reviews the address warning, then clicks Buy Label per group).
         const groups: ShipmentGroup[] = res.data.shipment_groups;
         setShipmentGroups(groups);
+
+        if (canAutoBuy) {
+          const matches = groups.map(g => ({ group: g, rate: findMatchingRate(g.rates, customerService!) }));
+          if (matches.every(m => m.rate)) {
+            for (const m of matches) {
+              await handlePurchaseSplitLabel(m.rate!.id, orderId, m.group.shipment_id);
+            }
+            return;
+          }
+        }
 
         if (groups.some(g => g.rates.length === 0)) {
           setShippingError("No shipping rates available for one or more shipment groups.");
         }
       } else {
         // Single shipment
-        const fetchedRates = res.data.rates || [];
+        const fetchedRates: ShippingRate[] = res.data.rates || [];
         setRates(fetchedRates);
         if (fetchedRates.length === 0) {
           setShippingError("No shipping rates available for this address.");
+          return;
+        }
+        if (canAutoBuy) {
+          const match = findMatchingRate(fetchedRates, customerService!);
+          if (match) {
+            await handlePurchaseLabel(match.id, orderId);
+          }
         }
       }
     } catch (err: unknown) {
