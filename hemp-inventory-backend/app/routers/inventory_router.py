@@ -4165,6 +4165,11 @@ _LEAFLIFE_TABS = [
         # weight (g) -> retail-price column index
         "price_cols": {"28": 12, "14": 13, "7": 14, "3.5": 15},
         "sku_suffix": {"28": "28", "14": "14", "7": "7 G", "3.5": "3.5"},
+        # weight (g) -> minimum customer price in cents. Flat floor across all
+        # grade tiers (SMALLS/EVERYDAY/PREMIUM) — higher tiers price above it.
+        # Applied at sync time so Clover POS + Inventory show the same minimum
+        # the website enforces, instead of the raw (lower) sheet price.
+        "price_floor": {"28": 10000, "14": 9500, "7": 5500, "3.5": 2500},
     },
     {
         "tab": "Retail Concentrate Menu",
