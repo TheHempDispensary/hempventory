@@ -1068,6 +1068,25 @@ async def set_item_category(
     return {"category": target, "results": results}
 
 
+async def _set_consolidated_stock(client, matching: list[dict], quantity) -> None:
+    """Set a product's stock to an absolute total across duplicate Clover items.
+
+    A single logical product can resolve to more than one Clover item at a
+    location (e.g. blank-SKU bulk items created once per production batch). The
+    inventory view merges them by name and sums their stock, so writing the same
+    quantity to every duplicate double-counts and makes it impossible to lower
+    the total (the untouched duplicates act as a hidden floor). Instead we set
+    the first item to the requested total and zero the rest, so the merged total
+    equals exactly what was entered. For a normal single item this is just a
+    plain set.
+    """
+    if not matching:
+        return
+    await client.update_item_stock(matching[0]["id"], quantity)
+    for extra in matching[1:]:
+        await client.update_item_stock(extra["id"], 0)
+
+
 class BulkStockUpdateItem(BaseModel):
     sku: str
     location_id: int
@@ -1137,9 +1156,21 @@ async def bulk_stock_update(
             results.append({"sku": upd.sku, "location": loc_name, "status": "not_found"})
             continue
 
+        # A single logical product can map to several Clover items at one
+        # location (e.g. blank-SKU bulk items created per production batch).
+        # Pull in every same-name item so we can consolidate onto one, otherwise
+        # the untouched duplicates keep inflating the merged total.
+        primary_name = " ".join((matching[0].get("name", "") or "").split()).lower()
+        if primary_name:
+            matched_ids = {m["id"] for m in matching}
+            for i in clover_items:
+                if i["id"] in matched_ids:
+                    continue
+                if " ".join((i.get("name", "") or "").split()).lower() == primary_name:
+                    matching.append(i)
+
         try:
-            for match in matching:
-                await client.update_item_stock(match["id"], int(upd.quantity))
+            await _set_consolidated_stock(client, matching, int(upd.quantity))
             results.append({"sku": upd.sku, "location": loc_name, "status": "updated", "quantity": upd.quantity})
         except Exception as e:
             results.append({"sku": upd.sku, "location": loc_name, "status": "error", "error": str(e)})
@@ -1407,8 +1438,8 @@ async def update_item(
             for match in matching:
                 if has_field_updates:
                     await client.update_item(match["id"], loc_update_data)
-                if loc_id in stock_map:
-                    await client.update_item_stock(match["id"], stock_map[loc_id])
+            if loc_id in stock_map:
+                await _set_consolidated_stock(client, matching, stock_map[loc_id])
             results.append({"location": loc_name, "status": "updated", "count": len(matching)})
         except httpx.HTTPStatusError as e:
             error_detail = str(e)
@@ -1457,8 +1488,8 @@ async def update_item(
                 for match in matching:
                     if has_field_updates:
                         await client.update_item(match["id"], loc_update_data)
-                    if loc_id in stock_map:
-                        await client.update_item_stock(match["id"], stock_map[loc_id])
+                if loc_id in stock_map:
+                    await _set_consolidated_stock(client, matching, stock_map[loc_id])
                 results[idx] = {"location": loc_name, "status": "updated", "count": len(matching)}
             except Exception:
                 pass  # keep original not_found
