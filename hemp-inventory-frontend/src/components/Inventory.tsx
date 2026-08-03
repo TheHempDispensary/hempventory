@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, useCallback } from "react";
-import { syncInventory, getCachedInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, getTransferHistory, bulkAssignCategory, bulkAssignImages, syncRefunds, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup, bulkStockUpdate, addVariantsToItem, getInventoryChanges, getProductAttributes, updateProductAttributes, getImageGallery, uploadGalleryImage, getGalleryImageUrl, deleteGalleryImage, bulkHideItems, bulkUnhideItems, syncLeafLife, renameItemGroup } from "../lib/api";
+import { syncInventory, getCachedInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, getTransferHistory, bulkAssignCategory, setItemCategory, bulkAssignImages, syncRefunds, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup, bulkStockUpdate, addVariantsToItem, getInventoryChanges, getProductAttributes, updateProductAttributes, getImageGallery, uploadGalleryImage, getGalleryImageUrl, deleteGalleryImage, bulkHideItems, bulkUnhideItems, syncLeafLife, renameItemGroup } from "../lib/api";
 import { RefreshCw, Search, Plus, ChevronDown, ChevronUp, X, Save, Package, Trash2, CheckSquare, Square, Minus, Image, Download, Upload, Settings, ArrowRightLeft, Images, Layers, Tag, ChevronsLeft, ChevronsRight, ChevronLeft, ChevronRight, History, AlertCircle, CheckCircle2, EyeOff, Eye, Printer } from "lucide-react";
 import { matchesSearch } from "../lib/utils";
 
@@ -149,13 +149,14 @@ export default function Inventory() {
     effect: string;
     strength: string;
     product_type: string;
+    category: string;
   }>({
     name: "", price: "", stocks: {}, pars: {},
     price_type: "FIXED", cost: "", product_code: "", alternate_name: "",
     description: "", color_code: "", is_revenue: true, is_age_restricted: true,
     age_restriction_type: "Vitamin & Supplements", age_restriction_min_age: "21",
     available: true, hidden: false, auto_manage: false, default_tax_rates: true,
-    effect: "", strength: "", product_type: "",
+    effect: "", strength: "", product_type: "", category: "",
   });
 
   // Product attributes loaded from backend
@@ -638,6 +639,7 @@ export default function Inventory() {
       effect: productAttrsMap[item.sku]?.effect || "",
       strength: productAttrsMap[item.sku]?.strength || "",
       product_type: productAttrsMap[item.sku]?.product_type || "",
+      category: item.categories[0] || "",
     });
     setEditTab("details");
     setSaveMessage(null);
@@ -781,7 +783,9 @@ export default function Inventory() {
       const typeChanged = editForm.product_type !== (oldAttrs.product_type || "");
       const hasAttrChanges = effectChanged || strengthChanged || typeChanged;
 
-      if (Object.keys(updateData).length === 0 && parPromises.length === 0 && !hasAttrChanges) {
+      const categoryChanged = editForm.category.trim() !== (editItem.categories[0] || "");
+
+      if (Object.keys(updateData).length === 0 && parPromises.length === 0 && !hasAttrChanges && !categoryChanged) {
         setSaveMessage({ type: "success", text: "No changes to save." });
         setSaving(false);
         return;
@@ -789,6 +793,11 @@ export default function Inventory() {
 
       if (parPromises.length > 0) {
         await Promise.all(parPromises);
+      }
+
+      // Set (replace) the item's Clover category across all locations
+      if (categoryChanged) {
+        await setItemCategory(editItem.sku, editForm.category.trim());
       }
 
       // Save effect/strength attributes to local DB
@@ -811,7 +820,12 @@ export default function Inventory() {
       }
 
       if (Object.keys(updateData).length === 0) {
-        setSaveMessage({ type: "success", text: hasAttrChanges ? "Product attributes saved!" : "PAR levels updated!" });
+        const msg = hasAttrChanges
+          ? "Product attributes saved!"
+          : categoryChanged
+            ? "Category saved to Clover!"
+            : "PAR levels updated!";
+        setSaveMessage({ type: "success", text: msg });
         await loadData();
         setSaving(false);
         return;
@@ -2407,16 +2421,26 @@ export default function Inventory() {
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">Category</label>
-                    <div className="flex gap-1 flex-wrap">
-                      {editItem.categories.length > 0 ? (
-                        editItem.categories.map((c) => (
-                          <span key={c} className="inline-block px-3 py-1 bg-gray-100 text-gray-600 rounded-lg text-sm">{c}</span>
-                        ))
-                      ) : (
-                        <span className="text-sm text-gray-400">No category</span>
-                      )}
+                    <div className="flex gap-2">
+                      <select
+                        value={categories.includes(editForm.category) ? editForm.category : ""}
+                        onChange={(e) => setEditForm({ ...editForm, category: e.target.value })}
+                        className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-green-500 outline-none"
+                      >
+                        <option value="">No category</option>
+                        {categories.map((c) => (
+                          <option key={c} value={c}>{c}</option>
+                        ))}
+                      </select>
+                      <input
+                        type="text"
+                        value={categories.includes(editForm.category) ? "" : editForm.category}
+                        onChange={(e) => setEditForm({ ...editForm, category: e.target.value })}
+                        className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 outline-none"
+                        placeholder="Or type new category"
+                      />
                     </div>
-                    <p className="text-xs text-gray-400 mt-1">Categories can be managed from the Clover dashboard.</p>
+                    <p className="text-xs text-gray-400 mt-1">Select an existing category or type a new one — saved to Clover at all locations.</p>
                   </div>
                   <div className="flex items-center gap-3 px-3 py-2.5 bg-amber-50 rounded-lg border border-amber-200">
                     <span className="inline-flex items-center justify-center w-8 h-8 rounded-full bg-amber-100 text-amber-700 font-bold text-sm">21+</span>

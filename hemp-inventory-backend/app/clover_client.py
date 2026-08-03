@@ -156,6 +156,15 @@ class CloverClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def unassign_category(self, item_id: str, category_id: str) -> None:
+        """Remove a category association from an item."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.delete(
+                f"{self.base_url}/category_items/{category_id}:{item_id}",
+                headers=self._headers(),
+            )
+            resp.raise_for_status()
+
     async def create_category(self, name: str) -> dict:
         """Create a new category."""
         async with httpx.AsyncClient(timeout=30.0) as client:
