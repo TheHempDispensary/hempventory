@@ -67,3 +67,38 @@ async def test_do_sync_merges_batch_named_item_across_locations(db, monkeypatch)
     assert row["name"] == "DELTA 8 THC WAX THREE GRAMS SATIVA PINEAPPLE EXPRESS"
     assert row["locations"]["East"]["stock"] == 6
     assert row["locations"]["HQ"]["stock"] == 13
+
+
+async def test_do_sync_merges_case_only_name_difference(db, monkeypatch):
+    """Same SKU where stores differ only by capitalization merges into one row."""
+    await db.execute("INSERT INTO locations (name, merchant_id, api_token) VALUES (?, ?, ?)", ("East", "EAST", "t"))
+    await db.execute("INSERT INTO locations (name, merchant_id, api_token) VALUES (?, ?, ?)", ("HQ", "HQ", "t"))
+    await db.commit()
+
+    catalogs = {
+        "EAST": [{"id": "east1", "sku": "058808442752",
+                  "name": "THC FLOWER SMALLS BLUE DREAM SATIVA 28 GRAMS",
+                  "itemStock": {"quantity": 16}}],
+        "HQ": [{"id": "hq1", "sku": "058808442752",
+                "name": "THC FLOWER SMALLS BLUE DREAM Sativa 28 GRAMS",
+                "itemStock": {"quantity": 9}}],
+    }
+
+    class FakeClient:
+        def __init__(self, merchant_id, api_token, *a, **k):
+            self.merchant_id = merchant_id
+
+        async def get_item_groups(self):
+            return {"elements": []}
+
+        async def get_items(self, expand=""):
+            return {"elements": catalogs[self.merchant_id]}
+
+    monkeypatch.setattr(inv, "CloverClient", FakeClient)
+
+    result = await inv._do_sync(db)
+    rows = [i for i in result["items"] if "BLUE DREAM" in i["name"].upper()]
+    assert len(rows) == 1, [r["name"] for r in rows]
+    row = rows[0]
+    assert row["locations"]["East"]["stock"] == 16
+    assert row["locations"]["HQ"]["stock"] == 9

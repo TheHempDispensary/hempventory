@@ -211,15 +211,19 @@ async def _do_sync(db: aiosqlite.Connection) -> dict:
             # (identified by SKU + base name) merges into ONE row even when one
             # location appended a batch number to its name and another didn't.
             base_name = _strip_batch_suffix(item_name)
+            # Case-fold the name in the merge key so the same product still
+            # merges when locations differ only by capitalization (e.g.
+            # "... BLUE DREAM Sativa 28 GRAMS" vs "... BLUE DREAM SATIVA 28 GRAMS").
+            name_key = base_name.upper()
             display_sku = raw_sku or clover_id
             # When an item has no user-assigned SKU, merge by name so that
             # the same product (e.g. item-group variants) created across
             # multiple locations shows as ONE row with stock at each location
             # instead of separate rows per location.
             if raw_sku:
-                merge_key = f"{raw_sku}::{base_name}"
+                merge_key = f"{raw_sku}::{name_key}"
             else:
-                merge_key = f"name::{base_name}"
+                merge_key = f"name::{name_key}"
 
             item_stock = item.get("itemStock", {})
             quantity = item_stock.get("quantity", 0) if item_stock else 0
