@@ -4426,9 +4426,14 @@ async def run_leaflife_sync(db: aiosqlite.Connection) -> dict:
 
     age_obj = await _get_age_restriction_obj(client, "Vitamin & Supplements", 21)
 
-    # 3. Existing LF- items in Clover HQ.
+    # 3. Existing LF- items in Clover HQ, grouped by SKU. A SKU can map to more
+    #    than one Clover item when duplicates were created previously; we keep a
+    #    list so the update phase can collapse them into a single canonical item
+    #    (deleting the extras) instead of silently touching just one — which is
+    #    what left stale duplicates below the price floor and double-counted
+    #    stock in the merged inventory view.
     existing_items = await client.get_items(expand="itemStock")
-    existing: dict = {}
+    existing: dict[str, list[dict]] = {}
     for item in existing_items.get("elements", []):
         sku = (item.get("sku") or "")
         if sku.upper().startswith("LF-"):
@@ -4436,21 +4441,32 @@ async def run_leaflife_sync(db: aiosqlite.Connection) -> dict:
             item_stock = item.get("itemStock") or {}
             if isinstance(item_stock, dict):
                 stock = int(item_stock.get("quantity", 0) or 0)
-            existing[sku.upper()] = {
+            existing.setdefault(sku.upper(), []).append({
                 "id": item.get("id", ""),
                 "name": item.get("name", ""),
                 "price": item.get("price", 0),
                 "stock": stock,
-            }
+            })
 
     created = updated = removed = 0
 
-    # 4. Create / update.
+    # 4. Create / update. When a SKU has duplicate Clover items, keep the first
+    #    as canonical and delete the rest so each LF- product is exactly one item.
     for sku_up, want in desired.items():
         cat_id = cat_ids.get(want["category"].lower())
-        cur = existing.get(sku_up)
+        dupes = existing.get(sku_up) or []
+        cur = dupes[0] if dupes else None
         try:
             if cur:
+                for extra in dupes[1:]:
+                    if not extra["id"]:
+                        continue
+                    try:
+                        await client.delete_item(extra["id"])
+                        removed += 1
+                        await asyncio.sleep(0.2)
+                    except Exception as de:
+                        errors.append(f"dedupe {want['sku']}: {de}")
                 payload: dict = {}
                 if cur["price"] != want["price"]:
                     payload["price"] = want["price"]
@@ -4460,7 +4476,7 @@ async def run_leaflife_sync(db: aiosqlite.Connection) -> dict:
                     await client.update_item(cur["id"], payload)
                 if cur["stock"] != want["stock"]:
                     await client.update_item_stock(cur["id"], want["stock"])
-                if payload or cur["stock"] != want["stock"]:
+                if payload or cur["stock"] != want["stock"] or len(dupes) > 1:
                     updated += 1
                 await _upsert_leaflife_attrs(
                     db, want["sku"], want["name"], want["product_type"]
@@ -4499,18 +4515,19 @@ async def run_leaflife_sync(db: aiosqlite.Connection) -> dict:
     # 5. Remove LF- items no longer on the sheet (only when every tab loaded
     #    cleanly, so a fetch error can't cascade into deletions).
     if all_tabs_ok and desired:
-        for sku_up, cur in existing.items():
+        for sku_up, dupes in existing.items():
             if sku_up in desired:
                 continue
             try:
-                if cur["id"]:
-                    await client.delete_item(cur["id"])
+                for cur in dupes:
+                    if cur["id"]:
+                        await client.delete_item(cur["id"])
+                        removed += 1
+                        await asyncio.sleep(0.2)
                 await db.execute("DELETE FROM par_levels WHERE UPPER(sku) = ?", (sku_up,))
                 await db.execute(
                     "DELETE FROM inventory_snapshots WHERE UPPER(sku) = ?", (sku_up,)
                 )
-                removed += 1
-                await asyncio.sleep(0.2)
             except Exception as e:
                 errors.append(f"delete {sku_up}: {e}")
 
