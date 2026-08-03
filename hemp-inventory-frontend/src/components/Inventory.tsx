@@ -1076,40 +1076,77 @@ export default function Inventory() {
     }
   };
 
+  // Suggested transfer qty for one item from `fromName` to `toName`.
+  // The source keeps its OWN PAR as a reserve (e.g. HQ's e-commerce demand),
+  // then splits whatever is left over ("shareable") across every location that
+  // is short of its PAR, proportional to each location's shortfall — so one
+  // store can't drain stock the others (or HQ itself) need. Uses
+  // largest-remainder rounding so the integer shares sum to the shareable pool.
+  const suggestedTransferQty = useCallback(
+    (item: InventoryItem, fromName: string, toName: string, locNames: string[]): number => {
+      const from = item.locations[fromName];
+      const shareable = Math.max(0, (from?.stock ?? 0) - (from?.par_level ?? 0));
+      if (shareable <= 0) return 0;
+
+      const needs: { name: string; need: number }[] = [];
+      let totalNeed = 0;
+      for (const name of locNames) {
+        if (name === fromName) continue;
+        const l = item.locations[name];
+        const need = (l?.par_level ?? 0) - (l?.stock ?? 0);
+        if (need > 0) {
+          needs.push({ name, need });
+          totalNeed += need;
+        }
+      }
+      const mineNeed = needs.find((n) => n.name === toName)?.need ?? 0;
+      if (mineNeed <= 0) return 0;
+      if (totalNeed <= shareable) return mineNeed;
+
+      // Proportional split with largest-remainder rounding.
+      const alloc = needs.map((n) => {
+        const exact = (shareable * n.need) / totalNeed;
+        const floor = Math.floor(exact);
+        return { name: n.name, floor, frac: exact - floor, value: floor };
+      });
+      let remainder = shareable - alloc.reduce((s, a) => s + a.floor, 0);
+      alloc.sort((a, b) => b.frac - a.frac);
+      for (let i = 0; i < alloc.length && remainder > 0; i++, remainder--) {
+        alloc[i].value += 1;
+      }
+      const mine = alloc.find((a) => a.name === toName)?.value ?? 0;
+      return Math.min(mineNeed, mine);
+    },
+    [],
+  );
+
   // How many items the "Suggest from PAR" fill would add for the current
-  // From/To selection: destination is below its PAR and the source has stock.
+  // From/To selection.
   const suggestableCount = useMemo(() => {
     if (!transferFromId || !transferToId || transferFromId === transferToId) return 0;
     const fromLoc = locations.find((l) => l.id === transferFromId);
     const toLoc = locations.find((l) => l.id === transferToId);
     if (!fromLoc || !toLoc) return 0;
+    const locNames = locations.map((l) => l.name);
     let count = 0;
     for (const item of items) {
-      const from = item.locations[fromLoc.name];
-      const to = item.locations[toLoc.name];
-      const par = to?.par_level ?? 0;
-      const need = par - (to?.stock ?? 0);
-      const available = from?.stock ?? 0;
-      if (need > 0 && available > 0) count++;
+      if (suggestedTransferQty(item, fromLoc.name, toLoc.name, locNames) > 0) count++;
     }
     return count;
-  }, [items, locations, transferFromId, transferToId]);
+  }, [items, locations, transferFromId, transferToId, suggestedTransferQty]);
 
-  // Fill the transfer list from PAR gaps: for each item where the destination
-  // is under its PAR, suggest min(PAR gap, source stock on hand).
+  // Fill the transfer list with each item's fair share of the source's
+  // shareable (over-PAR) stock for the selected destination.
   const suggestTransferFromPar = () => {
     const fromLoc = locations.find((l) => l.id === transferFromId);
     const toLoc = locations.find((l) => l.id === transferToId);
     if (!fromLoc || !toLoc) return;
+    const locNames = locations.map((l) => l.name);
     const next = new Map(transferItems);
     for (const item of items) {
-      const from = item.locations[fromLoc.name];
-      const to = item.locations[toLoc.name];
-      const par = to?.par_level ?? 0;
-      const need = par - (to?.stock ?? 0);
-      const available = from?.stock ?? 0;
-      if (need > 0 && available > 0) {
-        next.set(item.id, { item, quantity: String(Math.min(need, available)) });
+      const qty = suggestedTransferQty(item, fromLoc.name, toLoc.name, locNames);
+      if (qty > 0) {
+        next.set(item.id, { item, quantity: String(qty) });
       }
     }
     setTransferItems(next);
@@ -3580,9 +3617,10 @@ export default function Inventory() {
             {transferFromId > 0 && transferToId > 0 && transferFromId !== transferToId && (
               <div className="mb-4 flex items-center justify-between gap-3 p-3 bg-purple-50 border border-purple-100 rounded-lg">
                 <p className="text-xs text-gray-600 leading-snug">
-                  Fill from PAR gaps: send from{" "}
-                  <span className="font-medium">{locations.find((l) => l.id === transferFromId)?.name}</span> whatever{" "}
-                  <span className="font-medium">{locations.find((l) => l.id === transferToId)?.name}</span> is short of its PAR
+                  Fair share from PAR gaps:{" "}
+                  <span className="font-medium">{locations.find((l) => l.id === transferFromId)?.name}</span> keeps its own PAR,
+                  then splits the rest between the stores that are short —{" "}
+                  <span className="font-medium">{locations.find((l) => l.id === transferToId)?.name}</span> gets its proportional share
                   {suggestableCount > 0 ? ` (${suggestableCount} item${suggestableCount !== 1 ? "s" : ""})` : ""}.
                 </p>
                 <button
