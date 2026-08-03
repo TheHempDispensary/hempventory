@@ -132,6 +132,9 @@ export const getTransferHistory = (limit = 50, offset = 0) =>
 export const bulkAssignCategory = (skus: string[], categoryName: string) =>
   api.post("/api/inventory/bulk-assign-category", { skus, category_name: categoryName });
 
+export const setItemCategory = (sku: string, categoryName: string) =>
+  api.post("/api/inventory/set-item-category", { sku, category_name: categoryName });
+
 export const bulkStockUpdate = (updates: { sku: string; location_id: number; quantity: number; item_name?: string; clover_item_id?: string }[]) =>
   api.post("/api/inventory/items/bulk-stock-update", { updates });
 

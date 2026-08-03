@@ -1009,6 +1009,65 @@ async def bulk_assign_category(
     return {"category": req.category_name, "total_assigned": total_assigned, "results": results}
 
 
+class SetItemCategoryRequest(BaseModel):
+    sku: str
+    category_name: str  # empty string clears the category
+
+
+@router.post("/set-item-category")
+async def set_item_category(
+    req: SetItemCategoryRequest,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Set (replace) a single item's category across all Clover locations.
+
+    Unlike bulk-assign (which only adds), this removes the item's existing
+    category associations first so the item ends up in exactly the chosen
+    category — or in none when category_name is empty.
+    """
+    locations = await _get_locations(db)
+    if not locations:
+        raise HTTPException(status_code=400, detail="No locations configured")
+
+    target = (req.category_name or "").strip()
+    results: list[dict] = []
+
+    for loc in locations:
+        loc_id, loc_name, merchant_id, api_token = loc[0], loc[1], loc[2], loc[3]
+        try:
+            client = CloverClient(merchant_id, api_token)
+
+            all_items_data = await client.get_items()
+            all_items = all_items_data.get("elements", [])
+            matching = [i for i in all_items if i.get("sku") == req.sku or i.get("id") == req.sku]
+
+            cat_id = None
+            if target:
+                cat_data = await client.get_categories()
+                cat_elements = cat_data.get("elements", [])
+                existing = [c for c in cat_elements if c.get("name", "").lower() == target.lower()]
+                cat_id = existing[0]["id"] if existing else (await client.create_category(target))["id"]
+
+            for item in matching:
+                item_cats = item.get("categories", {}).get("elements", [])
+                for c in item_cats:
+                    if c.get("id") and c.get("id") != cat_id:
+                        try:
+                            await client.unassign_category(item["id"], c["id"])
+                        except Exception:
+                            pass  # best-effort removal
+                if cat_id and not any(c.get("id") == cat_id for c in item_cats):
+                    await client.assign_category(item["id"], cat_id)
+
+            results.append({"location": loc_name, "status": "ok"})
+        except Exception as e:
+            results.append({"location": loc_name, "status": "error", "error": str(e)})
+
+    await _invalidate_cache()
+    return {"category": target, "results": results}
+
+
 class BulkStockUpdateItem(BaseModel):
     sku: str
     location_id: int
