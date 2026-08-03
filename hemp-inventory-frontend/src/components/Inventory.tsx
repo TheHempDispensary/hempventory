@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo, useCallback } from "react";
 import { syncInventory, getCachedInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, getTransferHistory, bulkAssignCategory, bulkAssignImages, syncRefunds, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup, bulkStockUpdate, addVariantsToItem, getInventoryChanges, getProductAttributes, updateProductAttributes, getImageGallery, uploadGalleryImage, getGalleryImageUrl, deleteGalleryImage, bulkHideItems, bulkUnhideItems, syncLeafLife, renameItemGroup } from "../lib/api";
-import { RefreshCw, Search, Plus, ChevronDown, ChevronUp, X, Save, Package, Trash2, CheckSquare, Square, Minus, Image, Download, Upload, Settings, ArrowRightLeft, Images, Layers, Tag, ChevronsLeft, ChevronsRight, ChevronLeft, ChevronRight, History, AlertCircle, CheckCircle2, EyeOff, Eye } from "lucide-react";
+import { RefreshCw, Search, Plus, ChevronDown, ChevronUp, X, Save, Package, Trash2, CheckSquare, Square, Minus, Image, Download, Upload, Settings, ArrowRightLeft, Images, Layers, Tag, ChevronsLeft, ChevronsRight, ChevronLeft, ChevronRight, History, AlertCircle, CheckCircle2, EyeOff, Eye, Printer } from "lucide-react";
 import { matchesSearch } from "../lib/utils";
 
 interface LocationStock {
@@ -1154,6 +1154,64 @@ export default function Inventory() {
       setToast({ type: "error", text: "No PAR gaps to fill for these locations" });
       setTimeout(() => setToast(null), 4000);
     }
+  };
+
+  // Rows for the current transfer list: [name, sku, qty].
+  const transferListRows = (): { name: string; sku: string; qty: string }[] =>
+    Array.from(transferItems.values()).map(({ item, quantity }) => ({
+      name: item.name,
+      sku: item.sku,
+      qty: quantity,
+    }));
+
+  const downloadTransferList = () => {
+    const fromName = locations.find((l) => l.id === transferFromId)?.name ?? "";
+    const toName = locations.find((l) => l.id === transferToId)?.name ?? "";
+    const headers = ["Product Name", "SKU", "Qty", "From", "To"];
+    const rows = transferListRows().map((r) => [r.name, r.sku, r.qty, fromName, toName]);
+    const csvContent = [headers.join(","), ...rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(","))].join("\n");
+    const BOM = "\uFEFF";
+    const blob = new Blob([BOM + csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `transfer_${fromName || "from"}_to_${toName || "to"}_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const printTransferList = () => {
+    const fromName = locations.find((l) => l.id === transferFromId)?.name ?? "";
+    const toName = locations.find((l) => l.id === transferToId)?.name ?? "";
+    const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const rowsHtml = transferListRows()
+      .map((r) => `<tr><td>${esc(r.name)}</td><td>${esc(r.sku)}</td><td class="qty">${esc(r.qty)}</td><td class="chk"></td></tr>`)
+      .join("");
+    const html = `<!doctype html><html><head><title>Transfer ${esc(fromName)} → ${esc(toName)}</title>
+      <style>
+        body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:24px;color:#111}
+        h1{font-size:18px;margin:0 0 4px}
+        .sub{color:#555;font-size:13px;margin:0 0 16px}
+        table{width:100%;border-collapse:collapse;font-size:13px}
+        th,td{border:1px solid #ccc;padding:6px 8px;text-align:left}
+        th{background:#f3f3f3}
+        .qty{text-align:center;width:60px}
+        .chk{width:40px}
+      </style></head><body>
+      <h1>Stock Transfer</h1>
+      <p class="sub">From <b>${esc(fromName)}</b> to <b>${esc(toName)}</b> &middot; ${new Date().toLocaleDateString()} &middot; ${transferItems.size} item(s)</p>
+      <table><thead><tr><th>Product</th><th>SKU</th><th class="qty">Qty</th><th class="chk">✓</th></tr></thead><tbody>${rowsHtml}</tbody></table>
+      </body></html>`;
+    const w = window.open("", "_blank");
+    if (!w) {
+      setToast({ type: "error", text: "Pop-up blocked — allow pop-ups to print" });
+      setTimeout(() => setToast(null), 4000);
+      return;
+    }
+    w.document.write(html);
+    w.document.close();
+    w.focus();
+    w.print();
   };
 
   const handleTransferStock = async () => {
@@ -3680,9 +3738,27 @@ export default function Inventory() {
             {/* Selected items with quantities */}
             {transferItems.size > 0 && (
               <div className="flex-1 min-h-0 overflow-y-auto mb-4">
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Items to Transfer ({transferItems.size})
-                </label>
+                <div className="flex items-center justify-between mb-2">
+                  <label className="block text-sm font-medium text-gray-700">
+                    Items to Transfer ({transferItems.size})
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={downloadTransferList}
+                      className="flex items-center gap-1 px-2 py-1 border border-gray-300 rounded text-xs text-gray-700 hover:bg-gray-50"
+                      title="Download this list as a CSV"
+                    >
+                      <Download className="w-3.5 h-3.5" /> Download
+                    </button>
+                    <button
+                      onClick={printTransferList}
+                      className="flex items-center gap-1 px-2 py-1 border border-gray-300 rounded text-xs text-gray-700 hover:bg-gray-50"
+                      title="Print this list (pick sheet)"
+                    >
+                      <Printer className="w-3.5 h-3.5" /> Print
+                    </button>
+                  </div>
+                </div>
                 <div className="space-y-2">
                   {Array.from(transferItems.entries()).map(([id, { item, quantity }]) => (
                     <div key={id} className="flex items-center gap-2 p-2 bg-gray-50 rounded-lg">
