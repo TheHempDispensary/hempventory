@@ -1076,6 +1076,49 @@ export default function Inventory() {
     }
   };
 
+  // How many items the "Suggest from PAR" fill would add for the current
+  // From/To selection: destination is below its PAR and the source has stock.
+  const suggestableCount = useMemo(() => {
+    if (!transferFromId || !transferToId || transferFromId === transferToId) return 0;
+    const fromLoc = locations.find((l) => l.id === transferFromId);
+    const toLoc = locations.find((l) => l.id === transferToId);
+    if (!fromLoc || !toLoc) return 0;
+    let count = 0;
+    for (const item of items) {
+      const from = item.locations[fromLoc.name];
+      const to = item.locations[toLoc.name];
+      const par = to?.par_level ?? 0;
+      const need = par - (to?.stock ?? 0);
+      const available = from?.stock ?? 0;
+      if (need > 0 && available > 0) count++;
+    }
+    return count;
+  }, [items, locations, transferFromId, transferToId]);
+
+  // Fill the transfer list from PAR gaps: for each item where the destination
+  // is under its PAR, suggest min(PAR gap, source stock on hand).
+  const suggestTransferFromPar = () => {
+    const fromLoc = locations.find((l) => l.id === transferFromId);
+    const toLoc = locations.find((l) => l.id === transferToId);
+    if (!fromLoc || !toLoc) return;
+    const next = new Map(transferItems);
+    for (const item of items) {
+      const from = item.locations[fromLoc.name];
+      const to = item.locations[toLoc.name];
+      const par = to?.par_level ?? 0;
+      const need = par - (to?.stock ?? 0);
+      const available = from?.stock ?? 0;
+      if (need > 0 && available > 0) {
+        next.set(item.id, { item, quantity: String(Math.min(need, available)) });
+      }
+    }
+    setTransferItems(next);
+    if (next.size === 0) {
+      setToast({ type: "error", text: "No PAR gaps to fill for these locations" });
+      setTimeout(() => setToast(null), 4000);
+    }
+  };
+
   const handleTransferStock = async () => {
     if (transferItems.size === 0 || !transferFromId || !transferToId) return;
     if (transferFromId === transferToId) {
@@ -3532,6 +3575,26 @@ export default function Inventory() {
                 </select>
               </div>
             </div>
+
+            {/* Suggest from PAR */}
+            {transferFromId > 0 && transferToId > 0 && transferFromId !== transferToId && (
+              <div className="mb-4 flex items-center justify-between gap-3 p-3 bg-purple-50 border border-purple-100 rounded-lg">
+                <p className="text-xs text-gray-600 leading-snug">
+                  Fill from PAR gaps: send from{" "}
+                  <span className="font-medium">{locations.find((l) => l.id === transferFromId)?.name}</span> whatever{" "}
+                  <span className="font-medium">{locations.find((l) => l.id === transferToId)?.name}</span> is short of its PAR
+                  {suggestableCount > 0 ? ` (${suggestableCount} item${suggestableCount !== 1 ? "s" : ""})` : ""}.
+                </p>
+                <button
+                  onClick={suggestTransferFromPar}
+                  disabled={suggestableCount === 0}
+                  className="shrink-0 px-3 py-2 bg-purple-600 text-white rounded-lg text-sm hover:bg-purple-700 disabled:opacity-50 whitespace-nowrap"
+                  title="Auto-fill quantities from the destination's PAR shortfall, capped by source stock"
+                >
+                  Suggest from PAR
+                </button>
+              </div>
+            )}
 
             {/* Search to add items */}
             <div className="mb-3">
