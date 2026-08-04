@@ -336,6 +336,84 @@ async def _get_active_online_sale(db: aiosqlite.Connection) -> str:
     )
 
 
+async def _resolve_product_names(product_ids: list[str], limit: int = 4) -> list[str]:
+    """Map Clover item ids to product names using the cached product list."""
+    if not product_ids:
+        return []
+    try:
+        from app.routers.ecommerce_router import _get_cached_products
+        data = await _get_cached_products()
+        by_id = {p.get("id"): (p.get("online_name") or p.get("name")) for p in data.get("products", [])}
+    except Exception as e:
+        print(f"[chat] product name lookup failed: {e}")
+        return []
+    names = [by_id[pid] for pid in product_ids if by_id.get(pid)]
+    return names[:limit]
+
+
+async def _get_active_coupon_codes(db: aiosqlite.Connection) -> str:
+    """Return a note listing active online coupon codes customers can enter, or ''.
+
+    Only codes safe to advertise: active, online, within their date window, not
+    single-use or already exhausted. In-store-only codes stay hidden."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    now_eastern = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%dT%H:%M")
+    try:
+        cursor = await db.execute(
+            """SELECT code, discount_pct, discount_amount, expires_at, applies_to, product_ids
+               FROM promo_codes
+               WHERE (is_direct_discount = 0 OR is_direct_discount IS NULL)
+                 AND is_active = 1
+                 AND (in_store_only = 0 OR in_store_only IS NULL)
+                 AND (single_use = 0 OR single_use IS NULL)
+                 AND code IS NOT NULL AND code != '' AND UPPER(code) != 'FIRST10'
+                 AND (max_uses = 0 OR max_uses IS NULL OR times_used < max_uses)
+                 AND (starts_at IS NULL OR starts_at = ''
+                      OR (CASE WHEN LENGTH(starts_at) <= 10 THEN starts_at || 'T00:00' ELSE starts_at END) <= ?)
+                 AND (expires_at IS NULL OR expires_at = ''
+                      OR (CASE WHEN LENGTH(expires_at) <= 10 THEN expires_at || 'T23:59' ELSE expires_at END) >= ?)
+               ORDER BY discount_pct DESC, discount_amount DESC
+               LIMIT 8""",
+            (now_eastern, now_eastern),
+        )
+        rows = await cursor.fetchall()
+    except Exception as e:
+        print(f"[chat] active coupon lookup failed: {e}")
+        return ""
+    if not rows:
+        return ""
+
+    lines = []
+    for code, pct, amount, expires_at, applies_to, product_ids in rows:
+        if pct:
+            value = f"{round(pct * 100)}% off"
+        elif amount:
+            value = f"${amount / 100:.2f} off"
+        else:
+            continue
+        if applies_to == "specific":
+            ids = [pid.strip() for pid in (product_ids or "").split(",") if pid.strip()]
+            names = await _resolve_product_names(ids)
+            scope = f"on {', '.join(names)}" if names else "on select products"
+            if names and len(ids) > len(names):
+                scope += " and more"
+        else:
+            scope = "sitewide"
+        expiry = f", good through {expires_at}" if expires_at else ""
+        lines.append(f"- {code}: {value} {scope}{expiry}")
+
+    if not lines:
+        return ""
+    return (
+        "ACTIVE COUPON CODES (customers enter these at checkout — share them when "
+        "asked about coupons, codes, deals, promos, or savings):\n"
+        + "\n".join(lines)
+        + "\nOnly mention codes listed here; never invent a code or quote an expired one."
+    )
+
+
 async def _get_recommendation_context(db: aiosqlite.Connection) -> str:
     """Cached, concise bestseller + active-sale block for the system prompt."""
     global _recommendation_context, _recommendation_context_ts
@@ -355,6 +433,9 @@ async def _get_recommendation_context(db: aiosqlite.Connection) -> str:
     sale = await _get_active_online_sale(db)
     if sale:
         parts.append(sale)
+    coupons = await _get_active_coupon_codes(db)
+    if coupons:
+        parts.append(coupons)
 
     _recommendation_context = "\n\n".join(parts)
     _recommendation_context_ts = now
@@ -532,6 +613,8 @@ STORE INFO:
 PROMOTIONS:
 - First-time customers: use code FIRST10 for 10% off online orders
 - Always mention this for new customers
+- When a customer asks about coupons, promo codes, deals, sales, or ways to save, list every code in the ACTIVE COUPON CODES block below (with what it applies to) alongside FIRST10 — don't just point them to the newsletter
+- Never make up a code, and never mention codes that aren't in that block
 
 PRODUCT RULES:
 - THCA flower products ordered online are shipped from our licensed out-of-state partner (1-3 business days)
