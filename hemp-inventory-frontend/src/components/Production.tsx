@@ -6,8 +6,8 @@ import {
 import {
   getProductionPlan, getProductionBatches, createProductionBatch,
   updateProductionBatch, deleteProductionBatch, getCachedInventory, addBatchToInventory,
-  reorderProductionBatches,
-  type ProductionPlanItem, type ProductionBatch, type BatchPayload,
+  reorderProductionBatches, getBulkItems, getBulkRecipes, upsertBulkRecipe, deleteBulkRecipe,
+  type ProductionPlanItem, type ProductionBatch, type BatchPayload, type BulkItem,
 } from "../lib/api";
 import { matchesSearch } from "../lib/utils";
 
@@ -596,8 +596,12 @@ export default function Production() {
             setEditing(null);
             const inv = saved.inventory_result;
             if (inv) {
+              const bulk = saved.bulk_result;
+              const bulkMsg = bulk?.ok
+                ? ` Pulled ${bulk.deducted} from ${bulk.bulk_name} (${bulk.previous} → ${bulk.new}).`
+                : bulk && !bulk.ok ? ` (bulk deduction skipped: ${bulk.reason})` : "";
               flash(inv.ok
-                ? `Added ${inv.added} of "${saved.product_name}" to HQ stock (${inv.previous} → ${inv.new}).`
+                ? `Added ${inv.added} of "${saved.product_name}" to HQ stock (${inv.previous} → ${inv.new}).${bulkMsg}`
                 : `Couldn't add "${saved.product_name}" to HQ stock: ${inv.reason}`);
             }
             loadPlan(months);
@@ -621,6 +625,38 @@ function BatchModal({ batch, products, onClose, onSaved }: {
   const [addToInventory, setAddToInventory] = useState(true);
   const [prodQuery, setProdQuery] = useState("");
   const [showList, setShowList] = useState(false);
+
+  // Bulk source link: which bulk product this packaged item is made from, and
+  // how much bulk one finished unit consumes (grams for flower, piece-count for
+  // gummies). Finishing a batch deducts units x per-unit from that bulk item.
+  const [bulkItems, setBulkItems] = useState<BulkItem[]>([]);
+  const [bulkName, setBulkName] = useState("");
+  const [bulkPerUnit, setBulkPerUnit] = useState("");
+  const [recipeId, setRecipeId] = useState<number | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    getBulkItems().then((r) => { if (alive) setBulkItems(r.data.items); }).catch(() => {});
+    getBulkRecipes().then((r) => {
+      if (!alive) return;
+      const norm = (s: string) => s.trim().replace(/\s+/g, " ").toLowerCase();
+      const found = r.data.recipes.find((x) => norm(x.packaged_name) === norm(batch.product_name));
+      if (found) {
+        setBulkName(found.bulk_name);
+        setBulkPerUnit(String(found.bulk_per_unit));
+        setRecipeId(found.id);
+      }
+    }).catch(() => {});
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Default "bulk used per unit" from the size/count string (e.g. "3.5g" -> 3.5,
+  // "100 ct" -> 100) so the operator rarely has to type it.
+  const defaultPerUnit = useMemo(() => {
+    const m = (form.size || "").match(/[\d.]+/);
+    return m ? m[0] : "";
+  }, [form.size]);
 
   const set = <K extends keyof ProductionBatch>(k: K, v: ProductionBatch[K]) =>
     setForm((f) => ({ ...f, [k]: v }));
@@ -654,6 +690,23 @@ function BatchModal({ batch, products, onClose, onSaved }: {
       notes: form.notes,
       add_to_inventory: addToInventory,
     };
+    // Persist the packaged->bulk link before finishing so the deduction on
+    // "Done" uses the latest values. Saving the recipe must not block the batch
+    // save, so failures here are surfaced but non-fatal.
+    try {
+      const perUnit = Number(bulkPerUnit || defaultPerUnit);
+      if (bulkName && perUnit > 0) {
+        await upsertBulkRecipe({
+          packaged_name: form.product_name,
+          packaged_sku: form.sku,
+          bulk_name: bulkName,
+          bulk_per_unit: perUnit,
+        });
+      } else if (!bulkName && recipeId != null) {
+        await deleteBulkRecipe(recipeId);
+      }
+    } catch { /* non-fatal: recipe link couldn't be saved */ }
+
     try {
       const res = isNew ? await createProductionBatch(payload) : await updateProductionBatch(form.id, payload);
       onSaved(res.data, isNew);
@@ -754,6 +807,40 @@ function BatchModal({ batch, products, onClose, onSaved }: {
           <div>
             <label className={label}>Notes</label>
             <textarea className={input} rows={2} value={form.notes || ""} onChange={(e) => set("notes", e.target.value)} />
+          </div>
+          <div className="bg-amber-50 border border-amber-100 rounded-lg p-3 space-y-2">
+            <label className={label}>Made from bulk product</label>
+            <p className="text-xs text-gray-500 -mt-1">
+              Link this packaged item to the bulk it's made from. When marked <strong>Done</strong>,
+              (units × amount per unit) is deducted from the bulk product.
+            </p>
+            <div className="grid grid-cols-3 gap-2">
+              <select
+                className={`${input} col-span-2`}
+                value={bulkName}
+                onChange={(e) => setBulkName(e.target.value)}
+              >
+                <option value="">— none —</option>
+                {bulkItems.map((b) => (
+                  <option key={b.name} value={b.name}>{b.name} ({b.stock})</option>
+                ))}
+              </select>
+              <input
+                type="number"
+                className={input}
+                value={bulkPerUnit}
+                onChange={(e) => setBulkPerUnit(e.target.value)}
+                placeholder={defaultPerUnit || "per unit"}
+                title="Amount of bulk used per finished unit (grams or pieces)"
+              />
+            </div>
+            {bulkName && (Number(bulkPerUnit || defaultPerUnit) > 0) && (
+              <p className="text-xs text-amber-700">
+                Will pull {(Number(form.produced_qty) || Number(form.planned_qty) || 0) * Number(bulkPerUnit || defaultPerUnit)}
+                {" "}from <strong>{bulkName}</strong> on Done
+                {" "}({Number(form.produced_qty) || Number(form.planned_qty) || 0} units × {Number(bulkPerUnit || defaultPerUnit)}).
+              </p>
+            )}
           </div>
           {!form.inventoried && (
             <div className="bg-emerald-50 border border-emerald-100 rounded-lg p-3">

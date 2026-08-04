@@ -70,6 +70,71 @@ async def _add_to_hq_inventory(sku: str, qty: float, name: str = "") -> dict:
     invalidate_product_cache()
     return {"ok": True, "item_id": match["id"], "previous": current, "new": new_q, "added": qty}
 
+
+async def _deduct_from_bulk(bulk_name: str, amount: float) -> dict:
+    """Subtract `amount` from a bulk product's HQ stock. Returns a result dict.
+
+    Bulk items are matched by normalised name and may exist as duplicate Clover
+    records (see PR #215); we reduce the *combined* total and consolidate onto a
+    single record (canonical = new total, extras zeroed) so the merged view is
+    correct. Stock never goes below 0.
+    """
+    from app.routers.ecommerce_router import (
+        HQ_MERCHANT_ID, HQ_API_TOKEN, invalidate_product_cache,
+    )
+    if not bulk_name:
+        return {"ok": False, "reason": "no bulk product linked"}
+    if amount <= 0:
+        return {"ok": False, "reason": "amount must be greater than 0"}
+    if not HQ_MERCHANT_ID or not HQ_API_TOKEN:
+        return {"ok": False, "reason": "HQ Clover credentials not configured"}
+
+    client = CloverClient(HQ_MERCHANT_ID, HQ_API_TOKEN)
+    data = await client.get_items(expand="itemStock")
+    target = _normalise_sales_name(bulk_name)
+    matches = [
+        it for it in data.get("elements", [])
+        if _normalise_sales_name(it.get("name") or "") == target
+    ]
+    if not matches:
+        return {"ok": False, "reason": f"bulk product '{bulk_name}' not found in HQ inventory"}
+
+    total = sum((it.get("itemStock") or {}).get("quantity", 0) or 0 for it in matches)
+    new_total = max(0, total - amount)
+    await client.update_item_stock(matches[0]["id"], new_total)
+    for extra in matches[1:]:
+        await client.update_item_stock(extra["id"], 0)
+    invalidate_product_cache()
+    return {
+        "ok": True, "bulk_name": bulk_name, "previous": total,
+        "new": new_total, "deducted": total - new_total,
+    }
+
+
+async def _apply_bulk_deduction(db, packaged_name: str, packaged_sku: str, units: float) -> Optional[dict]:
+    """If the packaged product has a bulk recipe, deduct units x per-unit from bulk.
+
+    Returns the deduction result (or None when no recipe is linked).
+    """
+    if units <= 0:
+        return None
+    key = _normalise_sales_name(packaged_name or "")
+    if not key:
+        return None
+    cursor = await db.execute(
+        "SELECT bulk_name, bulk_per_unit FROM bulk_recipes WHERE packaged_key = ?",
+        (key,),
+    )
+    recipe = await cursor.fetchone()
+    if not recipe:
+        return None
+    bulk_name = recipe["bulk_name"]
+    per_unit = recipe["bulk_per_unit"] or 0
+    if not bulk_name or per_unit <= 0:
+        return None
+    return await _deduct_from_bulk(bulk_name, units * per_unit)
+
+
 # Valid batch lifecycle stages.
 _STATUSES = {"planned", "in_production", "ready", "done"}
 
@@ -485,10 +550,12 @@ async def create_batch(
     row = await cursor.fetchone()
 
     inventory_result = None
+    bulk_result = None
     if body.status == "done" and body.add_to_inventory is not False and (body.sku or body.product_name):
         qty = row["produced_qty"] or row["planned_qty"] or 0
         inventory_result = await _add_to_hq_inventory(body.sku or "", qty, body.product_name or "")
         if inventory_result.get("ok"):
+            bulk_result = await _apply_bulk_deduction(db, body.product_name or "", body.sku or "", qty)
             await db.execute(
                 """UPDATE production_batches
                    SET inventoried = 1, inventoried_at = CURRENT_TIMESTAMP, inventoried_qty = ?
@@ -502,6 +569,8 @@ async def create_batch(
     result = _batch_row(row)
     if inventory_result is not None:
         result["inventory_result"] = inventory_result
+    if bulk_result is not None:
+        result["bulk_result"] = bulk_result
     return result
 
 
@@ -569,11 +638,13 @@ async def update_batch(
     # On first transition into 'done', add the produced output to HQ stock
     # (unless explicitly skipped or already inventoried).
     inventory_result = None
+    bulk_result = None
     became_done = fields.get("status") == "done" and existing["status"] != "done"
     if became_done and body.add_to_inventory is not False and not row["inventoried"] and (row["sku"] or row["product_name"]):
         qty = row["produced_qty"] or row["planned_qty"] or 0
         inventory_result = await _add_to_hq_inventory(row["sku"] or "", qty, row["product_name"] or "")
         if inventory_result.get("ok"):
+            bulk_result = await _apply_bulk_deduction(db, row["product_name"] or "", row["sku"] or "", qty)
             await db.execute(
                 """UPDATE production_batches
                    SET inventoried = 1, inventoried_at = CURRENT_TIMESTAMP, inventoried_qty = ?
@@ -587,6 +658,8 @@ async def update_batch(
     result = _batch_row(row)
     if inventory_result is not None:
         result["inventory_result"] = inventory_result
+    if bulk_result is not None:
+        result["bulk_result"] = bulk_result
     return result
 
 
@@ -607,6 +680,7 @@ async def add_batch_to_inventory(
     inv = await _add_to_hq_inventory(row["sku"] or "", qty, row["product_name"] or "")
     if not inv.get("ok"):
         raise HTTPException(status_code=400, detail=inv.get("reason", "Could not add to inventory"))
+    bulk_result = await _apply_bulk_deduction(db, row["product_name"] or "", row["sku"] or "", qty)
     await db.execute(
         """UPDATE production_batches
            SET inventoried = 1, inventoried_at = CURRENT_TIMESTAMP, inventoried_qty = ?
@@ -617,6 +691,8 @@ async def add_batch_to_inventory(
     cursor = await db.execute("SELECT * FROM production_batches WHERE id = ?", (batch_id,))
     result = _batch_row(await cursor.fetchone())
     result["inventory_result"] = inv
+    if bulk_result is not None:
+        result["bulk_result"] = bulk_result
     return result
 
 
@@ -629,3 +705,107 @@ async def delete_batch(
     await db.execute("DELETE FROM production_batches WHERE id = ?", (batch_id,))
     await db.commit()
     return {"deleted": batch_id}
+
+
+# --- Bulk recipes: link a packaged product to the bulk item it's made from ---
+
+
+def _recipe_row(row: aiosqlite.Row) -> dict:
+    return {
+        "id": row["id"],
+        "packaged_key": row["packaged_key"],
+        "packaged_name": row["packaged_name"],
+        "packaged_sku": row["packaged_sku"],
+        "bulk_name": row["bulk_name"],
+        "bulk_per_unit": row["bulk_per_unit"],
+    }
+
+
+@router.get("/bulk-recipes")
+async def list_bulk_recipes(
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """All packaged->bulk links, keyed by normalised packaged product name."""
+    cursor = await db.execute(
+        "SELECT * FROM bulk_recipes ORDER BY packaged_name COLLATE NOCASE ASC"
+    )
+    rows = await cursor.fetchall()
+    return {"recipes": [_recipe_row(r) for r in rows]}
+
+
+class BulkRecipeUpsert(BaseModel):
+    packaged_name: str
+    packaged_sku: Optional[str] = None
+    bulk_name: str
+    bulk_per_unit: float
+
+
+@router.post("/bulk-recipes")
+async def upsert_bulk_recipe(
+    body: BulkRecipeUpsert,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Create or update the bulk link for a packaged product (keyed by name)."""
+    key = _normalise_sales_name(body.packaged_name or "")
+    if not key:
+        raise HTTPException(status_code=400, detail="packaged_name is required")
+    if not (body.bulk_name or "").strip():
+        raise HTTPException(status_code=400, detail="bulk_name is required")
+    if body.bulk_per_unit <= 0:
+        raise HTTPException(status_code=400, detail="bulk_per_unit must be greater than 0")
+    await db.execute(
+        """INSERT INTO bulk_recipes
+             (packaged_key, packaged_name, packaged_sku, bulk_name, bulk_per_unit, updated_at)
+           VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT(packaged_key) DO UPDATE SET
+             packaged_name = excluded.packaged_name,
+             packaged_sku = excluded.packaged_sku,
+             bulk_name = excluded.bulk_name,
+             bulk_per_unit = excluded.bulk_per_unit,
+             updated_at = CURRENT_TIMESTAMP""",
+        (key, body.packaged_name, body.packaged_sku, body.bulk_name.strip(), body.bulk_per_unit),
+    )
+    await db.commit()
+    cursor = await db.execute("SELECT * FROM bulk_recipes WHERE packaged_key = ?", (key,))
+    return _recipe_row(await cursor.fetchone())
+
+
+@router.delete("/bulk-recipes/{recipe_id}")
+async def delete_bulk_recipe(
+    recipe_id: int,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    await db.execute("DELETE FROM bulk_recipes WHERE id = ?", (recipe_id,))
+    await db.commit()
+    return {"deleted": recipe_id}
+
+
+@router.get("/bulk-items")
+async def list_bulk_items(
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """HQ Clover products whose name starts with 'Bulk' (for the recipe picker).
+
+    Duplicate records are collapsed by name with their stock summed.
+    """
+    from app.routers.ecommerce_router import HQ_MERCHANT_ID, HQ_API_TOKEN
+    if not HQ_MERCHANT_ID or not HQ_API_TOKEN:
+        return {"items": []}
+    client = CloverClient(HQ_MERCHANT_ID, HQ_API_TOKEN)
+    data = await client.get_items(expand="itemStock")
+    totals: dict[str, dict] = {}
+    for it in data.get("elements", []):
+        name = " ".join((it.get("name") or "").split())
+        if not name.upper().startswith("BULK"):
+            continue
+        stock = (it.get("itemStock") or {}).get("quantity", 0) or 0
+        if name in totals:
+            totals[name]["stock"] += stock
+        else:
+            totals[name] = {"name": name, "stock": stock}
+    items = sorted(totals.values(), key=lambda x: x["name"].lower())
+    return {"items": items}
