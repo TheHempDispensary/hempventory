@@ -804,6 +804,23 @@ async def init_db():
             except Exception:
                 pass
 
+        # Production: link a packaged product to the bulk item it's made from,
+        # so finishing a batch deducts (units x bulk_per_unit) from the bulk
+        # item's stock. Keyed by the packaged product's normalised name (SKUs are
+        # often blank/duplicated for these items, so name is the stable key).
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS bulk_recipes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                packaged_key TEXT NOT NULL UNIQUE,
+                packaged_name TEXT NOT NULL,
+                packaged_sku TEXT,
+                bulk_name TEXT NOT NULL,
+                bulk_per_unit REAL NOT NULL DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Seed FIRST10 if promo_codes table is empty
         cursor = await db.execute("SELECT COUNT(*) FROM promo_codes")
         count = (await cursor.fetchone())[0]

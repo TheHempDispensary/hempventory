@@ -839,6 +839,21 @@ export interface ProductionBatch {
   created_at: string;
   updated_at: string;
   inventory_result?: { ok: boolean; reason?: string; previous?: number; new?: number; added?: number };
+  bulk_result?: { ok: boolean; reason?: string; bulk_name?: string; previous?: number; new?: number; deducted?: number };
+}
+
+export interface BulkRecipe {
+  id: number;
+  packaged_key: string;
+  packaged_name: string;
+  packaged_sku: string | null;
+  bulk_name: string;
+  bulk_per_unit: number;
+}
+
+export interface BulkItem {
+  name: string;
+  stock: number;
 }
 
 export interface BatchPayload {
@@ -897,5 +912,21 @@ export const addBatchToInventory = (id: number) =>
 
 export const reorderProductionBatches = (ids: number[]) =>
   api.post<{ ok: boolean; count: number }>("/api/production/batches/reorder", { ids });
+
+export const getBulkRecipes = () =>
+  api.get<{ recipes: BulkRecipe[] }>("/api/production/bulk-recipes");
+
+export const upsertBulkRecipe = (payload: {
+  packaged_name: string;
+  packaged_sku?: string | null;
+  bulk_name: string;
+  bulk_per_unit: number;
+}) => api.post<BulkRecipe>("/api/production/bulk-recipes", payload);
+
+export const deleteBulkRecipe = (id: number) =>
+  api.delete(`/api/production/bulk-recipes/${id}`);
+
+export const getBulkItems = () =>
+  api.get<{ items: BulkItem[] }>("/api/production/bulk-items");
 
 export default api;
