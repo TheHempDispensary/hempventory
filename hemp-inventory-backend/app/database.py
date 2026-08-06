@@ -798,6 +798,9 @@ async def init_db():
             ("inventoried_qty", "REAL"),
             # Manual ordering of cards within a status column (lower = higher up).
             ("sort_order", "INTEGER DEFAULT 0"),
+            # Track whether the linked bulk source was already deducted for this
+            # batch, so finishing/re-saving a batch can't deduct bulk twice.
+            ("bulk_deducted", "INTEGER DEFAULT 0"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE production_batches ADD COLUMN {_col} {_decl}")

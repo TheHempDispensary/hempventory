@@ -34,6 +34,14 @@ type Tab = "plan" | "board";
 // one silently disappears from the list.
 const planKey = (p: ProductionPlanItem) => `${p.sku}::${p.name}`;
 
+// Human-readable note about a batch's bulk-source deduction, appended to the toast.
+const bulkFlash = (bulk: ProductionBatch["bulk_result"]): string =>
+  bulk?.ok
+    ? ` Pulled ${bulk.deducted} from ${bulk.bulk_name} (${bulk.previous} → ${bulk.new}).`
+    : bulk && !bulk.ok
+      ? ` (bulk deduction skipped: ${bulk.reason})`
+      : "";
+
 interface InvItem { sku: string; name: string; categories?: string[]; }
 
 export default function Production() {
@@ -202,10 +210,13 @@ export default function Production() {
     const res = await updateProductionBatch(b.id, { status: next });
     setBatches((prev) => prev.map((x) => (x.id === b.id ? res.data : x)));
     const inv = res.data.inventory_result;
+    const bulkMsg = bulkFlash(res.data.bulk_result);
     if (inv) {
       flash(inv.ok
-        ? `Added ${inv.added} of "${b.product_name}" to HQ stock (${inv.previous} → ${inv.new}).`
+        ? `Added ${inv.added} of "${b.product_name}" to HQ stock (${inv.previous} → ${inv.new}).${bulkMsg}`
         : `Couldn't add "${b.product_name}" to HQ stock: ${inv.reason}`);
+    } else if (bulkMsg) {
+      flash(`"${b.product_name}" marked Done.${bulkMsg}`);
     }
     loadPlan(months);
   };
@@ -215,7 +226,7 @@ export default function Production() {
       const res = await addBatchToInventory(b.id);
       setBatches((prev) => prev.map((x) => (x.id === b.id ? res.data : x)));
       const inv = res.data.inventory_result;
-      if (inv?.ok) flash(`Added ${inv.added} of "${b.product_name}" to HQ stock (${inv.previous} → ${inv.new}).`);
+      if (inv?.ok) flash(`Added ${inv.added} of "${b.product_name}" to HQ stock (${inv.previous} → ${inv.new}).${bulkFlash(res.data.bulk_result)}`);
       loadPlan(months);
     } catch (e: unknown) {
       const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
@@ -595,14 +606,13 @@ export default function Production() {
             setBatches((prev) => isNew ? [saved, ...prev] : prev.map((b) => (b.id === saved.id ? saved : b)));
             setEditing(null);
             const inv = saved.inventory_result;
+            const bulkMsg = bulkFlash(saved.bulk_result);
             if (inv) {
-              const bulk = saved.bulk_result;
-              const bulkMsg = bulk?.ok
-                ? ` Pulled ${bulk.deducted} from ${bulk.bulk_name} (${bulk.previous} → ${bulk.new}).`
-                : bulk && !bulk.ok ? ` (bulk deduction skipped: ${bulk.reason})` : "";
               flash(inv.ok
                 ? `Added ${inv.added} of "${saved.product_name}" to HQ stock (${inv.previous} → ${inv.new}).${bulkMsg}`
                 : `Couldn't add "${saved.product_name}" to HQ stock: ${inv.reason}`);
+            } else if (bulkMsg) {
+              flash(`"${saved.product_name}" marked Done.${bulkMsg}`);
             }
             loadPlan(months);
           }}
@@ -691,10 +701,15 @@ function BatchModal({ batch, products, onClose, onSaved }: {
       add_to_inventory: addToInventory,
     };
     // Persist the packaged->bulk link before finishing so the deduction on
-    // "Done" uses the latest values. Saving the recipe must not block the batch
-    // save, so failures here are surfaced but non-fatal.
+    // "Done" uses the latest values. A bulk product with no per-unit amount
+    // can't be deducted, so require it rather than silently dropping the link.
+    const perUnit = Number(bulkPerUnit || defaultPerUnit);
+    if (bulkName && !(perUnit > 0)) {
+      setErr('Enter how much bulk each unit uses (e.g. 3.5 for a 3.5g jar, 10 for a 10-count) to link this to its bulk product.');
+      setSaving(false);
+      return;
+    }
     try {
-      const perUnit = Number(bulkPerUnit || defaultPerUnit);
       if (bulkName && perUnit > 0) {
         await upsertBulkRecipe({
           packaged_name: form.product_name,
@@ -705,7 +720,11 @@ function BatchModal({ batch, products, onClose, onSaved }: {
       } else if (!bulkName && recipeId != null) {
         await deleteBulkRecipe(recipeId);
       }
-    } catch { /* non-fatal: recipe link couldn't be saved */ }
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? `Couldn't save the bulk link: ${e.message}` : "Couldn't save the bulk link");
+      setSaving(false);
+      return;
+    }
 
     try {
       const res = isNew ? await createProductionBatch(payload) : await updateProductionBatch(form.id, payload);
