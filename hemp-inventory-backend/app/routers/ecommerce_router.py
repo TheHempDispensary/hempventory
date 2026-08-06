@@ -2313,7 +2313,7 @@ async def create_order(
     # Server-side enforcement: Shipping orders MUST have a non-zero shipping cost.
     # Prevents customers from bypassing the shipping rate selection (e.g. via DevTools)
     # and getting free shipping on orders that should be charged.
-    if order.fulfillment_type == "shipping" and order.shipping_cost <= 0:
+    if _is_shipping_fulfillment(order.fulfillment_type) and order.shipping_cost <= 0:
         print(f"[order] BLOCKED shipping order with $0 shipping cost from {order.customer.email}")
         raise HTTPException(
             status_code=400,
