@@ -2313,7 +2313,7 @@ async def create_order(
     # Server-side enforcement: Shipping orders MUST have a non-zero shipping cost.
     # Prevents customers from bypassing the shipping rate selection (e.g. via DevTools)
     # and getting free shipping on orders that should be charged.
-    if order.fulfillment_type == "shipping" and order.shipping_cost <= 0:
+    if _is_shipping_fulfillment(order.fulfillment_type) and order.shipping_cost <= 0:
         print(f"[order] BLOCKED shipping order with $0 shipping cost from {order.customer.email}")
         raise HTTPException(
             status_code=400,
@@ -2903,6 +2903,14 @@ def _order_items_as_dicts(items: List[OrderItem]) -> List[dict]:
     ]
 
 
+# The website sends "ship" for Ship-to-Me; older clients/defaults use "shipping".
+_SHIPPING_FULFILLMENT = ("ship", "shipping")
+
+
+def _is_shipping_fulfillment(fulfillment_type: str) -> bool:
+    return (fulfillment_type or "ship") in _SHIPPING_FULFILLMENT
+
+
 async def _record_leaflife_sync(
     order_number: str, status: str, rows_written: int, error: str
 ) -> None:
@@ -2944,7 +2952,7 @@ async def _sync_leaflife_order(order: "CreateOrderRequest", order_number: str) -
     Only "Ship to Me" orders with LF- items are written; non-LeafLife lines are
     ignored. Never raises — records status for retry/backfill.
     """
-    if order.fulfillment_type != "shipping":
+    if not _is_shipping_fulfillment(order.fulfillment_type):
         return {"ok": False, "reason": "not a shipping order", "written": 0}
     items = _order_items_as_dicts(order.items)
     if not leaflife_orders.leaflife_items(items):
@@ -3788,7 +3796,7 @@ async def _sync_leaflife_from_db(db: aiosqlite.Connection, order_number: str) ->
     row = await cur.fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail=f"Order {order_number} not found")
-    if (row[8] or "shipping") != "shipping":
+    if not _is_shipping_fulfillment(row[8]):
         return {"ok": False, "reason": "not a shipping order", "written": 0}
 
     items_cur = await db.execute(
