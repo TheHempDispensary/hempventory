@@ -93,3 +93,53 @@ async def test_apply_bulk_deduction_no_recipe_is_noop(monkeypatch, db):
     _patch_clover(monkeypatch, [])
     res = await pr._apply_bulk_deduction(db, "Some Unlinked Product", "", 50)
     assert res is None
+
+
+async def _batch(db, name, sku=""):
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS production_batches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sku TEXT, product_name TEXT, bulk_deducted INTEGER DEFAULT 0
+        )
+    """)
+    cur = await db.execute(
+        "INSERT INTO production_batches (sku, product_name, bulk_deducted) VALUES (?,?,0)",
+        (sku, name),
+    )
+    await db.commit()
+    cur = await db.execute("SELECT * FROM production_batches WHERE id = ?", (cur.lastrowid,))
+    return await cur.fetchone()
+
+
+async def test_deduct_bulk_once_is_idempotent(monkeypatch, db):
+    fake = _patch_clover(monkeypatch, [
+        {"id": "g", "name": "Bulk - Green Crack THC Ground Flower Grams", "itemStock": {"quantity": 1000}},
+    ])
+    await db.execute(
+        "INSERT INTO bulk_recipes (packaged_key, packaged_name, bulk_name, bulk_per_unit) VALUES (?,?,?,?)",
+        (pr._normalise_sales_name("Green Crack Ground 3.5 grams"), "Green Crack Ground 3.5 grams",
+         "Bulk - Green Crack THC Ground Flower Grams", 3.5),
+    )
+    await db.commit()
+    row = await _batch(db, "Green Crack Ground 3.5 grams")
+    # First finish: 100 x 3.5g = 350 pulled -> 650, and the batch is flagged.
+    res = await pr._deduct_bulk_once(db, row["id"], row, 100)
+    assert res is not None and res["ok"] and res["new"] == 650
+    cur = await db.execute("SELECT bulk_deducted FROM production_batches WHERE id = ?", (row["id"],))
+    assert (await cur.fetchone())["bulk_deducted"] == 1
+
+    # Re-finishing the same batch must not deduct again.
+    cur = await db.execute("SELECT * FROM production_batches WHERE id = ?", (row["id"],))
+    row2 = await cur.fetchone()
+    res2 = await pr._deduct_bulk_once(db, row2["id"], row2, 100)
+    assert res2 is None
+    assert fake._items[0]["itemStock"]["quantity"] == 650
+
+
+async def test_deduct_bulk_once_no_recipe_leaves_flag_unset(monkeypatch, db):
+    _patch_clover(monkeypatch, [])
+    row = await _batch(db, "Unlinked Packaged Item")
+    res = await pr._deduct_bulk_once(db, row["id"], row, 10)
+    assert res is None
+    cur = await db.execute("SELECT bulk_deducted FROM production_batches WHERE id = ?", (row["id"],))
+    assert (await cur.fetchone())["bulk_deducted"] == 0

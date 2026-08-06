@@ -135,6 +135,27 @@ async def _apply_bulk_deduction(db, packaged_name: str, packaged_sku: str, units
     return await _deduct_from_bulk(bulk_name, units * per_unit)
 
 
+async def _deduct_bulk_once(db, batch_id: int, row, qty: float) -> Optional[dict]:
+    """Deduct a finished batch's linked bulk source, at most once per batch.
+
+    Runs independently of whether the packaged product was added to HQ stock,
+    so a batch whose packaged product has no Clover SKU still draws down its
+    bulk. The `bulk_deducted` flag guards against deducting twice.
+    """
+    if row["bulk_deducted"]:
+        return None
+    bulk_result = await _apply_bulk_deduction(
+        db, row["product_name"] or "", row["sku"] or "", qty
+    )
+    if bulk_result is not None and bulk_result.get("ok"):
+        await db.execute(
+            "UPDATE production_batches SET bulk_deducted = 1 WHERE id = ?",
+            (batch_id,),
+        )
+        await db.commit()
+    return bulk_result
+
+
 # Valid batch lifecycle stages.
 _STATUSES = {"planned", "in_production", "ready", "done"}
 
@@ -551,18 +572,23 @@ async def create_batch(
 
     inventory_result = None
     bulk_result = None
-    if body.status == "done" and body.add_to_inventory is not False and (body.sku or body.product_name):
+    if body.status == "done" and body.add_to_inventory is not False:
         qty = row["produced_qty"] or row["planned_qty"] or 0
-        inventory_result = await _add_to_hq_inventory(body.sku or "", qty, body.product_name or "")
-        if inventory_result.get("ok"):
-            bulk_result = await _apply_bulk_deduction(db, body.product_name or "", body.sku or "", qty)
-            await db.execute(
-                """UPDATE production_batches
-                   SET inventoried = 1, inventoried_at = CURRENT_TIMESTAMP, inventoried_qty = ?
-                   WHERE id = ?""",
-                (qty, new_id),
-            )
-            await db.commit()
+        if body.sku or body.product_name:
+            inventory_result = await _add_to_hq_inventory(body.sku or "", qty, body.product_name or "")
+            if inventory_result.get("ok"):
+                await db.execute(
+                    """UPDATE production_batches
+                       SET inventoried = 1, inventoried_at = CURRENT_TIMESTAMP, inventoried_qty = ?
+                       WHERE id = ?""",
+                    (qty, new_id),
+                )
+                await db.commit()
+                cursor = await db.execute("SELECT * FROM production_batches WHERE id = ?", (new_id,))
+                row = await cursor.fetchone()
+        # Deduct the linked bulk source regardless of the packaged HQ add.
+        bulk_result = await _deduct_bulk_once(db, new_id, row, qty)
+        if bulk_result is not None:
             cursor = await db.execute("SELECT * FROM production_batches WHERE id = ?", (new_id,))
             row = await cursor.fetchone()
 
@@ -640,18 +666,23 @@ async def update_batch(
     inventory_result = None
     bulk_result = None
     became_done = fields.get("status") == "done" and existing["status"] != "done"
-    if became_done and body.add_to_inventory is not False and not row["inventoried"] and (row["sku"] or row["product_name"]):
+    if became_done and body.add_to_inventory is not False:
         qty = row["produced_qty"] or row["planned_qty"] or 0
-        inventory_result = await _add_to_hq_inventory(row["sku"] or "", qty, row["product_name"] or "")
-        if inventory_result.get("ok"):
-            bulk_result = await _apply_bulk_deduction(db, row["product_name"] or "", row["sku"] or "", qty)
-            await db.execute(
-                """UPDATE production_batches
-                   SET inventoried = 1, inventoried_at = CURRENT_TIMESTAMP, inventoried_qty = ?
-                   WHERE id = ?""",
-                (qty, batch_id),
-            )
-            await db.commit()
+        if not row["inventoried"] and (row["sku"] or row["product_name"]):
+            inventory_result = await _add_to_hq_inventory(row["sku"] or "", qty, row["product_name"] or "")
+            if inventory_result.get("ok"):
+                await db.execute(
+                    """UPDATE production_batches
+                       SET inventoried = 1, inventoried_at = CURRENT_TIMESTAMP, inventoried_qty = ?
+                       WHERE id = ?""",
+                    (qty, batch_id),
+                )
+                await db.commit()
+                cursor = await db.execute("SELECT * FROM production_batches WHERE id = ?", (batch_id,))
+                row = await cursor.fetchone()
+        # Deduct the linked bulk source regardless of the packaged HQ add.
+        bulk_result = await _deduct_bulk_once(db, batch_id, row, qty)
+        if bulk_result is not None:
             cursor = await db.execute("SELECT * FROM production_batches WHERE id = ?", (batch_id,))
             row = await cursor.fetchone()
 
@@ -680,7 +711,6 @@ async def add_batch_to_inventory(
     inv = await _add_to_hq_inventory(row["sku"] or "", qty, row["product_name"] or "")
     if not inv.get("ok"):
         raise HTTPException(status_code=400, detail=inv.get("reason", "Could not add to inventory"))
-    bulk_result = await _apply_bulk_deduction(db, row["product_name"] or "", row["sku"] or "", qty)
     await db.execute(
         """UPDATE production_batches
            SET inventoried = 1, inventoried_at = CURRENT_TIMESTAMP, inventoried_qty = ?
@@ -688,6 +718,9 @@ async def add_batch_to_inventory(
         (qty, batch_id),
     )
     await db.commit()
+    cursor = await db.execute("SELECT * FROM production_batches WHERE id = ?", (batch_id,))
+    row = await cursor.fetchone()
+    bulk_result = await _deduct_bulk_once(db, batch_id, row, qty)
     cursor = await db.execute("SELECT * FROM production_batches WHERE id = ?", (batch_id,))
     result = _batch_row(await cursor.fetchone())
     result["inventory_result"] = inv
