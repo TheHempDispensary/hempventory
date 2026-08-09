@@ -24,6 +24,33 @@ async def _get_locations(db: aiosqlite.Connection):
     return await cursor.fetchall()
 
 
+def _order_tax(order: dict) -> int:
+    """Tax charged on an order, in cents.
+
+    Clover leaves ``order.taxAmount`` unset for register sales; the tax actually
+    collected only shows up on the order's payments.
+    """
+    order_tax = order.get("taxAmount") or 0
+    if order_tax:
+        return order_tax
+    return sum(
+        (p.get("taxAmount") or 0)
+        for p in (order.get("payments") or {}).get("elements", []) or []
+        if (p.get("result") or "SUCCESS") == "SUCCESS"
+    )
+
+
+def _is_paid(order: dict) -> bool:
+    """Whether money was actually taken for this order.
+
+    ``payType`` is also set on orders that were never tendered through Clover
+    (e.g. website orders pushed in for fulfillment), so it cannot be trusted on
+    its own -- those are not sales and Clover's own reports exclude them.
+    """
+    payments = (order.get("payments") or {}).get("elements", []) or []
+    return any((p.get("result") or "SUCCESS") == "SUCCESS" for p in payments)
+
+
 async def _fetch_orders_for_location(merchant_id: str, api_token: str, start_ms: int, end_ms: int) -> list:
     """Fetch all paid orders for a location within a time range."""
     client = CloverClient(merchant_id, api_token)
@@ -39,7 +66,7 @@ async def _fetch_orders_for_location(merchant_id: str, api_token: str, start_ms:
                 f"createdTime>={start_ms}",
                 f"createdTime<={end_ms}",
             ],
-            expand="lineItems",
+            expand="lineItems,payments",
         )
         elements = data.get("elements", [])
         all_orders.extend(elements)
@@ -100,15 +127,19 @@ async def get_sales_report(
     results = await asyncio.gather(*order_tasks, return_exceptions=True)
     refund_results = await asyncio.gather(*refund_tasks, return_exceptions=True)
 
-    # Aggregate data
-    total_gross = 0        # order totals incl. tax, before refunds
+    # Aggregate data. "Revenue" throughout is net sales: what was rung up after
+    # discounts, excluding sales tax, less refunds -- the same basis as Clover's
+    # own Sales Report, so the two line up.
+    total_collected = 0    # order totals incl. tax, before refunds
     total_tax = 0
     total_refunds = 0
     total_orders = 0
     total_items_sold = 0
+    unpaid_orders = 0
+    unpaid_total = 0
     by_location = {}
     by_hour = defaultdict(lambda: {"revenue": 0, "orders": 0})
-    by_day = defaultdict(lambda: {"revenue": 0, "orders": 0, "refunds": 0})
+    by_day = defaultdict(lambda: {"revenue": 0, "orders": 0, "refunds": 0, "tax": 0})
     by_item = defaultdict(lambda: {"name": "", "quantity": 0, "revenue": 0, "by_location": defaultdict(int)})
     by_category = defaultdict(lambda: {"revenue": 0, "quantity": 0})
     recent_orders = []
@@ -135,7 +166,9 @@ async def get_sales_report(
             by_location[loc_name] = {"revenue": 0, "orders": 0, "avg_order": 0, "error": str(orders)}
             continue
 
-        loc_gross = 0
+        loc_net = 0
+        loc_collected = 0
+        loc_tax = 0
         loc_orders = 0
 
         for order in orders:
@@ -144,24 +177,34 @@ async def get_sales_report(
             order_total = order.get("total", 0)
             if order_total <= 0:
                 continue  # Skip refunds/voids/empty orders
+            if not _is_paid(order):
+                unpaid_orders += 1
+                unpaid_total += order_total
+                continue
+
+            order_tax = _order_tax(order)
+            order_net = order_total - order_tax
 
             created_time = order.get("createdTime", 0)
             order_dt = datetime.fromtimestamp(created_time / 1000, tz=timezone.utc).astimezone(EASTERN)
 
-            total_gross += order_total
-            total_tax += order.get("taxAmount", 0) or 0
+            total_collected += order_total
+            total_tax += order_tax
             total_orders += 1
-            loc_gross += order_total
+            loc_net += order_net
+            loc_collected += order_total
+            loc_tax += order_tax
             loc_orders += 1
 
             # By hour (Eastern)
             hour_key = order_dt.strftime("%H:00")
-            by_hour[hour_key]["revenue"] += order_total
+            by_hour[hour_key]["revenue"] += order_net
             by_hour[hour_key]["orders"] += 1
 
             # By day (Eastern)
             day_key = order_dt.strftime("%Y-%m-%d")
-            by_day[day_key]["revenue"] += order_total
+            by_day[day_key]["revenue"] += order_net
+            by_day[day_key]["tax"] += order_tax
             by_day[day_key]["orders"] += 1
 
             # Line items
@@ -190,11 +233,13 @@ async def get_sales_report(
             })
 
         loc_refunds = refunds_by_location.get(loc_name, 0)
-        loc_revenue = loc_gross - loc_refunds
-        avg_order = round(loc_gross / loc_orders) if loc_orders > 0 else 0
+        loc_revenue = loc_net - loc_refunds
+        avg_order = round(loc_net / loc_orders) if loc_orders > 0 else 0
         by_location[loc_name] = {
             "revenue": loc_revenue,
-            "gross": loc_gross,
+            "gross": loc_net,
+            "collected": loc_collected,
+            "tax": loc_tax,
             "refunds": loc_refunds,
             "orders": loc_orders,
             "avg_order": avg_order,
@@ -241,25 +286,28 @@ async def get_sales_report(
             "label": current.strftime("%b %d"),
             "revenue": by_day[day_str]["revenue"] - by_day[day_str]["refunds"],
             "gross": by_day[day_str]["revenue"],
+            "tax": by_day[day_str]["tax"],
             "refunds": by_day[day_str]["refunds"],
             "orders": by_day[day_str]["orders"],
         })
         current += timedelta(days=1)
 
-    # Revenue is gross (incl. tax) less refunds. Net sales additionally excludes tax.
-    total_revenue = total_gross - total_refunds
-    net_sales = total_gross - total_tax - total_refunds
-    avg_order_value = round(total_gross / total_orders) if total_orders > 0 else 0
+    # Net sales excludes tax and refunds, matching Clover's Sales Report.
+    net_sales = total_collected - total_tax - total_refunds
+    avg_order_value = round(net_sales / total_orders) if total_orders > 0 else 0
 
     return {
         "summary": {
-            "total_revenue": total_revenue,
-            "gross_sales": total_gross,
+            "total_revenue": net_sales,
+            "gross_sales": total_collected - total_tax,
             "net_sales": net_sales,
+            "amount_collected": total_collected,
             "total_tax": total_tax,
             "total_refunds": total_refunds,
             "total_orders": total_orders,
             "total_items_sold": total_items_sold,
+            "unpaid_orders": unpaid_orders,
+            "unpaid_total": unpaid_total,
             "avg_order_value": avg_order_value,
             "start_date": start_date,
             "end_date": end_date,
