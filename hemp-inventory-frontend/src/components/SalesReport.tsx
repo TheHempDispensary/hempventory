@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   DollarSign,
   ShoppingCart,
@@ -15,15 +15,18 @@ interface SalesData {
     total_revenue: number;
     gross_sales?: number;
     net_sales?: number;
+    amount_collected?: number;
     total_tax?: number;
     total_refunds?: number;
+    unpaid_orders?: number;
+    unpaid_total?: number;
     total_orders: number;
     total_items_sold: number;
     avg_order_value: number;
     start_date: string;
     end_date: string;
   };
-  by_location: Record<string, { revenue: number; gross?: number; refunds?: number; orders: number; avg_order: number; error?: string }>;
+  by_location: Record<string, { revenue: number; gross?: number; collected?: number; tax?: number; refunds?: number; orders: number; avg_order: number; error?: string }>;
   hourly: { hour: string; label: string; revenue: number; orders: number }[];
   daily: { date: string; label: string; revenue: number; gross?: number; refunds?: number; orders: number }[];
   top_items: { name: string; quantity: number; revenue: number; by_location?: Record<string, number> }[];
@@ -75,17 +78,24 @@ export default function SalesReport() {
     }
   }, []);
 
+  // Reports for wide ranges take a while, so a slow earlier request can land
+  // after a newer one; only the newest request may touch the screen.
+  const requestIdRef = useRef(0);
+
   const loadReport = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
     setLoading(true);
     setError("");
     try {
       const res = await getSalesReport({ start_date: startDate, end_date: endDate });
+      if (requestId !== requestIdRef.current) return;
       setData(res.data);
     } catch (err) {
       console.error(err);
+      if (requestId !== requestIdRef.current) return;
       setError("Failed to load sales report");
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) setLoading(false);
     }
   }, [startDate, endDate]);
 
@@ -168,18 +178,24 @@ export default function SalesReport() {
                 <div className="w-10 h-10 rounded-lg bg-green-100 flex items-center justify-center">
                   <DollarSign className="w-5 h-5 text-green-600" />
                 </div>
-                <p className="text-sm text-gray-500">Total Revenue</p>
+                <p className="text-sm text-gray-500">Net Sales</p>
               </div>
               <p className="text-2xl font-bold text-gray-900">{fmtMoney(data.summary.total_revenue)}</p>
               <div className="mt-1 space-y-0.5">
-                {data.summary.net_sales !== undefined && (
-                  <p className="text-xs text-gray-400">Net sales (excl. tax): {fmtMoney(data.summary.net_sales)}</p>
+                {data.summary.amount_collected !== undefined && (
+                  <p className="text-xs text-gray-400">Collected (incl. tax): {fmtMoney(data.summary.amount_collected)}</p>
                 )}
                 {data.summary.total_tax !== undefined && (
                   <p className="text-xs text-gray-400">Tax: {fmtMoney(data.summary.total_tax)}</p>
                 )}
                 {!!data.summary.total_refunds && (
                   <p className="text-xs text-red-500">Refunds: -{fmtMoney(data.summary.total_refunds)}</p>
+                )}
+                {!!data.summary.unpaid_orders && (
+                  <p className="text-xs text-gray-400">
+                    Excludes {data.summary.unpaid_orders} unpaid order{data.summary.unpaid_orders === 1 ? "" : "s"}
+                    {data.summary.unpaid_total !== undefined ? ` (${fmtMoney(data.summary.unpaid_total)})` : ""}
+                  </p>
                 )}
               </div>
             </div>
@@ -227,9 +243,15 @@ export default function SalesReport() {
                   ) : (
                     <div className="space-y-1">
                       <div className="flex justify-between text-sm">
-                        <span className="text-gray-500">Revenue</span>
+                        <span className="text-gray-500">Net Sales</span>
                         <span className="font-semibold text-gray-900">{fmtMoney(loc.revenue)}</span>
                       </div>
+                      {!!loc.tax && (
+                        <div className="flex justify-between text-sm">
+                          <span className="text-gray-500">Tax</span>
+                          <span className="font-semibold text-gray-900">{fmtMoney(loc.tax)}</span>
+                        </div>
+                      )}
                       <div className="flex justify-between text-sm">
                         <span className="text-gray-500">Orders</span>
                         <span className="font-semibold text-gray-900">{loc.orders}</span>
