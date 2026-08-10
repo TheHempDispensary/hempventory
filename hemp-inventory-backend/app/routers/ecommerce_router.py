@@ -2805,12 +2805,14 @@ async def create_order(
     email_task = asyncio.create_task(
         _send_order_emails(smtp_settings, order, order_number, charge_id, payment_status)
     )
+    _keep_task(email_task)
     email_task.add_done_callback(lambda t: _log_task_error(t, "email"))
 
     # Deduct stock from correct Clover location based on fulfillment type (non-blocking)
     stock_task = asyncio.create_task(
         _deduct_stock_for_order(order.items, order.fulfillment_type)
     )
+    _keep_task(stock_task)
     stock_task.add_done_callback(lambda t: _log_task_error(t, "stock_deduct"))
 
     # Award loyalty points for online orders (non-blocking).
@@ -2819,12 +2821,14 @@ async def create_order(
         loyalty_award_task = asyncio.create_task(
             _award_loyalty_points_for_order(order, order_number, order_id)
         )
+        _keep_task(loyalty_award_task)
         loyalty_award_task.add_done_callback(lambda t: _log_task_error(t, "loyalty_award"))
 
     # Auto-write LeafLife (LF-) shipping orders into the shared Google Sheet so
     # staff no longer copy them by hand (non-blocking; never fails the order).
     if db_save_ok and payment_status == "paid":
         leaflife_task = asyncio.create_task(_sync_leaflife_order(order, order_number))
+        _keep_task(leaflife_task)
         leaflife_task.add_done_callback(lambda t: _log_task_error(t, "leaflife_sheet"))
 
     return {
@@ -2944,6 +2948,16 @@ async def _record_leaflife_sync(
             await conn.close()
     except Exception as e:  # noqa: BLE001 - tracking is best-effort
         print(f"[leaflife-orders] failed to record sync status for {short}: {e}")
+
+
+# Fire-and-forget tasks are only weakly referenced by the event loop, so a task
+# whose only reference is a local variable can be garbage-collected mid-await.
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+
+def _keep_task(task: asyncio.Task) -> None:
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
 
 
 async def _sync_leaflife_order(order: "CreateOrderRequest", order_number: str) -> dict:
@@ -3882,6 +3896,78 @@ async def leaflife_sheet_status(
     ]
     failed = sum(1 for r in records if r["status"] == "failed")
     return {"configured": leaflife_orders.is_configured(), "failed": failed, "records": records}
+
+
+_LEAFLIFE_UNPAID_STATUSES = ("cancelled", "refunded", "failed", "unpaid", "pending")
+
+
+async def _do_leaflife_sweep(db: aiosqlite.Connection, days: int = 30) -> dict:
+    """Write any shipping order with LeafLife items that never reached the sheet.
+
+    The write at checkout is fire-and-forget, so a restart, a Sheets hiccup or a
+    dropped task leaves the order out of the sheet — and out of the tracking
+    table too, which makes the miss invisible. This reconciles the last `days`
+    of orders against the sheet. Idempotent: `sync_order` checks the sheet for
+    the order # before appending.
+    """
+    if not leaflife_orders.is_configured():
+        return {"checked": 0, "synced": 0, "failed": 0}
+
+    placeholders = ",".join("?" for _ in _LEAFLIFE_UNPAID_STATUSES)
+    cur = await db.execute(
+        f"""SELECT DISTINCT o.order_number
+              FROM ecommerce_orders o
+              JOIN ecommerce_order_items i ON i.order_id = o.id
+             WHERE o.created_at >= datetime('now', ?)
+               AND UPPER(COALESCE(i.sku, '')) LIKE 'LF-%'
+               AND LOWER(COALESCE(o.payment_status, '')) NOT IN ({placeholders})
+             ORDER BY o.created_at""",
+        (f"-{max(1, days)} days", *_LEAFLIFE_UNPAID_STATUSES),
+    )
+    candidates = [r[0] for r in await cur.fetchall()]
+
+    done_cur = await db.execute(
+        "SELECT order_number FROM leaflife_order_sync WHERE status IN ('synced', 'already_present')"
+    )
+    done = {r[0] for r in await done_cur.fetchall()}
+
+    synced = 0
+    failed = 0
+    results = []
+    for order_number in candidates:
+        if leaflife_orders.short_order_no(order_number) in done:
+            continue
+        try:
+            res = await _sync_leaflife_from_db(db, order_number)
+        except Exception as e:  # noqa: BLE001 - sweep must never die on one order
+            failed += 1
+            results.append({"order_number": order_number, "ok": False, "reason": str(e)})
+            continue
+        if res.get("ok") and res.get("written"):
+            synced += 1
+        elif not res.get("ok") and res.get("reason") not in (
+            "not a shipping order",
+            "no LeafLife items",
+        ):
+            failed += 1
+        results.append({"order_number": order_number, **res})
+    return {"checked": len(candidates), "synced": synced, "failed": failed, "results": results}
+
+
+@router.post("/leaflife-sheet/sweep")
+async def leaflife_sheet_sweep(
+    request: Request,
+    days: int = 30,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Sync every recent LeafLife order that is missing from the Order Sheet."""
+    _require_admin(request)
+    if not leaflife_orders.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Google Sheets service account is not configured (GOOGLE_SHEETS_SA_JSON).",
+        )
+    return await _do_leaflife_sweep(db, days=days)
 
 
 @router.post("/leaflife-sheet/retry-failed")
