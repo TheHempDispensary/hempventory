@@ -18,6 +18,7 @@ from email.mime.multipart import MIMEMultipart
 
 from app.database import get_db, DB_PATH
 from app.clover_client import CloverClient
+from app.routers.loyalty_router import _do_signup
 from app import leaflife_orders
 
 STORE_EMAIL = "Support@TheHempDispensary.com"
@@ -3138,8 +3139,33 @@ async def _award_loyalty_points_for_order(
                 loyalty_customer = await cur.fetchone()
 
         if not loyalty_customer:
-            print(f"[loyalty-award] No loyalty account found for {order.customer.email} / {order.customer.phone} — skipping points")
-            return
+            # Auto-enroll the shopper: signing up here (rather than skipping) also
+            # creates them in Clover, so the register recognises them in store.
+            digits = "".join(ch for ch in (order.customer.phone or "") if ch.isdigit())
+            if len(digits) < 10:
+                print(f"[loyalty-award] No loyalty account and no usable phone for {order.customer.email} — skipping points")
+                return
+            try:
+                await _do_signup(
+                    order.customer.phone,
+                    order.customer.first_name or "Customer",
+                    order.customer.last_name or "",
+                    order.customer.email or "",
+                    db,
+                )
+            except Exception as signup_err:
+                print(f"[loyalty-award] Auto-enroll failed for {order.customer.email}: {signup_err}")
+                return
+            cur = await db.execute(
+                "SELECT id, first_name, last_name, email, phone FROM loyalty_customers WHERE "
+                "REPLACE(REPLACE(REPLACE(REPLACE(phone, '-', ''), ' ', ''), '(', ''), ')', '') LIKE ?",
+                (f"%{digits[-10:]}",),
+            )
+            loyalty_customer = await cur.fetchone()
+            if not loyalty_customer:
+                print(f"[loyalty-award] Auto-enroll produced no account for {order.customer.email} — skipping points")
+                return
+            print(f"[loyalty-award] Auto-enrolled {order.customer.email or digits[-10:]} in Hemp Rewards")
 
         customer_id = loyalty_customer[0]
 
