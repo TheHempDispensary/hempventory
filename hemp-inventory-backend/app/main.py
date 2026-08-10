@@ -154,6 +154,24 @@ async def _scheduled_leaflife_sync():
         print(f"[auto-sync] LeafLife sync failed: {e}")
 
 
+async def _scheduled_leaflife_order_sweep():
+    """Background job: write LeafLife orders the checkout-time write missed."""
+    try:
+        db = await _connect_db()
+        try:
+            from app.routers.ecommerce_router import _do_leaflife_sweep
+            result = await _do_leaflife_sweep(db)
+            if result.get("synced") or result.get("failed"):
+                print(
+                    f"[auto-sync] LeafLife order sheet: {result['synced']} recovered, "
+                    f"{result['failed']} failed ({result['checked']} checked)"
+                )
+        finally:
+            await db.close()
+    except Exception as e:
+        print(f"[auto-sync] LeafLife order sheet sweep failed: {e}")
+
+
 async def _scheduled_auto_par():
     """Background job: recompute every item's PAR from sales velocity nightly.
 
@@ -216,6 +234,7 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(_scheduled_clover_order_sync, "interval", minutes=5, id="clover_order_sync", replace_existing=True)
     scheduler.add_job(_scheduled_coa_sync, "interval", minutes=30, id="coa_sync", replace_existing=True)
     scheduler.add_job(_scheduled_leaflife_sync, "interval", minutes=15, id="leaflife_sync", replace_existing=True)
+    scheduler.add_job(_scheduled_leaflife_order_sweep, "interval", minutes=10, id="leaflife_order_sweep", replace_existing=True)
     # Recompute PAR from sales velocity once a night (heavy: pulls all orders).
     scheduler.add_job(_scheduled_auto_par, "cron", hour=5, id="auto_par", replace_existing=True)
     # Pull in-store discount redemptions from Clover so promo "Uses" is accurate
@@ -234,6 +253,8 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(ecommerce_router._fetch_and_cache_products())
     # Import any Clover online orders that arrived while the server was down
     asyncio.create_task(_scheduled_clover_order_sync())
+    # Catch up any LeafLife orders that never made it into the Order Sheet
+    asyncio.create_task(_scheduled_leaflife_order_sweep())
     yield
     scheduler.shutdown()
 
