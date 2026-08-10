@@ -305,10 +305,10 @@ async def _get_active_online_sale(db: aiosqlite.Connection) -> str:
                WHERE is_direct_discount = 1
                  AND is_active = 1
                  AND (in_store_only = 0 OR in_store_only IS NULL)
-                 AND starts_at IS NOT NULL AND starts_at != ''
-                 AND expires_at IS NOT NULL AND expires_at != ''
-                 AND (CASE WHEN LENGTH(starts_at) <= 10 THEN starts_at || 'T00:00' ELSE starts_at END) <= ?
-                 AND (CASE WHEN LENGTH(expires_at) <= 10 THEN expires_at || 'T23:59' ELSE expires_at END) >= ?
+                 AND (starts_at IS NULL OR starts_at = ''
+                      OR (CASE WHEN LENGTH(starts_at) <= 10 THEN starts_at || 'T00:00' ELSE starts_at END) <= ?)
+                 AND (expires_at IS NULL OR expires_at = ''
+                      OR (CASE WHEN LENGTH(expires_at) <= 10 THEN expires_at || 'T23:59' ELSE expires_at END) >= ?)
                ORDER BY discount_pct DESC
                LIMIT 1""",
             (now_eastern, now_eastern),
@@ -329,8 +329,9 @@ async def _get_active_online_sale(db: aiosqlite.Connection) -> str:
     else:
         scope = "sitewide"
     end = row[2]
+    window = f" (through {end})" if end else ""
     return (
-        f"ACTIVE ONLINE SALE: {pct}% off {scope} right now (through {end}). "
+        f"ACTIVE ONLINE SALE: {pct}% off {scope} right now{window}. "
         "This automatic online discount applies at checkout with no code needed — "
         "mention it when relevant. Never mention in-store-only discounts to online customers."
     )

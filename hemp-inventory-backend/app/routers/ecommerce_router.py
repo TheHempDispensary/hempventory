@@ -159,7 +159,9 @@ _refresh_in_progress: bool = False
 CACHE_TTL = 300  # 5 minutes
 
 
-DISK_CACHE_PATH = os.environ.get("DB_PATH", "").replace("app.db", "product_cache.json") or "/tmp/product_cache.json"
+# Sits beside the database. Deriving it by name substitution overwrote the
+# database itself whenever DB_PATH wasn't literally named "app.db".
+DISK_CACHE_PATH = os.path.join(os.path.dirname(DB_PATH) or "/tmp", "product_cache.json")
 
 
 def _enforce_leaflife_price_floor(sku: str, name: str, price: int) -> int:
@@ -926,6 +928,40 @@ class ValidatePromoRequest(BaseModel):
     phone: str = ""
 
 
+async def _fetch_active_direct_discounts(db: aiosqlite.Connection) -> list:
+    """Return every direct discount that is live online right now (US Eastern).
+
+    A missing start or end date means "no bound", so a direct discount created
+    without dates runs until it is deactivated.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    now_eastern = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%dT%H:%M")
+    cursor = await db.execute(
+        """SELECT code, discount_pct, excluded_brands, starts_at, expires_at, applies_to, product_ids
+           FROM promo_codes
+           WHERE is_direct_discount = 1
+             AND is_active = 1
+             AND (in_store_only = 0 OR in_store_only IS NULL)
+             AND discount_pct > 0
+             AND (starts_at IS NULL OR starts_at = ''
+                  OR (CASE WHEN LENGTH(starts_at) <= 10 THEN starts_at || 'T00:00' ELSE starts_at END) <= ?)
+             AND (expires_at IS NULL OR expires_at = ''
+                  OR (CASE WHEN LENGTH(expires_at) <= 10 THEN expires_at || 'T23:59' ELSE expires_at END) >= ?)
+           ORDER BY discount_pct DESC""",
+        (now_eastern, now_eastern),
+    )
+    return await cursor.fetchall()
+
+
+def _is_sitewide_sale(row) -> bool:
+    """True when a direct discount applies to the whole catalog (not select items)."""
+    applies_to = row["applies_to"] if "applies_to" in row.keys() else "all"
+    product_ids = (row["product_ids"] or "") if "product_ids" in row.keys() else ""
+    return applies_to == "all" or not product_ids.strip()
+
+
 @router.post("/validate-promo")
 async def validate_promo(
     body: ValidatePromoRequest,
@@ -935,31 +971,25 @@ async def validate_promo(
     code = body.promo_code.strip().upper()
     email = body.email.strip().lower()
 
-    # Block promo codes when a sale is active (loyalty rewards are still allowed)
     from datetime import datetime
     from zoneinfo import ZoneInfo
     eastern = ZoneInfo("America/New_York")
-    now_eastern = datetime.now(eastern).strftime("%Y-%m-%dT%H:%M")
-    sale_cursor = await db.execute(
-        """SELECT discount_pct FROM promo_codes
-           WHERE is_direct_discount = 1 AND is_active = 1
-             AND (in_store_only = 0 OR in_store_only IS NULL)
-             AND starts_at IS NOT NULL AND starts_at != ''
-             AND expires_at IS NOT NULL AND expires_at != ''
-             AND (CASE WHEN LENGTH(starts_at) <= 10 THEN starts_at || 'T00:00' ELSE starts_at END) <= ?
-             AND (CASE WHEN LENGTH(expires_at) <= 10 THEN expires_at || 'T23:59' ELSE expires_at END) >= ?
-           ORDER BY discount_pct DESC
-           LIMIT 1""",
-        (now_eastern, now_eastern),
-    )
-    active_sale = await sale_cursor.fetchone()
-    if active_sale:
-        pct = round(active_sale["discount_pct"] * 100)
-        return {"valid": False, "reason": f"Promo codes are disabled during our {pct}% OFF sale. Loyalty rewards can still be redeemed at checkout."}
+
+    # Block promo codes only during a sitewide sale (loyalty rewards are still
+    # allowed). Sales on select items leave the rest of the catalog eligible.
+    for row in await _fetch_active_direct_discounts(db):
+        if _is_sitewide_sale(row):
+            pct = round(row["discount_pct"] * 100)
+            return {"valid": False, "reason": f"Promo codes are disabled during our {pct}% OFF sale. Loyalty rewards can still be redeemed at checkout."}
 
     cursor = await db.execute("SELECT * FROM promo_codes WHERE code = ? AND is_active = 1", (code,))
     promo = await cursor.fetchone()
     if not promo:
+        return {"valid": False, "reason": "Invalid promo code"}
+
+    # Direct discounts have no customer-facing code — their name must never work
+    # as one, or the discount would stack on top of the already-reduced price.
+    if "is_direct_discount" in promo.keys() and promo["is_direct_discount"]:
         return {"valid": False, "reason": "Invalid promo code"}
 
     # In-store-only discounts can never be redeemed on the online store
@@ -1049,42 +1079,38 @@ async def list_brands():
 
 @router.get("/active-sale")
 async def active_sale(db: aiosqlite.Connection = Depends(get_db)):
-    """Public endpoint: Check if there is an active Direct Discount sale now (US Eastern)."""
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
+    """Public endpoint: Every Direct Discount that is live online now (US Eastern).
 
-    eastern = ZoneInfo("America/New_York")
-    now_eastern = datetime.now(eastern).strftime("%Y-%m-%dT%H:%M")
+    Several direct discounts can run at once (e.g. one per product family), so
+    the response carries them all in ``sales``; the top-level fields describe the
+    deepest one for older clients.
+    """
+    rows = await _fetch_active_direct_discounts(db)
+    if not rows:
+        return {"active": False, "sales": [], "promos_disabled": False}
 
-    cursor = await db.execute(
-        """SELECT discount_pct, excluded_brands, starts_at, expires_at, applies_to, product_ids
-           FROM promo_codes
-           WHERE is_direct_discount = 1
-             AND is_active = 1
-             AND (in_store_only = 0 OR in_store_only IS NULL)
-             AND starts_at IS NOT NULL AND starts_at != ''
-             AND expires_at IS NOT NULL AND expires_at != ''
-             AND (CASE WHEN LENGTH(starts_at) <= 10 THEN starts_at || 'T00:00' ELSE starts_at END) <= ?
-             AND (CASE WHEN LENGTH(expires_at) <= 10 THEN expires_at || 'T23:59' ELSE expires_at END) >= ?
-           ORDER BY discount_pct DESC
-           LIMIT 1""",
-        (now_eastern, now_eastern),
-    )
-    row = await cursor.fetchone()
-    if not row:
-        return {"active": False}
+    def _serialize(row) -> dict:
+        applies_to = row["applies_to"] if "applies_to" in row.keys() else "all"
+        product_ids = (
+            [pid.strip() for pid in (row["product_ids"] or "").split(",") if pid.strip()]
+            if applies_to == "specific" else []
+        )
+        return {
+            "name": row["code"],
+            "discount_percent": round(row["discount_pct"] * 100, 2),
+            "excluded_brands": [b.strip() for b in (row["excluded_brands"] or "").split(",") if b.strip()],
+            "applies_to": applies_to,
+            "product_ids": product_ids,
+            "start_date": row["starts_at"],
+            "end_date": row["expires_at"],
+        }
 
-    excluded = [b.strip() for b in (row["excluded_brands"] or "").split(",") if b.strip()]
-    applies_to = row["applies_to"] if "applies_to" in row.keys() else "all"
-    product_ids = [pid.strip() for pid in (row["product_ids"] or "").split(",") if pid.strip()] if applies_to == "specific" else []
+    sales = [_serialize(row) for row in rows]
     return {
         "active": True,
-        "discount_percent": round(row["discount_pct"] * 100, 2),
-        "excluded_brands": excluded,
-        "applies_to": applies_to,
-        "product_ids": product_ids,
-        "start_date": row["starts_at"],
-        "end_date": row["expires_at"],
+        **{k: v for k, v in sales[0].items() if k != "name"},
+        "sales": sales,
+        "promos_disabled": any(_is_sitewide_sale(row) for row in rows),
     }
 
 
