@@ -234,6 +234,28 @@ class CloverClient:
                 await asyncio.sleep(0.5)  # Rate limit delay between pages
             return {"elements": all_customers}
 
+    async def create_customer(
+        self,
+        first_name: str,
+        last_name: str = "",
+        phone: str = "",
+        email: str = "",
+    ) -> dict:
+        """Create a customer at the register so staff can find an online signup."""
+        payload: dict = {"firstName": first_name, "lastName": last_name}
+        if phone:
+            payload["phoneNumbers"] = {"elements": [{"phoneNumber": phone}]}
+        if email:
+            payload["emailAddresses"] = {"elements": [{"emailAddress": email}]}
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await self._request_with_retry(
+                client, "post",
+                f"{self.base_url}/customers",
+                headers=self._headers(),
+                json=payload,
+            )
+            return resp.json()
+
     async def get_refunds_in_range(self, start_ms: int, end_ms: int, limit: int = 100) -> dict:
         """Get refund records created within a time range from Clover's refunds endpoint.
 

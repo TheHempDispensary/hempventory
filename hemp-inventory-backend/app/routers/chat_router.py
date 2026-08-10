@@ -542,7 +542,7 @@ async def _lookup_loyalty(identifier: str, db: aiosqlite.Connection) -> str:
         param = identifier
         cursor = await db.execute(
             """SELECT id, first_name, last_name, phone, email, points_balance, lifetime_points
-               FROM loyalty_customers WHERE email = ?""",
+               FROM loyalty_customers WHERE email = ? COLLATE NOCASE""",
             (param,),
         )
     else:
