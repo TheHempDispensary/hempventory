@@ -18,11 +18,12 @@ import {
   getLoyaltySyncStatus,
   resetLoyaltySync,
   bulkImportLoyaltyCustomers,
+  pushLoyaltyCustomersToClover,
 } from "../lib/api";
 import {
   Search, Plus, Gift, Star, Users, TrendingUp, Award, Settings,
   X, ChevronRight, Minus, Trash2, Edit3, Save, Phone, Mail, Calendar,
-  RefreshCw, ShoppingCart, Upload,
+  RefreshCw, ShoppingCart, Upload, Download,
 } from "lucide-react";
 
 interface LoyaltyCustomer {
@@ -137,6 +138,7 @@ export default function Loyalty() {
   // Order sync state
   const [syncing, setSyncing] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [pushing, setPushing] = useState(false);
   const [syncStatus, setSyncStatus] = useState<{
     total_orders_synced: number;
     total_orders_awarded: number;
@@ -235,6 +237,26 @@ export default function Loyalty() {
       showToast("error", "Failed to import customers from Clover");
     } finally {
       setImporting(false);
+    }
+  };
+
+  const handlePushToClover = async () => {
+    setPushing(true);
+    try {
+      const resp = await pushLoyaltyCustomersToClover();
+      const data = resp.data;
+      showToast(
+        "success",
+        `Sent ${data.pushed} member${data.pushed === 1 ? "" : "s"} to Clover` +
+          (data.remaining > 0 ? ` — ${data.remaining} left, run again` : "") +
+          (data.failed > 0 ? ` (${data.failed} failed)` : ""),
+      );
+      loadCustomers(customerSearch || undefined, customerPage);
+    } catch (err) {
+      console.error("Failed to push customers to Clover:", err);
+      showToast("error", "Failed to send members to Clover");
+    } finally {
+      setPushing(false);
     }
   };
 
@@ -653,6 +675,15 @@ export default function Loyalty() {
             >
               <Upload className={`w-4 h-4 ${importing ? "animate-spin" : ""}`} />
               {importing ? "Importing..." : "Import from Clover"}
+            </button>
+            <button
+              onClick={handlePushToClover}
+              disabled={pushing}
+              className="flex items-center gap-2 px-4 py-2.5 border border-indigo-300 bg-indigo-50 text-indigo-700 rounded-lg text-sm font-medium hover:bg-indigo-100 disabled:opacity-50 transition-colors"
+              title="Create online-only members in Clover so the register recognizes them"
+            >
+              <Download className={`w-4 h-4 ${pushing ? "animate-spin" : ""}`} />
+              {pushing ? "Sending..." : "Send to Clover"}
             </button>
             <button
               onClick={() => setShowAddCustomer(true)}

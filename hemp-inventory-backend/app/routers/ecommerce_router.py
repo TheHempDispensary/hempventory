@@ -2273,7 +2273,7 @@ async def create_order(
             loyalty_identifier = order.loyalty_number.strip()
             if "@" in loyalty_identifier:
                 lcur = await db.execute(
-                    "SELECT id, points_balance, first_name, last_name FROM loyalty_customers WHERE email = ?",
+                    "SELECT id, points_balance, first_name, last_name FROM loyalty_customers WHERE email = ? COLLATE NOCASE",
                     (loyalty_identifier,),
                 )
             else:
@@ -3122,7 +3122,7 @@ async def _award_loyalty_points_for_order(
         loyalty_customer = None
         if order.customer.email:
             cur = await db.execute(
-                "SELECT id, first_name, last_name, email, phone FROM loyalty_customers WHERE email = ?",
+                "SELECT id, first_name, last_name, email, phone FROM loyalty_customers WHERE email = ? COLLATE NOCASE",
                 (order.customer.email,),
             )
             loyalty_customer = await cur.fetchone()
