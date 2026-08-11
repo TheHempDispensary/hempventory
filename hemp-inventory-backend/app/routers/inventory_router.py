@@ -1041,6 +1041,7 @@ async def set_item_category(
         targets = [single] if single else []
     targets_lower = {t.lower() for t in targets}
     results: list[dict] = []
+    errors: list[str] = []
 
     for loc in locations:
         loc_id, loc_name, merchant_id, api_token = loc[0], loc[1], loc[2], loc[3]
@@ -1069,8 +1070,8 @@ async def set_item_category(
                     if c.get("id") and c.get("name", "").lower() not in targets_lower:
                         try:
                             await client.unassign_category(item["id"], c["id"])
-                        except Exception:
-                            pass  # best-effort removal
+                        except Exception as ue:
+                            errors.append(f"{c.get('name', '')}: {ue}")
                 current_ids = {c.get("id") for c in item_cats}
                 for cat_id in target_ids.values():
                     if cat_id not in current_ids:
@@ -1081,6 +1082,11 @@ async def set_item_category(
             results.append({"location": loc_name, "status": "error", "error": str(e)})
 
     await _invalidate_cache()
+    if errors:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Clover rejected {len(errors)} category removal(s): {errors[0]}",
+        )
     return {"categories": targets, "category": targets[0] if targets else "", "results": results}
 
 
@@ -1105,7 +1111,9 @@ async def bulk_remove_category(
         raise HTTPException(status_code=400, detail="category_name is required")
 
     results: list[dict] = []
+    errors: list[str] = []
     total_removed = 0
+    matched = 0
     sku_set = set(req.skus)
 
     for loc in locations:
@@ -1119,13 +1127,14 @@ async def bulk_remove_category(
             for item in all_items:
                 if item.get("sku") not in sku_set and item.get("id") not in sku_set:
                     continue
+                matched += 1
                 for c in item.get("categories", {}).get("elements", []):
                     if c.get("id") and c.get("name", "").lower() == target:
                         try:
                             await client.unassign_category(item["id"], c["id"])
                             removed_count += 1
-                        except Exception:
-                            pass  # skip individual failures
+                        except Exception as ue:
+                            errors.append(f"{item.get('sku') or item.get('id')}: {ue}")
 
             total_removed += removed_count
             results.append({"location": loc_name, "removed": removed_count, "status": "ok"})
@@ -1133,7 +1142,19 @@ async def bulk_remove_category(
             results.append({"location": loc_name, "removed": 0, "status": "error", "error": str(e)})
 
     await _invalidate_cache()
-    return {"category": req.category_name, "total_removed": total_removed, "results": results}
+    # A bare "removed from 0 item(s)" hides two different problems — nothing
+    # matched, or Clover refused the removals — so surface the rejection.
+    if errors:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Clover rejected {len(errors)} removal(s): {errors[0]}",
+        )
+    return {
+        "category": req.category_name,
+        "total_removed": total_removed,
+        "matched_items": matched,
+        "results": results,
+    }
 
 
 async def _set_consolidated_stock(client, matching: list[dict], quantity) -> None:

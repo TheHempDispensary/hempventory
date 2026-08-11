@@ -157,11 +157,18 @@ class CloverClient:
             return resp.json()
 
     async def unassign_category(self, item_id: str, category_id: str) -> None:
-        """Remove a category association from an item."""
+        """Remove a category association from an item.
+
+        Clover deletes associations through the same collection endpoint used to
+        create them, with ?delete=true and the tuple in the body — there is no
+        DELETE /category_items/{id} resource.
+        """
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.delete(
-                f"{self.base_url}/category_items/{category_id}:{item_id}",
+            resp = await client.post(
+                f"{self.base_url}/category_items",
                 headers=self._headers(),
+                params={"delete": "true"},
+                json={"elements": [{"item": {"id": item_id}, "category": {"id": category_id}}]},
             )
             resp.raise_for_status()
 
