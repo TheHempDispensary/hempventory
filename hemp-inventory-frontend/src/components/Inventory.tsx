@@ -979,10 +979,25 @@ export default function Inventory() {
     if (!removeCategoryName.trim()) return;
     setRemovingCategory(true);
     try {
-      const skus = items.filter(i => selectedItems.has(i.id)).map(i => i.sku);
-      const resp = await bulkRemoveCategory([...new Set(skus)], removeCategoryName.trim());
+      // SKU-less items can still be targeted by their Clover item ids, which
+      // the endpoint accepts alongside SKUs.
+      const selected = items.filter(i => selectedItems.has(i.id));
+      const keys = selected.flatMap(i => [
+        i.sku,
+        ...Object.values(i.locations || {}).map(l => l.clover_item_id),
+      ]).filter(Boolean);
+      const resp = await bulkRemoveCategory([...new Set(keys)], removeCategoryName.trim());
       const data = resp.data;
-      setToast({ type: "success", text: `Category "${data.category}" removed from ${data.total_removed} item(s) across ${data.results?.length || 0} location(s)` });
+      if (data.total_removed === 0) {
+        setToast({
+          type: "error",
+          text: data.matched_items
+            ? `None of the ${data.matched_items} matched item(s) had the category "${data.category}"`
+            : `No Clover items matched the selection — nothing removed`,
+        });
+      } else {
+        setToast({ type: "success", text: `Category "${data.category}" removed from ${data.total_removed} item(s) across ${data.results?.length || 0} location(s)` });
+      }
       setTimeout(() => setToast(null), 6000);
       setShowBulkRemoveCategory(false);
       setRemoveCategoryName("");

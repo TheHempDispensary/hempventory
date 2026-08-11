@@ -138,6 +138,33 @@ async def test_bulk_remove_category_leaves_other_categories(fake_clover):
     assert _cats("EAST", "LF-GUSH-1G") == ["Concentrates"]
 
 
+async def test_bulk_remove_category_reports_clover_rejections(fake_clover, monkeypatch):
+    # A failing unassign used to be swallowed and reported as "removed from 0
+    # item(s)", which read like a bad selection instead of a broken API call.
+    async def boom(self, item_id, category_id):
+        raise RuntimeError("405 Method Not Allowed")
+
+    monkeypatch.setattr(_FakeClover, "unassign_category", boom)
+    with pytest.raises(ir.HTTPException) as exc:
+        await ir.bulk_remove_category(
+            ir.BulkCategoryRequest(skus=["BUTANE-300"], category_name="Edibles"),
+            user={}, db=None,
+        )
+    assert exc.value.status_code == 502
+    assert "405" in exc.value.detail
+
+
+async def test_bulk_remove_category_reports_matched_items(fake_clover):
+    res = await ir.bulk_remove_category(
+        ir.BulkCategoryRequest(skus=["BUTANE-300"], category_name="Vapor"),
+        user={}, db=None,
+    )
+    # Nothing to remove, but the item was found — distinguishes "already clean"
+    # from "selection matched nothing".
+    assert res["total_removed"] == 0
+    assert res["matched_items"] == 2
+
+
 async def test_bulk_remove_category_requires_a_name(fake_clover):
     with pytest.raises(ir.HTTPException) as exc:
         await ir.bulk_remove_category(
