@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, useCallback } from "react";
-import { syncInventory, getCachedInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, getTransferHistory, bulkAssignCategory, setItemCategory, bulkAssignImages, syncRefunds, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup, bulkStockUpdate, addVariantsToItem, getInventoryChanges, getProductAttributes, updateProductAttributes, getImageGallery, uploadGalleryImage, getGalleryImageUrl, deleteGalleryImage, bulkHideItems, bulkUnhideItems, syncLeafLife, renameItemGroup } from "../lib/api";
+import { syncInventory, getCachedInventory, setParLevel, createItem, updateItem, deleteItem, bulkDeleteItems, bulkAutoManage, fixPosScanning, pushItemToLocation, transferStock, getTransferHistory, bulkAssignCategory, bulkRemoveCategory, setItemCategories, bulkAssignImages, syncRefunds, uploadImage, getImageUrl, deleteImage as deleteProductImage, createItemGroup, bulkStockUpdate, addVariantsToItem, getInventoryChanges, getProductAttributes, updateProductAttributes, getImageGallery, uploadGalleryImage, getGalleryImageUrl, deleteGalleryImage, bulkHideItems, bulkUnhideItems, syncLeafLife, renameItemGroup } from "../lib/api";
 import { RefreshCw, Search, Plus, ChevronDown, ChevronUp, X, Save, Package, Trash2, CheckSquare, Square, Minus, Image, Download, Upload, Settings, ArrowRightLeft, Images, Layers, Tag, ChevronsLeft, ChevronsRight, ChevronLeft, ChevronRight, History, AlertCircle, CheckCircle2, EyeOff, Eye, Printer } from "lucide-react";
 import { matchesSearch } from "../lib/utils";
 
@@ -53,7 +53,7 @@ export default function Inventory() {
   const [search, setSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [locationFilter, setLocationFilter] = useState("all");
-  const [sortField, setSortField] = useState<"name" | "sku" | "stock" | "price" | "category" | "par" | "date">("name");
+  const [sortField, setSortField] = useState<"name" | "sku" | "upc" | "stock" | "price" | "category" | "par" | "date">("name");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [sortLocation, setSortLocation] = useState<string>("");
   const [currentPage, setCurrentPage] = useState(1);
@@ -116,6 +116,9 @@ export default function Inventory() {
   const [showBulkCategory, setShowBulkCategory] = useState(false);
   const [bulkCategoryName, setBulkCategoryName] = useState("");
   const [assigningCategory, setAssigningCategory] = useState(false);
+  const [showBulkRemoveCategory, setShowBulkRemoveCategory] = useState(false);
+  const [removeCategoryName, setRemoveCategoryName] = useState("");
+  const [removingCategory, setRemovingCategory] = useState(false);
 
   // Hide/unhide state
   const [showHidden, setShowHidden] = useState(false);
@@ -149,15 +152,18 @@ export default function Inventory() {
     effect: string;
     strength: string;
     product_type: string;
-    category: string;
   }>({
     name: "", price: "", stocks: {}, pars: {},
     price_type: "FIXED", cost: "", product_code: "", alternate_name: "",
     description: "", color_code: "", is_revenue: true, is_age_restricted: true,
     age_restriction_type: "Vitamin & Supplements", age_restriction_min_age: "21",
     available: true, hidden: false, auto_manage: false, default_tax_rates: true,
-    effect: "", strength: "", product_type: "", category: "",
+    effect: "", strength: "", product_type: "",
   });
+
+  // Categories of the item being edited (an item can carry several in Clover)
+  const [editCategories, setEditCategories] = useState<string[]>([]);
+  const [editCategoryInput, setEditCategoryInput] = useState("");
 
   // Product attributes loaded from backend
   const [productAttrsMap, setProductAttrsMap] = useState<Record<string, { effect?: string; strength?: string; product_type?: string }>>({});
@@ -318,7 +324,8 @@ export default function Inventory() {
     }
 
     if (search) {
-      filtered = filtered.filter((i) => matchesSearch(search, i.name, i.sku));
+      // Include the UPC/barcode so scanning a barcode into the box finds the item
+      filtered = filtered.filter((i) => matchesSearch(search, i.name, i.sku, i.product_code));
     }
 
     if (categoryFilter !== "all") {
@@ -333,6 +340,7 @@ export default function Inventory() {
       let cmp = 0;
       if (sortField === "name") cmp = a.name.localeCompare(b.name);
       else if (sortField === "sku") cmp = a.sku.localeCompare(b.sku);
+      else if (sortField === "upc") cmp = (a.product_code || "").localeCompare(b.product_code || "");
       else if (sortField === "price") cmp = a.price - b.price;
       else if (sortField === "category") {
         const aCat = a.categories[0] || "";
@@ -639,8 +647,9 @@ export default function Inventory() {
       effect: productAttrsMap[item.sku]?.effect || "",
       strength: productAttrsMap[item.sku]?.strength || "",
       product_type: productAttrsMap[item.sku]?.product_type || "",
-      category: item.categories[0] || "",
     });
+    setEditCategories([...item.categories]);
+    setEditCategoryInput("");
     setEditTab("details");
     setSaveMessage(null);
     setGroupNameInput(item.item_group_name || "");
@@ -783,7 +792,10 @@ export default function Inventory() {
       const typeChanged = editForm.product_type !== (oldAttrs.product_type || "");
       const hasAttrChanges = effectChanged || strengthChanged || typeChanged;
 
-      const categoryChanged = editForm.category.trim() !== (editItem.categories[0] || "");
+      const cleanCategories = [...new Set(editCategories.map((c) => c.trim()).filter(Boolean))];
+      const categoryChanged =
+        cleanCategories.length !== editItem.categories.length ||
+        cleanCategories.some((c) => !editItem.categories.includes(c));
 
       if (Object.keys(updateData).length === 0 && parPromises.length === 0 && !hasAttrChanges && !categoryChanged) {
         setSaveMessage({ type: "success", text: "No changes to save." });
@@ -795,9 +807,9 @@ export default function Inventory() {
         await Promise.all(parPromises);
       }
 
-      // Set (replace) the item's Clover category across all locations
+      // Make the item's Clover categories match exactly (adds and removals)
       if (categoryChanged) {
-        await setItemCategory(editItem.sku, editForm.category.trim());
+        await setItemCategories(editItem.sku, cleanCategories);
       }
 
       // Save effect/strength attributes to local DB
@@ -823,7 +835,7 @@ export default function Inventory() {
         const msg = hasAttrChanges
           ? "Product attributes saved!"
           : categoryChanged
-            ? "Category saved to Clover!"
+            ? "Categories saved to Clover!"
             : "PAR levels updated!";
         setSaveMessage({ type: "success", text: msg });
         await loadData();
@@ -857,10 +869,10 @@ export default function Inventory() {
   const handleDownloadExcel = () => {
     const selectedData = filteredItems.filter((i) => selectedItems.has(i.id));
     const dataToExport = selectedData.length > 0 ? selectedData : filteredItems;
-    const headers = ["Product Name", "SKU", "Price", "Category"];
+    const headers = ["Product Name", "SKU", "UPC/Barcode", "Price", "Category"];
     locations.forEach((loc) => { headers.push(`${loc.name} Stock`); headers.push(`${loc.name} PAR`); });
     const rows = dataToExport.map((item) => {
-      const row: string[] = [item.name, item.sku, `$${(item.price / 100).toFixed(2)}`, item.categories.join("; ")];
+      const row: string[] = [item.name, item.sku, item.product_code || "", `$${(item.price / 100).toFixed(2)}`, item.categories.join("; ")];
       locations.forEach((loc) => {
         const locData = item.locations[loc.name];
         row.push(locData ? locData.stock.toString() : "");
@@ -879,7 +891,7 @@ export default function Inventory() {
     URL.revokeObjectURL(url);
   };
 
-  const toggleSort = (field: "name" | "sku" | "stock" | "price" | "category" | "par" | "date", locName?: string) => {
+  const toggleSort = (field: "name" | "sku" | "upc" | "stock" | "price" | "category" | "par" | "date", locName?: string) => {
     if (sortField === field && sortLocation === (locName || "")) {
       setSortDir(sortDir === "asc" ? "desc" : "asc");
     } else {
@@ -960,6 +972,29 @@ export default function Inventory() {
       setTimeout(() => setToast(null), 5000);
     } finally {
       setAssigningCategory(false);
+    }
+  };
+
+  const handleBulkRemoveCategory = async () => {
+    if (!removeCategoryName.trim()) return;
+    setRemovingCategory(true);
+    try {
+      const skus = items.filter(i => selectedItems.has(i.id)).map(i => i.sku);
+      const resp = await bulkRemoveCategory([...new Set(skus)], removeCategoryName.trim());
+      const data = resp.data;
+      setToast({ type: "success", text: `Category "${data.category}" removed from ${data.total_removed} item(s) across ${data.results?.length || 0} location(s)` });
+      setTimeout(() => setToast(null), 6000);
+      setShowBulkRemoveCategory(false);
+      setRemoveCategoryName("");
+      setSelectedItems(new Set());
+      await loadData();
+    } catch (err) {
+      console.error("Error removing category:", err);
+      const axiosError = err as { response?: { data?: { detail?: string } } };
+      setToast({ type: "error", text: axiosError?.response?.data?.detail || "Failed to remove category" });
+      setTimeout(() => setToast(null), 5000);
+    } finally {
+      setRemovingCategory(false);
     }
   };
 
@@ -1629,7 +1664,7 @@ export default function Inventory() {
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
           <input
             type="text"
-            placeholder="Search by name or SKU..."
+            placeholder="Search or scan by name, SKU, or UPC/barcode..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-green-500 outline-none text-sm"
@@ -2420,27 +2455,61 @@ export default function Inventory() {
                     </select>
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Category</label>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Categories</label>
+                    <div className="flex flex-wrap gap-2 mb-2">
+                      {editCategories.length === 0 && (
+                        <span className="text-xs text-gray-400 italic">No categories</span>
+                      )}
+                      {editCategories.map((c) => (
+                        <span key={c} className="inline-flex items-center gap-1 px-2 py-1 bg-gray-100 text-gray-700 rounded text-xs">
+                          {c}
+                          <button
+                            type="button"
+                            title={`Remove ${c}`}
+                            onClick={() => setEditCategories(editCategories.filter((x) => x !== c))}
+                            className="text-gray-400 hover:text-red-600"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
                     <div className="flex gap-2">
                       <select
-                        value={categories.includes(editForm.category) ? editForm.category : ""}
-                        onChange={(e) => setEditForm({ ...editForm, category: e.target.value })}
+                        value=""
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          if (val && !editCategories.includes(val)) setEditCategories([...editCategories, val]);
+                        }}
                         className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-green-500 outline-none"
                       >
-                        <option value="">No category</option>
-                        {categories.map((c) => (
+                        <option value="">Add existing category…</option>
+                        {categories.filter((c) => !editCategories.includes(c)).map((c) => (
                           <option key={c} value={c}>{c}</option>
                         ))}
                       </select>
                       <input
                         type="text"
-                        value={categories.includes(editForm.category) ? "" : editForm.category}
-                        onChange={(e) => setEditForm({ ...editForm, category: e.target.value })}
+                        value={editCategoryInput}
+                        onChange={(e) => setEditCategoryInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            const val = editCategoryInput.trim();
+                            if (val && !editCategories.includes(val)) setEditCategories([...editCategories, val]);
+                            setEditCategoryInput("");
+                          }
+                        }}
+                        onBlur={() => {
+                          const val = editCategoryInput.trim();
+                          if (val && !editCategories.includes(val)) setEditCategories([...editCategories, val]);
+                          setEditCategoryInput("");
+                        }}
                         className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 outline-none"
-                        placeholder="Or type new category"
+                        placeholder="Or type a new category"
                       />
                     </div>
-                    <p className="text-xs text-gray-400 mt-1">Select an existing category or type a new one — saved to Clover at all locations.</p>
+                    <p className="text-xs text-gray-400 mt-1">Click ✕ to remove a wrong category (e.g. Butane under Edibles). Saved to Clover at all locations on Save.</p>
                   </div>
                   <div className="flex items-center gap-3 px-3 py-2.5 bg-amber-50 rounded-lg border border-amber-200">
                     <span className="inline-flex items-center justify-center w-8 h-8 rounded-full bg-amber-100 text-amber-700 font-bold text-sm">21+</span>
@@ -3188,6 +3257,16 @@ export default function Inventory() {
               <Tag className="w-3.5 h-3.5" />
               Assign Category
             </button>
+            <button
+              onClick={() => {
+                setShowBulkRemoveCategory(true);
+                setRemoveCategoryName(categoryFilter !== "all" ? categoryFilter : "");
+              }}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"
+            >
+              <Tag className="w-3.5 h-3.5" />
+              Remove Category
+            </button>
             {(() => {
               const selected = items.filter(i => selectedItems.has(i.id));
               const allHidden = selected.length > 0 && selected.every(i => i.is_hidden);
@@ -3283,6 +3362,66 @@ export default function Inventory() {
         </div>
       )}
 
+      {/* Bulk Remove Category Modal */}
+      {showBulkRemoveCategory && (
+        <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="p-2 bg-blue-100 rounded-lg">
+                <Tag className="w-5 h-5 text-blue-600" />
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900">Remove Category</h3>
+                <p className="text-xs text-gray-400">Detach a category from {selectedItems.size} selected item{selectedItems.size !== 1 ? "s" : ""}</p>
+              </div>
+            </div>
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-1">Category Name</label>
+              <input
+                list="category-suggestions"
+                type="text"
+                value={removeCategoryName}
+                onChange={(e) => setRemoveCategoryName(e.target.value)}
+                placeholder="e.g. Edibles"
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                autoFocus
+              />
+              <datalist id="category-suggestions">
+                {categories.map((c) => (
+                  <option key={c} value={c} />
+                ))}
+              </datalist>
+              <p className="text-xs text-gray-400 mt-1">Only this category is detached in Clover — the items keep their other categories.</p>
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowBulkRemoveCategory(false)}
+                className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg text-sm hover:bg-gray-50 font-medium"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleBulkRemoveCategory}
+                disabled={removingCategory || !removeCategoryName.trim()}
+                className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50 font-medium"
+              >
+                {removingCategory ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    Removing...
+                  </>
+                ) : (
+                  <>
+                    <X className="w-4 h-4" />
+                    Remove
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Bulk Delete Confirmation Modal */}
       {showBulkConfirm && (
         <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4">
@@ -3363,6 +3502,12 @@ export default function Inventory() {
                   onClick={() => toggleSort("sku")}
                 >
                   SKU <SortIcon field="sku" />
+                </th>
+                <th
+                  className="px-4 py-3 cursor-pointer hover:text-gray-700"
+                  onClick={() => toggleSort("upc")}
+                >
+                  UPC/Barcode <SortIcon field="upc" />
                 </th>
                 <th
                   className="px-4 py-3 cursor-pointer hover:text-gray-700"
@@ -3448,6 +3593,9 @@ export default function Inventory() {
                   </td>
                   <td className="px-4 py-3 text-xs text-gray-500 font-mono">
                     {item.sku.length > 15 ? item.sku.slice(0, 15) + "..." : item.sku}
+                  </td>
+                  <td className="px-4 py-3 text-xs text-gray-500 font-mono" title={item.product_code || ""}>
+                    {item.product_code || <span className="text-gray-300">—</span>}
                   </td>
                   <td className="px-4 py-3 text-sm text-gray-700">
                     ${(item.price / 100).toFixed(2)}

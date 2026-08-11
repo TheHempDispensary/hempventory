@@ -1011,7 +1011,10 @@ async def bulk_assign_category(
 
 class SetItemCategoryRequest(BaseModel):
     sku: str
-    category_name: str  # empty string clears the category
+    category_name: Optional[str] = None  # empty string clears the category
+    # Preferred: the exact set of categories the item should end up in.
+    # An empty list clears every category.
+    category_names: Optional[list[str]] = None
 
 
 @router.post("/set-item-category")
@@ -1020,17 +1023,23 @@ async def set_item_category(
     user: dict = Depends(get_current_user),
     db: aiosqlite.Connection = Depends(get_db),
 ):
-    """Set (replace) a single item's category across all Clover locations.
+    """Set a single item's categories across all Clover locations.
 
-    Unlike bulk-assign (which only adds), this removes the item's existing
-    category associations first so the item ends up in exactly the chosen
-    category — or in none when category_name is empty.
+    Unlike bulk-assign (which only adds), this makes the item's categories match
+    the request exactly: any category not in the request is unassigned, so an
+    item wrongly tagged (e.g. Butane under "Edibles") can be corrected, and
+    passing no categories clears them all.
     """
     locations = await _get_locations(db)
     if not locations:
         raise HTTPException(status_code=400, detail="No locations configured")
 
-    target = (req.category_name or "").strip()
+    if req.category_names is not None:
+        targets = [c.strip() for c in req.category_names if c and c.strip()]
+    else:
+        single = (req.category_name or "").strip()
+        targets = [single] if single else []
+    targets_lower = {t.lower() for t in targets}
     results: list[dict] = []
 
     for loc in locations:
@@ -1042,30 +1051,89 @@ async def set_item_category(
             all_items = all_items_data.get("elements", [])
             matching = [i for i in all_items if i.get("sku") == req.sku or i.get("id") == req.sku]
 
-            cat_id = None
-            if target:
+            # Resolve (creating when needed) a Clover category id per target name
+            target_ids: dict[str, str] = {}
+            if targets:
                 cat_data = await client.get_categories()
                 cat_elements = cat_data.get("elements", [])
-                existing = [c for c in cat_elements if c.get("name", "").lower() == target.lower()]
-                cat_id = existing[0]["id"] if existing else (await client.create_category(target))["id"]
+                by_name = {c.get("name", "").lower(): c for c in cat_elements}
+                for t in targets:
+                    existing = by_name.get(t.lower())
+                    target_ids[t.lower()] = (
+                        existing["id"] if existing else (await client.create_category(t))["id"]
+                    )
 
             for item in matching:
                 item_cats = item.get("categories", {}).get("elements", [])
                 for c in item_cats:
-                    if c.get("id") and c.get("id") != cat_id:
+                    if c.get("id") and c.get("name", "").lower() not in targets_lower:
                         try:
                             await client.unassign_category(item["id"], c["id"])
                         except Exception:
                             pass  # best-effort removal
-                if cat_id and not any(c.get("id") == cat_id for c in item_cats):
-                    await client.assign_category(item["id"], cat_id)
+                current_ids = {c.get("id") for c in item_cats}
+                for cat_id in target_ids.values():
+                    if cat_id not in current_ids:
+                        await client.assign_category(item["id"], cat_id)
 
             results.append({"location": loc_name, "status": "ok"})
         except Exception as e:
             results.append({"location": loc_name, "status": "error", "error": str(e)})
 
     await _invalidate_cache()
-    return {"category": target, "results": results}
+    return {"categories": targets, "category": targets[0] if targets else "", "results": results}
+
+
+@router.post("/bulk-remove-category")
+async def bulk_remove_category(
+    req: BulkCategoryRequest,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Remove one category from multiple items across all Clover locations.
+
+    The inverse of bulk-assign-category: it only detaches the named category and
+    leaves the item's other categories intact, so a batch of mis-tagged products
+    (e.g. concentrates that also carry "Edibles") can be cleaned up at once.
+    """
+    locations = await _get_locations(db)
+    if not locations:
+        raise HTTPException(status_code=400, detail="No locations configured")
+
+    target = (req.category_name or "").strip().lower()
+    if not target:
+        raise HTTPException(status_code=400, detail="category_name is required")
+
+    results: list[dict] = []
+    total_removed = 0
+    sku_set = set(req.skus)
+
+    for loc in locations:
+        loc_id, loc_name, merchant_id, api_token = loc[0], loc[1], loc[2], loc[3]
+        try:
+            client = CloverClient(merchant_id, api_token)
+            all_items_data = await client.get_items(expand="categories")
+            all_items = all_items_data.get("elements", [])
+
+            removed_count = 0
+            for item in all_items:
+                if item.get("sku") not in sku_set and item.get("id") not in sku_set:
+                    continue
+                for c in item.get("categories", {}).get("elements", []):
+                    if c.get("id") and c.get("name", "").lower() == target:
+                        try:
+                            await client.unassign_category(item["id"], c["id"])
+                            removed_count += 1
+                        except Exception:
+                            pass  # skip individual failures
+
+            total_removed += removed_count
+            results.append({"location": loc_name, "removed": removed_count, "status": "ok"})
+        except Exception as e:
+            results.append({"location": loc_name, "removed": 0, "status": "error", "error": str(e)})
+
+    await _invalidate_cache()
+    return {"category": req.category_name, "total_removed": total_removed, "results": results}
 
 
 async def _set_consolidated_stock(client, matching: list[dict], quantity) -> None:
