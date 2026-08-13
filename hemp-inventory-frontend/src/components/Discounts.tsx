@@ -137,6 +137,7 @@ export default function Discounts() {
   const [usageLoading, setUsageLoading] = useState(false);
   const [usageTotalFromPromo, setUsageTotalFromPromo] = useState<number>(0);
   // Edit form
+  const [editCode, setEditCode] = useState("");
   const [editDiscountType, setEditDiscountType] = useState<"percent" | "amount">("percent");
   const [editDiscountValue, setEditDiscountValue] = useState("");
   const [editSingleUse, setEditSingleUse] = useState(false);
@@ -378,6 +379,7 @@ export default function Discounts() {
 
   const startEdit = (promo: PromoCode) => {
     setEditingId(promo.id);
+    setEditCode(promo.is_direct_discount && promo.code.startsWith("DIRECT-") ? "" : promo.code);
     if (promo.discount_pct > 0) { setEditDiscountType("percent"); setEditDiscountValue(String(Math.round(promo.discount_pct * 100))); }
     else { setEditDiscountType("amount"); setEditDiscountValue(String((promo.discount_amount / 100).toFixed(2))); }
     setEditSingleUse(promo.single_use);
@@ -398,6 +400,7 @@ export default function Discounts() {
     setError("");
     try {
       await updatePromo(promoId, {
+        ...(editCode.trim() ? { code: editCode.trim() } : {}),
         discount_pct: editDiscountType === "percent" ? val / 100 : 0,
         discount_amount: editDiscountType === "amount" ? Math.round(val * 100) : 0,
         single_use: editSingleUse,
@@ -413,7 +416,10 @@ export default function Discounts() {
       });
       setEditingId(null); setSuccess("Discount updated!");
       setTimeout(() => setSuccess(""), 3000); loadPromos();
-    } catch { setError("Failed to update discount"); }
+    } catch (err) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setError(detail || "Failed to update discount");
+    }
   };
 
   const handleToggleActive = async (promo: PromoCode) => {
@@ -911,6 +917,15 @@ export default function Discounts() {
                     </div>
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <div>
+                      <label className="text-sm font-medium text-gray-700 block mb-1">
+                        {promo.is_direct_discount ? "Discount Name" : "Promo Code"}
+                      </label>
+                      <input type="text" value={editCode}
+                        onChange={(e) => setEditCode(promo.is_direct_discount ? e.target.value : e.target.value.toUpperCase())}
+                        placeholder={promo.is_direct_discount ? "e.g. Military Discount" : "e.g. SUMMER20"}
+                        className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm" />
+                    </div>
                     <div>
                       <label className="text-sm font-medium text-gray-700 block mb-1">Discount</label>
                       <div className="flex gap-1">

@@ -1494,8 +1494,9 @@ async def create_promo(body: PromoCreateRequest, db: aiosqlite.Connection = Depe
     """Admin: Create a new promo code or direct discount."""
     if body.is_direct_discount:
         if body.code.strip():
-            # User provided a custom name for the direct discount
-            code = body.code.strip().upper()
+            # User provided a custom name for the direct discount; it's only ever
+            # displayed, never typed by a shopper, so keep the capitalization.
+            code = body.code.strip()
         else:
             # Auto-generate an internal code for direct discounts
             import uuid
@@ -1566,6 +1567,7 @@ async def create_promo(body: PromoCreateRequest, db: aiosqlite.Connection = Depe
 
 
 class PromoUpdateRequest(BaseModel):
+    code: Optional[str] = None
     discount_pct: Optional[float] = None
     discount_amount: Optional[int] = None
     single_use: Optional[bool] = None
@@ -1586,6 +1588,33 @@ async def update_promo(promo_id: int, body: PromoUpdateRequest, db: aiosqlite.Co
     """Admin: Update an existing promo code."""
     updates = []
     params = []
+
+    cursor = await db.execute(
+        "SELECT code, is_direct_discount FROM promo_codes WHERE id = ?", (promo_id,)
+    )
+    current = await cursor.fetchone()
+    if not current:
+        raise HTTPException(status_code=404, detail="Discount not found")
+
+    renamed = False
+    if body.code is not None:
+        # Promo codes are the string a shopper types, so they stay uppercase;
+        # a direct discount's code is only a display name, so keep it as typed.
+        new_code = body.code.strip()
+        if not current["is_direct_discount"]:
+            new_code = new_code.upper()
+        if not new_code:
+            raise HTTPException(status_code=400, detail="Name is required")
+        if new_code != current["code"]:
+            cursor = await db.execute(
+                "SELECT id FROM promo_codes WHERE code = ? AND id != ?", (new_code, promo_id)
+            )
+            if await cursor.fetchone():
+                raise HTTPException(status_code=400, detail=f"'{new_code}' is already in use")
+            updates.append("code = ?")
+            params.append(new_code)
+            renamed = True
+
     if body.discount_pct is not None:
         updates.append("discount_pct = ?")
         params.append(body.discount_pct)
@@ -1633,11 +1662,12 @@ async def update_promo(promo_id: int, body: PromoUpdateRequest, db: aiosqlite.Co
         await db.commit()
 
     # Sync to all Clover POS locations (non-blocking: errors logged, don't fail response)
-    if body.sync_to_clover is True:
+    # A rename also has to be pushed, or the register keeps showing the old name.
+    if body.sync_to_clover is True or renamed:
         try:
             cursor = await db.execute("SELECT * FROM promo_codes WHERE id = ?", (promo_id,))
             promo = await cursor.fetchone()
-            if promo:
+            if promo and (body.sync_to_clover is True or promo["sync_to_clover"]):
                 pct_val = body.discount_pct if body.discount_pct is not None else promo["discount_pct"]
                 amt_val = body.discount_amount if body.discount_amount is not None else promo["discount_amount"]
                 pct = int(round(pct_val * 100)) if pct_val > 0 else 0
@@ -1657,7 +1687,7 @@ async def update_promo(promo_id: int, body: PromoUpdateRequest, db: aiosqlite.Co
                 )
         except Exception as e:
             print(f"[promo] Clover sync failed: {e}")
-    elif body.sync_to_clover is False:
+    if body.sync_to_clover is False:
         # Unsync from Clover: delete from all locations
         try:
             await _delete_discount_from_all_locations(db, promo_id, "promo")

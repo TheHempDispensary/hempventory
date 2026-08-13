@@ -618,6 +618,7 @@ export const createPromo = (data: {
 }) => api.post("/api/ecommerce/promos", data);
 
 export const updatePromo = (promoId: number, data: {
+  code?: string;
   discount_pct?: number;
   discount_amount?: number;
   single_use?: boolean;
