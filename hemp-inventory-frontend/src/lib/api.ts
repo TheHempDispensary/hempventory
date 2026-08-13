@@ -296,6 +296,8 @@ export const bulkImportLoyaltyCustomers = () => api.post("/api/loyalty/bulk-impo
 
 export const pushLoyaltyCustomersToClover = () => api.post("/api/loyalty/push-to-clover");
 
+export const pushLoyaltyBalancesToClover = () => api.post("/api/loyalty/push-balances");
+
 export const getLoyaltySyncStatus = () => api.get("/api/loyalty/sync-status");
 
 export const updateLoyaltySettings = (data: {

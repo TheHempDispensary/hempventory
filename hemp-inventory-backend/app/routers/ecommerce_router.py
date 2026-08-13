@@ -18,7 +18,7 @@ from email.mime.multipart import MIMEMultipart
 
 from app.database import get_db, DB_PATH
 from app.clover_client import CloverClient
-from app.routers.loyalty_router import _do_signup
+from app.routers.loyalty_router import _do_signup, _sync_balance_to_clover_quietly
 from app import leaflife_orders
 
 STORE_EMAIL = "Support@TheHempDispensary.com"
@@ -2814,6 +2814,7 @@ async def create_order(
                     (loyalty_customer_id, order.loyalty_reward_id, points_to_deduct, loyalty_loc),
                 )
                 await db.commit()
+                await _sync_balance_to_clover_quietly(db, loyalty_customer_id)
                 print(f"[order] Loyalty points deducted: customer_id={loyalty_customer_id} points={points_to_deduct} reward='{reward_name}' order={order_number}")
         except Exception as loyalty_err:
             print(f"[order] WARNING: Failed to deduct loyalty points for {order_number}: {loyalty_err}")
@@ -3203,6 +3204,7 @@ async def _award_loyalty_points_for_order(
              str(order_id), loc_name),
         )
         await db.commit()
+        await _sync_balance_to_clover_quietly(db, customer_id)
         print(f"[loyalty-award] Awarded {points_to_award} pts to customer {customer_id} for {order_number} (${order_dollars:.2f})")
     except Exception as e:
         print(f"[loyalty-award] Failed to award points for {order_number}: {e}")
