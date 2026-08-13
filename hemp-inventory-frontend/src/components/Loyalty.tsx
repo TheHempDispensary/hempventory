@@ -20,6 +20,7 @@ import {
   bulkImportLoyaltyCustomers,
   pushLoyaltyCustomersToClover,
 } from "../lib/api";
+import { formatEtDate, formatEtDateTime } from "../lib/utils";
 import {
   Search, Plus, Gift, Star, Users, TrendingUp, Award, Settings,
   X, ChevronRight, Minus, Trash2, Edit3, Save, Phone, Mail, Calendar,
@@ -137,6 +138,7 @@ export default function Loyalty() {
 
   // Order sync state
   const [syncing, setSyncing] = useState(false);
+  const [lookbackDays, setLookbackDays] = useState(30);
   const [importing, setImporting] = useState(false);
   const [pushing, setPushing] = useState(false);
   const [syncStatus, setSyncStatus] = useState<{
@@ -203,10 +205,10 @@ export default function Loyalty() {
   const handleSyncOrders = async () => {
     setSyncing(true);
     try {
-      const resp = await syncLoyaltyOrders();
+      const resp = await syncLoyaltyOrders(lookbackDays);
       const data = resp.data;
       if (data.orders_processed > 0) {
-        showToast("success", `Synced ${data.orders_processed} orders, awarded ${data.points_awarded} points!`);
+        showToast("success", `Synced ${data.orders_processed} orders from the last ${data.lookback_days} days, awarded ${data.points_awarded} points!`);
       } else {
         showToast("success", `No new orders to sync (${data.orders_skipped} already synced, ${data.orders_no_match} no customer match)`);
       }
@@ -265,7 +267,7 @@ export default function Loyalty() {
     try {
       await resetLoyaltySync();
       showToast("success", "Sync history cleared. Re-syncing all orders...");
-      const resp = await syncLoyaltyOrders();
+      const resp = await syncLoyaltyOrders(lookbackDays);
       const data = resp.data;
       if (data.orders_processed > 0) {
         showToast("success", `Re-synced ${data.orders_processed} orders, awarded ${data.points_awarded} points!`);
@@ -542,7 +544,7 @@ export default function Loyalty() {
                   <h3 className="font-semibold text-gray-900">POS Order Sync</h3>
                   <p className="text-xs text-gray-500">
                     {syncStatus?.last_sync
-                      ? `Last synced: ${new Date(syncStatus.last_sync).toLocaleString("en-US", { timeZone: "America/New_York" })}`
+                      ? `Last synced: ${formatEtDateTime(syncStatus.last_sync)}`
                       : "Never synced — click to sync POS orders and auto-award loyalty points"}
                   </p>
                 </div>
@@ -554,6 +556,19 @@ export default function Loyalty() {
                     <span className="text-gray-400 ml-1">from {syncStatus.total_orders_awarded} orders</span>
                   </div>
                 )}
+                <label className="flex items-center gap-1 text-xs text-gray-500">
+                  Last
+                  <input
+                    type="number"
+                    min={1}
+                    max={400}
+                    value={lookbackDays}
+                    onChange={(e) => setLookbackDays(Math.min(400, Math.max(1, Number(e.target.value) || 1)))}
+                    className="w-16 px-2 py-1 border border-gray-300 rounded-lg text-xs"
+                    title="How many days of POS orders to scan — widen this to recover older purchases"
+                  />
+                  days
+                </label>
                 <button
                   onClick={handleResetAndResync}
                   disabled={syncing}
@@ -1068,7 +1083,7 @@ function CustomerDetail({
               ) : (
                 <h2 className="text-xl font-bold text-gray-900">{customer.first_name} {customer.last_name}</h2>
               )}
-              <p className="text-sm text-gray-500">Member since {new Date(customer.created_at).toLocaleDateString("en-US", { timeZone: "America/New_York" })}</p>
+              <p className="text-sm text-gray-500">Member since {formatEtDate(customer.created_at)}</p>
             </div>
           </div>
           <div className="flex gap-2">
@@ -1155,7 +1170,7 @@ function CustomerDetail({
             <div key={tx.id} className="px-5 py-3 flex items-center justify-between">
               <div>
                 <p className="text-sm text-gray-900">{tx.description}</p>
-                <p className="text-xs text-gray-400">{new Date(tx.created_at).toLocaleString("en-US", { timeZone: "America/New_York" })}{tx.location_name ? ` • ${tx.location_name}` : ""}</p>
+                <p className="text-xs text-gray-400">{formatEtDateTime(tx.created_at)}{tx.location_name ? ` • ${tx.location_name}` : ""}</p>
               </div>
               <span className={`text-sm font-semibold ${tx.points > 0 ? "text-green-600" : "text-red-500"}`}>
                 {tx.points > 0 ? "+" : ""}{tx.points}

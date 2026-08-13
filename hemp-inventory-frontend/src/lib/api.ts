@@ -289,7 +289,8 @@ export const deleteLoyaltyReward = (id: number) =>
 
 export const getLoyaltySettings = () => api.get("/api/loyalty/settings");
 
-export const syncLoyaltyOrders = () => api.post("/api/loyalty/sync-orders");
+export const syncLoyaltyOrders = (lookbackDays?: number) =>
+  api.post("/api/loyalty/sync-orders", null, lookbackDays ? { params: { lookback_days: lookbackDays } } : undefined);
 
 export const bulkImportLoyaltyCustomers = () => api.post("/api/loyalty/bulk-import");
 

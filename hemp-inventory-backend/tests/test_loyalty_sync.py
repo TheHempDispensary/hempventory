@@ -7,6 +7,7 @@ Three failure modes are locked in here: online signups that never reached Clover
 """
 import os
 import tempfile
+import time
 
 os.environ.setdefault("DB_PATH", os.path.join(tempfile.gettempdir(), "thd_loyalty_sync_test.db"))
 
@@ -47,6 +48,7 @@ class FakeClover:
     created: list = []
     customers: list = []
     orders: list = []
+    order_filters: list = []
 
     def __init__(self, merchant_id, api_token):
         self.merchant_id = merchant_id
@@ -64,6 +66,7 @@ class FakeClover:
         assert any(f.startswith("createdTime>=") for f in (filters or [])), (
             "sync must bound the fetch by time so it can page safely"
         )
+        FakeClover.order_filters.append(list(filters or []))
         return {"elements": FakeClover.orders[offset:offset + limit]}
 
 
@@ -72,6 +75,7 @@ def fake_clover(monkeypatch):
     FakeClover.created = []
     FakeClover.customers = []
     FakeClover.orders = []
+    FakeClover.order_filters = []
     monkeypatch.setattr(lr, "CloverClient", FakeClover)
     return FakeClover
 
@@ -169,6 +173,94 @@ async def test_awarded_order_is_never_awarded_twice(db):
 
     cur = await db.execute("SELECT points_balance FROM loyalty_customers WHERE clover_customer_id = 'CLV_A'")
     assert (await cur.fetchone())[0] == 50
+
+
+async def test_name_match_ignores_staff_annotations(db):
+    # Staff tag the loyalty record "Jaime Crews (Military)"; the register only has
+    # "Jaime Crews", and that mismatch cost the member every in-store purchase.
+    await db.execute(
+        """INSERT INTO loyalty_customers (first_name, last_name, phone, points_balance, lifetime_points)
+           VALUES ('Jaime', 'Crews (Military)', '', 0, 0)"""
+    )
+    await db.commit()
+    FakeClover.customers = [{"id": "CLV_J", "firstName": "Jaime", "lastName": "Crews"}]
+    FakeClover.orders = [_order("O_NAME", 2300, "CLV_J")]
+
+    result = await lr._do_sync_orders(db)
+
+    assert result["orders_processed"] == 1
+    cur = await db.execute("SELECT points_balance FROM loyalty_customers WHERE first_name = 'Jaime'")
+    assert (await cur.fetchone())[0] == 23
+
+
+async def test_order_matches_on_email_when_phone_and_name_differ(db):
+    await db.execute(
+        """INSERT INTO loyalty_customers (first_name, last_name, phone, email, points_balance, lifetime_points)
+           VALUES ('Augusta', 'Byron', '3865550111', 'ada@example.com', 0, 0)"""
+    )
+    await db.commit()
+    FakeClover.customers = [
+        {"id": "CLV_E", "firstName": "Ada", "lastName": "Lovelace",
+         "emailAddresses": {"elements": [{"emailAddress": "Ada@Example.com"}]}}
+    ]
+    FakeClover.orders = [_order("O_EMAIL", 1000, "CLV_E")]
+
+    assert (await lr._do_sync_orders(db))["orders_processed"] == 1
+
+
+async def test_lookback_window_can_be_widened(db):
+    await _add_customer(db, "Ada", "3865550101", clover_id="CLV_A")
+    FakeClover.orders = [_order("O1", 1000, "CLV_A")]
+
+    result = await lr._do_sync_orders(db, lookback_days=180)
+
+    assert result["lookback_days"] == 180
+    start_ms = int(
+        next(f for f in FakeClover.order_filters[0] if f.startswith("createdTime>=")).split(">=")[1]
+    )
+    days_back = (time.time() * 1000 - start_ms) / 86_400_000
+    assert 179 < days_back < 181, "purchases older than the default window must be reachable"
+
+
+async def test_push_covers_a_location_the_member_is_missing_from(db):
+    # Linked at West only, so the East register still can't find them.
+    await db.execute(
+        "INSERT INTO locations (name, merchant_id, api_token) VALUES ('East', 'MERCH_E', 'tok')"
+    )
+    customer_id = await _add_customer(db, "Ada", "3865550101", clover_id="CLV_W")
+    await db.execute(
+        """INSERT INTO loyalty_clover_id_map (loyalty_customer_id, clover_customer_id, merchant_id, location_name)
+           VALUES (?, 'CLV_W', 'MERCH_W', 'West')""",
+        (customer_id,),
+    )
+    await db.commit()
+
+    result = await lr.push_customers_to_clover(limit=200, user={}, db=db)
+
+    assert (result["pushed"], result["remaining"]) == (1, 0)
+    cur = await db.execute(
+        "SELECT merchant_id FROM loyalty_clover_id_map WHERE loyalty_customer_id = ? ORDER BY merchant_id",
+        (customer_id,),
+    )
+    assert [r[0] for r in await cur.fetchall()] == ["MERCH_E", "MERCH_W"]
+
+
+async def test_push_links_an_existing_clover_record_instead_of_duplicating(db):
+    customer_id = await _add_customer(db, "Ada", "3865550101")
+    FakeClover.customers = [
+        {"id": "CLV_EXISTING", "firstName": "Ada", "lastName": "Tester",
+         "phoneNumbers": {"elements": [{"phoneNumber": "(386) 555-0101"}]}}
+    ]
+
+    result = await lr.push_customers_to_clover(limit=200, user={}, db=db)
+
+    assert result["pushed"] == 1
+    assert FakeClover.created == [], "the register already knows this number"
+    cur = await db.execute(
+        "SELECT clover_customer_id FROM loyalty_clover_id_map WHERE loyalty_customer_id = ?",
+        (customer_id,),
+    )
+    assert [r[0] for r in await cur.fetchall()] == ["CLV_EXISTING"]
 
 
 async def test_lookup_matches_email_regardless_of_case(db):
