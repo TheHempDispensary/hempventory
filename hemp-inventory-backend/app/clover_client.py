@@ -263,6 +263,22 @@ class CloverClient:
             )
             return resp.json()
 
+    async def update_customer_note(self, customer_id: str, note: str) -> dict:
+        """Set the note on a customer record, shown on the register's customer screen.
+
+        Clover's own Rewards points are per-merchant and aren't writable through
+        the API, so the note is how a budtender sees the real (cross-store)
+        HempVentory balance at the POS.
+        """
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await self._request_with_retry(
+                client, "post",
+                f"{self.base_url}/customers/{customer_id}/metadata",
+                headers=self._headers(),
+                json={"note": note},
+            )
+            return resp.json()
+
     async def get_refunds_in_range(self, start_ms: int, end_ms: int, limit: int = 100) -> dict:
         """Get refund records created within a time range from Clover's refunds endpoint.
 

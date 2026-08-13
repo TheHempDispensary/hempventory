@@ -5,6 +5,8 @@ import aiosqlite
 import asyncio
 import math
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from app.auth import get_current_user
 from app.database import get_db
@@ -74,6 +76,9 @@ class LoyaltySettingsUpdate(BaseModel):
 # SQL expression that strips common separators from a stored phone number so it
 # can be compared against a digits-only value regardless of how it was entered.
 _PHONE_DIGITS_SQL = "REPLACE(REPLACE(REPLACE(REPLACE(phone, '-', ''), ' ', ''), '(', ''), ')', '')"
+
+# Both stores are in Florida; staff read every timestamp as Eastern.
+_EASTERN = ZoneInfo("America/New_York")
 
 
 def _normalize_phone(raw: Optional[str]) -> str:
@@ -170,6 +175,58 @@ async def _push_customer_to_clover(
         except Exception as e:
             print(f"[loyalty-clover-push] Failed to create customer {customer_id} at {loc_name}: {e}")
     return pushed
+
+
+async def _sync_balance_to_clover(db: aiosqlite.Connection, customer_id: int) -> list[str]:
+    """Write the member's HempVentory balance onto their Clover customer record.
+
+    Clover Rewards keeps its own per-merchant point count (East and West disagree
+    with each other and with HempVentory) and the Platform API can't write it, so
+    the customer note — visible on the register's customer screen — is where a
+    budtender can read the one true cross-store balance. Returns the locations updated.
+    """
+    cursor = await db.execute(
+        "SELECT points_balance FROM loyalty_customers WHERE id = ?",
+        (customer_id,),
+    )
+    customer = await cursor.fetchone()
+    if not customer:
+        return []
+
+    settings = await _get_settings(db)
+    program = settings.get("program_name") or "HempVentory Rewards"
+    stamp = datetime.now(_EASTERN).strftime("%-m/%-d/%y %-I:%M %p ET")
+    note = (
+        f"{program}: {customer[0]:,} points available "
+        f"(all stores + online, as of {stamp}). "
+        "This is the balance to use — Clover's own Rewards count is per-store and out of date."
+    )
+
+    cursor = await db.execute(
+        """SELECT m.clover_customer_id, m.merchant_id, l.name, l.api_token
+           FROM loyalty_clover_id_map m
+           JOIN locations l ON l.merchant_id = m.merchant_id
+           WHERE m.loyalty_customer_id = ?""",
+        (customer_id,),
+    )
+    updated: list[str] = []
+    for clover_customer_id, merchant_id, loc_name, api_token in await cursor.fetchall():
+        try:
+            await CloverClient(merchant_id, api_token).update_customer_note(
+                clover_customer_id, note
+            )
+            updated.append(loc_name)
+        except Exception as e:
+            print(f"[loyalty-balance-note] {customer_id} at {loc_name} failed: {e}")
+    return updated
+
+
+async def _sync_balance_to_clover_quietly(db: aiosqlite.Connection, customer_id: int) -> None:
+    """Best-effort balance push: a register that's unreachable must not fail the sale."""
+    try:
+        await _sync_balance_to_clover(db, customer_id)
+    except Exception as e:
+        print(f"[loyalty-balance-note] Could not update customer {customer_id}: {e}")
 
 
 async def _get_settings(db: aiosqlite.Connection) -> dict:
@@ -490,6 +547,7 @@ async def award_points(
 
     cursor = await db.execute("SELECT points_balance FROM loyalty_customers WHERE id = ?", (customer_id,))
     balance = (await cursor.fetchone())[0]
+    await _sync_balance_to_clover_quietly(db, customer_id)
     return {"points_balance": balance, "points_awarded": data.points}
 
 
@@ -526,6 +584,7 @@ async def deduct_points(
 
     cursor = await db.execute("SELECT points_balance FROM loyalty_customers WHERE id = ?", (customer_id,))
     balance = (await cursor.fetchone())[0]
+    await _sync_balance_to_clover_quietly(db, customer_id)
     return {"points_balance": balance, "points_deducted": data.points}
 
 
@@ -577,6 +636,7 @@ async def redeem_reward(
 
     cursor = await db.execute("SELECT points_balance FROM loyalty_customers WHERE id = ?", (customer_id,))
     balance = (await cursor.fetchone())[0]
+    await _sync_balance_to_clover_quietly(db, customer_id)
     return {
         "points_balance": balance,
         "reward_redeemed": reward[1],
@@ -1197,6 +1257,7 @@ async def _do_sync_orders(
     total_no_match = 0
     total_retried = 0
     details: list[dict] = []
+    credited_customers: set[int] = set()
 
     for loc in locations:
         loc_name, merchant_id, api_token = loc[1], loc[2], loc[3]
@@ -1343,6 +1404,7 @@ async def _do_sync_orders(
 
                 total_processed += 1
                 total_points_awarded += points_to_award
+                credited_customers.add(matched_customer["id"])
                 if is_retry:
                     total_retried += 1
                 details.append({
@@ -1363,9 +1425,15 @@ async def _do_sync_orders(
         await asyncio.sleep(2)
 
     await db.commit()
+
+    # Refresh the POS-visible balance so the register shows the new total.
+    for credited_id in credited_customers:
+        await _sync_balance_to_clover_quietly(db, credited_id)
+
     return {
         "status": "done",
         "lookback_days": lookback_days,
+        "balances_pushed": len(credited_customers),
         "orders_processed": total_processed,
         "points_awarded": total_points_awarded,
         "orders_skipped": total_skipped,
@@ -1384,6 +1452,41 @@ async def sync_clover_orders(
     """Poll Clover orders and award loyalty points for matched customers.
     Matches on the order's Clover customer id, then phone, then name, then email."""
     return await _do_sync_orders(db, lookback_days=lookback_days)
+
+
+@router.post("/push-balances")
+async def push_balances_to_clover(
+    limit: int = Query(500, ge=1, le=5000),
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Write every member's current balance onto their Clover customer record.
+
+    Use after a backfill so budtenders see the corrected totals right away
+    instead of waiting for each member's next purchase.
+    """
+    cursor = await db.execute(
+        """SELECT DISTINCT loyalty_customer_id FROM loyalty_clover_id_map
+           ORDER BY loyalty_customer_id ASC LIMIT ?""",
+        (limit,),
+    )
+    members = [row[0] for row in await cursor.fetchall()]
+
+    updated = 0
+    failed = 0
+    for member_id in members:
+        if await _sync_balance_to_clover(db, member_id):
+            updated += 1
+        else:
+            failed += 1
+        await asyncio.sleep(0.2)  # stay under Clover's rate limit
+
+    return {
+        "status": "done",
+        "members_considered": len(members),
+        "members_updated": updated,
+        "members_failed": failed,
+    }
 
 
 @router.get("/sync-status")

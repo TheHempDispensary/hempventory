@@ -19,6 +19,7 @@ import {
   resetLoyaltySync,
   bulkImportLoyaltyCustomers,
   pushLoyaltyCustomersToClover,
+  pushLoyaltyBalancesToClover,
 } from "../lib/api";
 import { formatEtDate, formatEtDateTime } from "../lib/utils";
 import {
@@ -141,6 +142,7 @@ export default function Loyalty() {
   const [lookbackDays, setLookbackDays] = useState(30);
   const [importing, setImporting] = useState(false);
   const [pushing, setPushing] = useState(false);
+  const [pushingBalances, setPushingBalances] = useState(false);
   const [syncStatus, setSyncStatus] = useState<{
     total_orders_synced: number;
     total_orders_awarded: number;
@@ -259,6 +261,24 @@ export default function Loyalty() {
       showToast("error", "Failed to send members to Clover");
     } finally {
       setPushing(false);
+    }
+  };
+
+  const handlePushBalances = async () => {
+    setPushingBalances(true);
+    try {
+      const resp = await pushLoyaltyBalancesToClover();
+      const data = resp.data;
+      showToast(
+        "success",
+        `Point balances now showing on the POS for ${data.members_updated} member${data.members_updated === 1 ? "" : "s"}` +
+          (data.members_failed > 0 ? ` (${data.members_failed} failed)` : ""),
+      );
+    } catch (err) {
+      console.error("Failed to push balances to Clover:", err);
+      showToast("error", "Failed to send point balances to Clover");
+    } finally {
+      setPushingBalances(false);
     }
   };
 
@@ -699,6 +719,15 @@ export default function Loyalty() {
             >
               <Download className={`w-4 h-4 ${pushing ? "animate-spin" : ""}`} />
               {pushing ? "Sending..." : "Send to Clover"}
+            </button>
+            <button
+              onClick={handlePushBalances}
+              disabled={pushingBalances}
+              className="flex items-center gap-2 px-4 py-2.5 border border-indigo-300 bg-indigo-50 text-indigo-700 rounded-lg text-sm font-medium hover:bg-indigo-100 disabled:opacity-50 transition-colors"
+              title="Write each member's current point balance onto their Clover record so budtenders see it at the register"
+            >
+              <RefreshCw className={`w-4 h-4 ${pushingBalances ? "animate-spin" : ""}`} />
+              {pushingBalances ? "Updating..." : "Show Points on POS"}
             </button>
             <button
               onClick={() => setShowAddCustomer(true)}
