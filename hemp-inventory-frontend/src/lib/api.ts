@@ -298,6 +298,9 @@ export const pushLoyaltyCustomersToClover = () => api.post("/api/loyalty/push-to
 
 export const pushLoyaltyBalancesToClover = () => api.post("/api/loyalty/push-balances");
 
+export const pushLoyaltyRewardDiscounts = () =>
+  api.post("/api/loyalty/push-reward-discounts");
+
 export const getLoyaltySyncStatus = () => api.get("/api/loyalty/sync-status");
 
 export const updateLoyaltySettings = (data: {

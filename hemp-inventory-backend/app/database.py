@@ -247,6 +247,15 @@ async def init_db():
             )
         """)
 
+        # Points taken off for a reward the budtender applied on the register's
+        # ticket, tracked separately from the points the order earned.
+        try:
+            await db.execute(
+                "ALTER TABLE loyalty_synced_orders ADD COLUMN points_redeemed INTEGER DEFAULT 0"
+            )
+        except Exception:
+            pass
+
         # Migration: add clover_customer_id column if missing
         try:
             await db.execute("ALTER TABLE loyalty_customers ADD COLUMN clover_customer_id TEXT")
@@ -862,8 +871,16 @@ async def init_db():
                     ("signup_bonus", "10"),
                     ("birthday_bonus", "25"),
                     ("program_name", "Hemp Rewards"),
+                    ("redemption_discount_names", "Rewards,Loyalty,Smoken Token"),
                 ]
             )
+
+        # Names of the register discounts that mean "member spent points". Seeded
+        # for databases that predate register-side redemption.
+        await db.execute(
+            """INSERT OR IGNORE INTO loyalty_settings (key, value)
+               VALUES ('redemption_discount_names', 'Rewards,Loyalty,Smoken Token')"""
+        )
 
         # Seed default reward if empty
         cursor = await db.execute("SELECT COUNT(*) FROM loyalty_rewards")
