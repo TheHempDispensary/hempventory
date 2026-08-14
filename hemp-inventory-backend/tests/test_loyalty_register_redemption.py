@@ -3,6 +3,8 @@
 Staff had no way to redeem on the Clover ticket: they applied the "Rewards"
 discount, the customer walked out with the money off, and the balance stayed put.
 """
+import ast
+import inspect
 import os
 import tempfile
 
@@ -12,7 +14,10 @@ os.environ.setdefault("DB_PATH", os.path.join(tempfile.gettempdir(), "test_reg_r
 
 import aiosqlite
 
+from app import clover_client
+from app.clover_client import CloverClient
 from app.routers.loyalty_router import (
+    push_reward_discounts,
     _order_discounts,
     _redeem_pos_discounts,
     _redemption_discount_names,
@@ -210,6 +215,33 @@ async def test_an_order_without_a_reward_discount_leaves_points_alone(db):
 
     assert spent == 0
     assert await _balance(db) == (2311, 0)
+
+
+def test_clover_client_has_no_shadowed_methods():
+    """A second definition silently replaces the first.
+
+    A duplicate `create_discount` took the reward's cents as `percentage`, so
+    Clover rejected every reward button with "percentage should be between zero
+    and hundred".
+    """
+    tree = ast.parse(inspect.getsource(clover_client))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        names = [
+            child.name for child in node.body
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        duplicates = {name for name in names if names.count(name) > 1}
+        assert not duplicates, f"{node.name} defines {duplicates} more than once"
+
+
+def test_reward_discounts_are_created_as_a_dollar_amount():
+    """`create_discount` must be given the reward value as `amount`, not `percentage`."""
+    params = inspect.signature(CloverClient.create_discount).parameters
+    assert "amount" in params and "percentage" in params
+    # Both are keyword-defaulted, so a positional call lands on `percentage`.
+    assert "amount=cents" in inspect.getsource(push_reward_discounts)
 
 
 @pytest.mark.asyncio
