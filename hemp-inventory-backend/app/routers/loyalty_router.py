@@ -1177,6 +1177,142 @@ async def _do_bulk_import_customers(db: aiosqlite.Connection) -> dict:
 LOYALTY_ORDER_LOOKBACK_DAYS = 30
 _MAX_ORDERS_PER_LOCATION = 5000
 
+# Register discounts whose name means "the member spent points", used when the
+# setting is missing. Clover's own reward button writes a discount named
+# "Rewards", which is what budtenders have been applying all along.
+_DEFAULT_REDEMPTION_DISCOUNT_NAMES = ("rewards", "loyalty", "smoken token")
+
+
+def _redemption_discount_names(settings: dict) -> tuple[str, ...]:
+    """Lowercased fragments that identify a points-funded register discount."""
+    configured = [
+        fragment.strip().lower()
+        for fragment in (settings.get("redemption_discount_names") or "").split(",")
+        if fragment.strip()
+    ]
+    return tuple(configured) or _DEFAULT_REDEMPTION_DISCOUNT_NAMES
+
+
+def _order_discounts(order: dict) -> list[dict]:
+    """Every discount on a Clover order, whether applied to the whole ticket or a line."""
+    discounts = list((order.get("discounts") or {}).get("elements", []) or [])
+    for line in (order.get("lineItems") or {}).get("elements", []) or []:
+        discounts.extend((line.get("discounts") or {}).get("elements", []) or [])
+    return discounts
+
+
+def _reward_for_discount(
+    discount: dict,
+    rewards: list[dict],
+    name_fragments: tuple[str, ...],
+) -> Optional[dict]:
+    """The reward a register discount paid for, or None when it wasn't points.
+
+    A percentage discount is a sale or a military/employee courtesy, never a
+    reward, so only a fixed dollar amount matching a reward's value counts.
+    """
+    name = (discount.get("name") or "").strip().lower()
+    if not name or not any(fragment in name for fragment in name_fragments):
+        return None
+
+    amount = discount.get("amount")
+    if amount is None:
+        return None
+
+    dollars_off = abs(int(amount)) / 100.0
+    candidates = [
+        reward for reward in rewards
+        if abs(float(reward["reward_value"]) - dollars_off) < 0.005
+    ]
+    if not candidates:
+        return None
+    # Cheapest reward of that value, so a member never overpays for the discount.
+    return min(candidates, key=lambda reward: reward["points_required"])
+
+
+async def _already_redeemed_for_order(
+    db: aiosqlite.Connection,
+    customer_id: int,
+    clover_order_id: str,
+) -> bool:
+    cursor = await db.execute(
+        """SELECT 1 FROM loyalty_transactions
+           WHERE customer_id = ? AND order_id = ? AND type = 'redeem' LIMIT 1""",
+        (customer_id, clover_order_id),
+    )
+    return await cursor.fetchone() is not None
+
+
+async def _redeem_pos_discounts(
+    db: aiosqlite.Connection,
+    customer: dict,
+    order: dict,
+    clover_order_id: str,
+    loc_name: str,
+    rewards: list[dict],
+    name_fragments: tuple[str, ...],
+) -> int:
+    """Spend the points behind reward discounts a budtender applied at the register.
+
+    Redeeming in the dashboard was the only way to take points off, so a member
+    kept the balance they had just spent in store. Returns the points removed.
+    """
+    if not rewards:
+        return 0
+
+    matched = [
+        reward for discount in _order_discounts(order)
+        if (reward := _reward_for_discount(discount, rewards, name_fragments))
+    ]
+    if not matched:
+        return 0
+
+    if await _already_redeemed_for_order(db, customer["id"], clover_order_id):
+        return 0
+
+    cursor = await db.execute(
+        "SELECT points_balance FROM loyalty_customers WHERE id = ?", (customer["id"],)
+    )
+    row = await cursor.fetchone()
+    balance = row[0] if row else 0
+
+    spent = 0
+    for reward in matched:
+        cost = reward["points_required"]
+        if balance < cost:
+            # The discount was already given away at the register; going negative
+            # would only hide that, so leave it for staff to sort out.
+            print(
+                f"[loyalty-orders] {loc_name} order {clover_order_id}: member "
+                f"{customer['id']} redeemed '{reward['name']}' with {balance} pts, "
+                f"needs {cost} — points left alone"
+            )
+            continue
+
+        balance -= cost
+        spent += cost
+        await db.execute(
+            """UPDATE loyalty_customers
+               SET points_balance = points_balance - ?,
+                   lifetime_redeemed = lifetime_redeemed + ?,
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            (cost, cost, customer["id"]),
+        )
+        await db.execute(
+            """INSERT INTO loyalty_transactions
+               (customer_id, type, points, description, order_id, location_name)
+               VALUES (?, 'redeem', ?, ?, ?, ?)""",
+            (customer["id"], -cost,
+             f"Redeemed at register: {reward['name']}", clover_order_id, loc_name),
+        )
+        await db.execute(
+            """INSERT INTO loyalty_redemptions (customer_id, reward_id, points_spent, location_name)
+               VALUES (?, ?, ?, ?)""",
+            (customer["id"], reward["id"], cost, loc_name),
+        )
+    return spent
+
 
 async def _fetch_recent_paid_orders(client: CloverClient, lookback_days: int) -> list:
     """Every paid order in the lookback window, paged.
@@ -1193,7 +1329,7 @@ async def _fetch_recent_paid_orders(client: CloverClient, lookback_days: int) ->
             limit=limit,
             offset=offset,
             filters=["payType!=NULL", f"createdTime>={start_ms}"],
-            expand="lineItems,customers",
+            expand="lineItems,lineItems.discounts,customers,discounts",
         )
         elements = data.get("elements", [])
         orders.extend(elements)
@@ -1213,24 +1349,27 @@ async def _record_synced_order(
     status: str,
     customer_id: Optional[int] = None,
     points_awarded: int = 0,
+    points_redeemed: int = 0,
     is_retry: bool = False,
 ) -> None:
     """Store the outcome for a Clover order, updating the row on a retry."""
     if is_retry:
         await db.execute(
             """UPDATE loyalty_synced_orders
-               SET customer_id = ?, points_awarded = ?, status = ?,
+               SET customer_id = ?, points_awarded = ?, points_redeemed = ?, status = ?,
                    order_total = ?, location_name = ?, synced_at = CURRENT_TIMESTAMP
                WHERE clover_order_id = ? AND location_merchant_id = ?""",
-            (customer_id, points_awarded, status, order_total, loc_name, order_id, merchant_id),
+            (customer_id, points_awarded, points_redeemed, status, order_total,
+             loc_name, order_id, merchant_id),
         )
         return
     await db.execute(
         """INSERT INTO loyalty_synced_orders
            (clover_order_id, location_merchant_id, location_name, order_total,
-            customer_id, points_awarded, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (order_id, merchant_id, loc_name, order_total, customer_id, points_awarded, status),
+            customer_id, points_awarded, points_redeemed, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (order_id, merchant_id, loc_name, order_total, customer_id,
+         points_awarded, points_redeemed, status),
     )
 
 
@@ -1249,6 +1388,16 @@ async def _do_sync_orders(
     """
     settings = await _get_settings(db)
     points_per_dollar = int(settings.get("points_per_dollar", "1"))
+    redemption_names = _redemption_discount_names(settings)
+
+    reward_cursor = await db.execute(
+        """SELECT id, name, points_required, reward_value FROM loyalty_rewards
+           WHERE is_active = 1 AND reward_type = 'discount'"""
+    )
+    active_rewards = [
+        {"id": r[0], "name": r[1], "points_required": r[2], "reward_value": r[3]}
+        for r in await reward_cursor.fetchall()
+    ]
 
     loc_cursor = await db.execute("SELECT id, name, merchant_id, api_token FROM locations")
     locations = await loc_cursor.fetchall()
@@ -1302,6 +1451,7 @@ async def _do_sync_orders(
     total_skipped = 0
     total_no_match = 0
     total_retried = 0
+    total_points_redeemed = 0
     details: list[dict] = []
     credited_customers: set[int] = set()
 
@@ -1438,14 +1588,23 @@ async def _do_sync_orders(
                         total_no_match += 1
                     continue
 
+                points_redeemed = await _redeem_pos_discounts(
+                    db, matched_customer, order, order_id, loc_name,
+                    active_rewards, redemption_names,
+                )
+                total_points_redeemed += points_redeemed
+
                 order_dollars = order_total / 100.0
                 points_to_award = math.floor(order_dollars * points_per_dollar)
                 if points_to_award <= 0:
                     await _record_synced_order(
                         db, order_id, merchant_id, loc_name, order_total, "zero_points",
-                        customer_id=matched_customer["id"], is_retry=is_retry,
+                        customer_id=matched_customer["id"],
+                        points_redeemed=points_redeemed, is_retry=is_retry,
                     )
                     total_skipped += 1
+                    if points_redeemed:
+                        credited_customers.add(matched_customer["id"])
                     continue
 
                 await db.execute(
@@ -1466,7 +1625,7 @@ async def _do_sync_orders(
                 await _record_synced_order(
                     db, order_id, merchant_id, loc_name, order_total, "awarded",
                     customer_id=matched_customer["id"], points_awarded=points_to_award,
-                    is_retry=is_retry,
+                    points_redeemed=points_redeemed, is_retry=is_retry,
                 )
 
                 total_processed += 1
@@ -1480,6 +1639,7 @@ async def _do_sync_orders(
                     "customer": f"{matched_customer['first_name']} {matched_customer.get('last_name', '') or ''}".strip(),
                     "order_total": order_dollars,
                     "points_awarded": points_to_award,
+                    "points_redeemed": points_redeemed,
                     "late_match": is_retry,
                 })
 
@@ -1503,6 +1663,7 @@ async def _do_sync_orders(
         "balances_pushed": len(credited_customers),
         "orders_processed": total_processed,
         "points_awarded": total_points_awarded,
+        "points_redeemed": total_points_redeemed,
         "orders_skipped": total_skipped,
         "orders_no_match": total_no_match,
         "orders_late_matched": total_retried,
@@ -1519,6 +1680,71 @@ async def sync_clover_orders(
     """Poll Clover orders and award loyalty points for matched customers.
     Matches on the order's Clover customer id, then phone, then name, then email."""
     return await _do_sync_orders(db, lookback_days=lookback_days)
+
+
+def _register_discount_name(reward: dict) -> str:
+    """The register button's label. "Rewards" is what the sync watches for."""
+    return f"Rewards ${float(reward['reward_value']):.0f} off ({reward['points_required']} pts)"
+
+
+@router.post("/push-reward-discounts")
+async def push_reward_discounts(
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Give every active reward a discount button at both registers.
+
+    A budtender can only hand over a reward they can tap on the ticket, and the
+    order sync recognises these names, so the points come off automatically.
+    """
+    reward_cursor = await db.execute(
+        """SELECT id, name, points_required, reward_value FROM loyalty_rewards
+           WHERE is_active = 1 AND reward_type = 'discount' ORDER BY points_required"""
+    )
+    rewards = [
+        {"id": r[0], "name": r[1], "points_required": r[2], "reward_value": r[3]}
+        for r in await reward_cursor.fetchall()
+    ]
+
+    redemption_names = _redemption_discount_names(await _get_settings(db))
+
+    loc_cursor = await db.execute("SELECT name, merchant_id, api_token FROM locations")
+    locations = await loc_cursor.fetchall()
+
+    created: list[str] = []
+    existing: list[str] = []
+    errors: list[str] = []
+
+    for loc_name, merchant_id, api_token in locations:
+        try:
+            client = CloverClient(merchant_id, api_token)
+            discounts = (await client.get_discounts()).get("elements", [])
+            # A reward is only covered by a button the sync will recognise: an
+            # unrelated "$10 PREROLL" discount must not stand in for a reward.
+            amounts_present = {
+                abs(int(d["amount"]))
+                for d in discounts
+                if d.get("amount") is not None
+                and any(f in (d.get("name") or "").lower() for f in redemption_names)
+            }
+            for reward in rewards:
+                cents = round(float(reward["reward_value"]) * 100)
+                label = f"{loc_name}: {_register_discount_name(reward)}"
+                if cents in amounts_present:
+                    existing.append(label)
+                    continue
+                await client.create_discount(_register_discount_name(reward), cents)
+                created.append(label)
+                await asyncio.sleep(0.3)
+        except Exception as e:
+            errors.append(f"{loc_name}: {e}")
+
+    return {
+        "status": "done" if not errors else "partial",
+        "created": created,
+        "already_present": existing,
+        "errors": errors,
+    }
 
 
 @router.post("/push-balances")

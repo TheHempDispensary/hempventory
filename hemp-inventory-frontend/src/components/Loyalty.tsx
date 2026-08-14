@@ -20,6 +20,7 @@ import {
   bulkImportLoyaltyCustomers,
   pushLoyaltyCustomersToClover,
   pushLoyaltyBalancesToClover,
+  pushLoyaltyRewardDiscounts,
 } from "../lib/api";
 import { formatEtDate, formatEtDateTime } from "../lib/utils";
 import {
@@ -144,6 +145,7 @@ export default function Loyalty() {
   const [importing, setImporting] = useState(false);
   const [pushing, setPushing] = useState(false);
   const [pushingBalances, setPushingBalances] = useState(false);
+  const [pushingDiscounts, setPushingDiscounts] = useState(false);
   const [syncStatus, setSyncStatus] = useState<{
     total_orders_synced: number;
     total_orders_awarded: number;
@@ -298,6 +300,30 @@ export default function Loyalty() {
       showToast("error", "Failed to send point balances to Clover");
     } finally {
       setPushingBalances(false);
+    }
+  };
+
+  const handlePushRewardDiscounts = async () => {
+    setPushingDiscounts(true);
+    try {
+      const resp = await pushLoyaltyRewardDiscounts();
+      const data = resp.data as {
+        created: string[];
+        already_present: string[];
+        errors: string[];
+      };
+      if (data.errors.length > 0) {
+        showToast("error", `Clover rejected some discounts: ${data.errors.join("; ")}`);
+      } else if (data.created.length > 0) {
+        showToast("success", `Added ${data.created.length} reward button${data.created.length === 1 ? "" : "s"} to the registers`);
+      } else {
+        showToast("success", "Every reward already has a button at the registers");
+      }
+    } catch (err) {
+      console.error("Failed to push reward discounts to Clover:", err);
+      showToast("error", "Failed to add reward buttons to the registers");
+    } finally {
+      setPushingDiscounts(false);
     }
   };
 
@@ -835,10 +861,25 @@ export default function Loyalty() {
         <div className="space-y-4">
           <div className="flex justify-between items-center">
             <h2 className="text-lg font-semibold text-gray-900">Reward Tiers</h2>
-            <button onClick={() => setShowAddReward(true)} className="flex items-center gap-2 px-4 py-2.5 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700">
-              <Plus className="w-4 h-4" /> Add Reward
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={handlePushRewardDiscounts}
+                disabled={pushingDiscounts}
+                className="flex items-center gap-2 px-4 py-2.5 border border-indigo-300 bg-indigo-50 text-indigo-700 rounded-lg text-sm font-medium hover:bg-indigo-100 disabled:opacity-50 transition-colors"
+                title="Add a discount button for each reward at both registers so budtenders can redeem on the ticket"
+              >
+                <RefreshCw className={`w-4 h-4 ${pushingDiscounts ? "animate-spin" : ""}`} />
+                {pushingDiscounts ? "Adding..." : "Add Reward Buttons to Registers"}
+              </button>
+              <button onClick={() => setShowAddReward(true)} className="flex items-center gap-2 px-4 py-2.5 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700">
+                <Plus className="w-4 h-4" /> Add Reward
+              </button>
+            </div>
           </div>
+
+          <p className="text-sm text-gray-500">
+            Budtenders redeem by applying the reward's discount on the Clover ticket — points come off automatically on the next order sync.
+          </p>
 
           <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {rewards.map((r) => (
