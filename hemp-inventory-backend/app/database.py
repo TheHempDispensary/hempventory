@@ -199,9 +199,16 @@ async def init_db():
             ("clover_order_id", "TEXT"),
             ("source", "TEXT DEFAULT 'website'"),
             ("sale_discount", "INTEGER DEFAULT 0"),
+            ("stock_deducted_at", "TIMESTAMP"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE ecommerce_orders ADD COLUMN {col} {coldef}")
+                if col == "stock_deducted_at":
+                    # Orders that predate the column already left the shelf at checkout;
+                    # backfill so re-saving their status never deducts them a second time.
+                    await db.execute(
+                        "UPDATE ecommerce_orders SET stock_deducted_at = COALESCE(created_at, CURRENT_TIMESTAMP)"
+                    )
             except Exception:
                 pass
         await db.execute("""
@@ -216,6 +223,13 @@ async def init_db():
                 FOREIGN KEY (order_id) REFERENCES ecommerce_orders(id)
             )
         """)
+        # Per-line stamp so a retried deduction only writes the lines Clover
+        # never accepted. Existing lines left the shelf at checkout.
+        try:
+            await db.execute("ALTER TABLE ecommerce_order_items ADD COLUMN stock_deducted_at TIMESTAMP")
+            await db.execute("UPDATE ecommerce_order_items SET stock_deducted_at = CURRENT_TIMESTAMP")
+        except Exception:
+            pass
 
         # Loyalty order sync tracking table
         await db.execute("""

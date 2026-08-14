@@ -124,6 +124,7 @@ export default function Loyalty() {
 
   // Rewards
   const [rewards, setRewards] = useState<Reward[]>([]);
+  const [rewardsError, setRewardsError] = useState<string | null>(null);
   const [showAddReward, setShowAddReward] = useState(false);
   const [editingReward, setEditingReward] = useState<Reward | null>(null);
   const [editRewardForm, setEditRewardForm] = useState({ name: "", points_required: "", reward_value: "", description: "" });
@@ -190,10 +191,28 @@ export default function Loyalty() {
     try {
       const resp = await getLoyaltyRewards();
       setRewards(resp.data.rewards);
+      setRewardsError(null);
     } catch (err) {
       console.error("Failed to load rewards:", err);
+      setRewardsError("Couldn't load the reward list. Check the connection and try again.");
     }
   }, []);
+
+  // A stale or failed reward list is why a budtender sees nothing to redeem, so
+  // refetch as the modal opens instead of trusting what loaded at page load.
+  const openRedeemModal = async (customer: LoyaltyCustomer) => {
+    setShowRedeemModal(customer);
+    loadRewards();
+    // The row's balance can be minutes old (points earned at the register since
+    // the list loaded), which would grey out rewards the member can afford.
+    try {
+      const resp = await getLoyaltyCustomer(customer.id);
+      const fresh = resp.data as LoyaltyCustomer;
+      setShowRedeemModal((current) => (current && current.id === fresh.id ? { ...current, ...fresh } : current));
+    } catch (err) {
+      console.error("Failed to refresh customer balance:", err);
+    }
+  };
 
   const loadSyncStatus = useCallback(async () => {
     try {
@@ -764,7 +783,7 @@ export default function Loyalty() {
                     <td className="px-4 py-3">
                       <div className="flex items-center justify-center gap-1">
                         <button onClick={() => setShowPointsModal({ type: "award", customer: c })} className="p-1.5 rounded hover:bg-green-50 text-green-600" title="Award points"><Plus className="w-4 h-4" /></button>
-                        <button onClick={() => setShowRedeemModal(c)} className="p-1.5 rounded hover:bg-purple-50 text-purple-600" title="Redeem reward"><Gift className="w-4 h-4" /></button>
+                        <button onClick={() => openRedeemModal(c)} className="p-1.5 rounded hover:bg-purple-50 text-purple-600" title="Redeem reward"><Gift className="w-4 h-4" /></button>
                       </div>
                     </td>
                   </tr>
@@ -795,7 +814,7 @@ export default function Loyalty() {
           onBack={() => setSelectedCustomer(null)}
           onAward={(c) => setShowPointsModal({ type: "award", customer: c })}
           onDeduct={(c) => setShowPointsModal({ type: "deduct", customer: c })}
-          onRedeem={(c) => setShowRedeemModal(c)}
+          onRedeem={openRedeemModal}
           onDelete={handleDeleteCustomer}
           onUpdate={async (id, data) => {
             try {
@@ -978,7 +997,10 @@ export default function Loyalty() {
               );
             })}
             {rewards.filter(r => r.is_active).length === 0 && (
-              <p className="text-sm text-gray-400 text-center py-4">No active rewards</p>
+              <div className="text-center py-4 space-y-2">
+                <p className="text-sm text-gray-500">{rewardsError || "No active rewards — add one on the Rewards tab."}</p>
+                <button onClick={loadRewards} className="text-sm font-medium text-purple-600 hover:underline">Reload rewards</button>
+              </div>
             )}
           </div>
         </Modal>

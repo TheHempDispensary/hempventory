@@ -115,6 +115,44 @@ def _normalize_name(first: Optional[str], last: Optional[str]) -> str:
     return " ".join("".join(cleaned).split())
 
 
+_PLACEHOLDER_NAMES = ("", "customer", "guest", "unknown")
+
+
+def _is_placeholder_name(first: Optional[str], last: Optional[str]) -> bool:
+    """True when a member has no real name — only the "Customer" stand-in."""
+    return (first or "").strip().lower() in _PLACEHOLDER_NAMES and not (last or "").strip()
+
+
+async def _adopt_real_name(
+    db: aiosqlite.Connection,
+    customer_id: int,
+    stored_first: Optional[str],
+    stored_last: Optional[str],
+    clover_first: Optional[str],
+    clover_last: Optional[str],
+) -> bool:
+    """Replace the "Customer" stand-in with the name Clover knows.
+
+    Members created from a Clover record that carried only a phone number are
+    stored as "Customer"; once the register learns the real name, staff should
+    see it instead of having to retype it.
+    """
+    if not _is_placeholder_name(stored_first, stored_last):
+        return False
+    first = (clover_first or "").strip()
+    last = (clover_last or "").strip()
+    if not first and not last:
+        return False
+    await db.execute(
+        """UPDATE loyalty_customers
+           SET first_name = ?, last_name = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?""",
+        (first or last, last if first else "", customer_id),
+    )
+    print(f"[loyalty] Named member {customer_id} '{f'{first} {last}'.strip()}' from Clover")
+    return True
+
+
 async def _push_customer_to_clover(
     db: aiosqlite.Connection,
     customer_id: int,
@@ -928,10 +966,14 @@ async def bulk_import_clover_customers(
                 if norm_phone in existing_phones:
                     # Still link the Clover ID if not already linked
                     cust_cursor = await db.execute(
-                        "SELECT id FROM loyalty_customers WHERE phone LIKE ?",
+                        "SELECT id, first_name, last_name FROM loyalty_customers WHERE phone LIKE ?",
                         (f"%{norm_phone}%",),
                     )
                     existing_row = await cust_cursor.fetchone()
+                    if existing_row:
+                        await _adopt_real_name(
+                            db, existing_row[0], existing_row[1], existing_row[2], first_name, last_name
+                        )
                     if existing_row and cc_id:
                         try:
                             await db.execute(
@@ -1068,10 +1110,14 @@ async def _do_bulk_import_customers(db: aiosqlite.Connection) -> dict:
 
                 if norm_phone in existing_phones:
                     cust_cursor = await db.execute(
-                        "SELECT id FROM loyalty_customers WHERE phone LIKE ?",
+                        "SELECT id, first_name, last_name FROM loyalty_customers WHERE phone LIKE ?",
                         (f"%{norm_phone}%",),
                     )
                     existing_row = await cust_cursor.fetchone()
+                    if existing_row:
+                        await _adopt_real_name(
+                            db, existing_row[0], existing_row[1], existing_row[2], first_name, last_name
+                        )
                     if existing_row and cc_id:
                         try:
                             await db.execute(
@@ -1269,6 +1315,7 @@ async def _do_sync_orders(
             clover_id_to_phone: dict[str, str] = {}
             clover_id_to_name: dict[str, str] = {}
             clover_id_to_email: dict[str, str] = {}
+            clover_id_to_raw_name: dict[str, tuple[str, str]] = {}
             for cc in clover_cust_data.get("elements", []):
                 cc_id = cc.get("id", "")
                 phone_elements = cc.get("phoneNumbers", {}).get("elements", []) if cc.get("phoneNumbers") else []
@@ -1286,6 +1333,10 @@ async def _do_sync_orders(
                 cc_name = _normalize_name(cc.get("firstName"), cc.get("lastName"))
                 if cc_name:
                     clover_id_to_name[cc_id] = cc_name
+                    clover_id_to_raw_name[cc_id] = (
+                        (cc.get("firstName") or "").strip(),
+                        (cc.get("lastName") or "").strip(),
+                    )
 
             recorded_cursor = await db.execute(
                 "SELECT clover_order_id, status FROM loyalty_synced_orders WHERE location_merchant_id = ?",
@@ -1324,6 +1375,13 @@ async def _do_sync_orders(
 
                     if clover_cust_id and clover_cust_id in clover_id_to_customer:
                         matched_customer = clover_id_to_customer[clover_cust_id]
+                        known_first, known_last = clover_id_to_raw_name.get(clover_cust_id, ("", ""))
+                        if await _adopt_real_name(
+                            db, matched_customer["id"], matched_customer.get("first_name"),
+                            matched_customer.get("last_name"), known_first, known_last,
+                        ):
+                            matched_customer["first_name"] = known_first or known_last
+                            matched_customer["last_name"] = known_last if known_first else ""
                         break
 
                     customer_phone = oc.get("phoneNumber") or oc.get("phone", "")
@@ -1353,6 +1411,15 @@ async def _do_sync_orders(
                                     break
 
                     if matched_customer:
+                        raw_first, raw_last = clover_id_to_raw_name.get(
+                            clover_cust_id, ((oc.get("firstName") or "").strip(), (oc.get("lastName") or "").strip())
+                        )
+                        if await _adopt_real_name(
+                            db, matched_customer["id"], matched_customer.get("first_name"),
+                            matched_customer.get("last_name"), raw_first, raw_last,
+                        ):
+                            matched_customer["first_name"] = raw_first or raw_last
+                            matched_customer["last_name"] = raw_last if raw_first else ""
                         if clover_cust_id:
                             await db.execute(
                                 """INSERT OR IGNORE INTO loyalty_clover_id_map
