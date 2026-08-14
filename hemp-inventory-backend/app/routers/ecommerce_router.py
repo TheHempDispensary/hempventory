@@ -2868,7 +2868,7 @@ async def create_order(
 
     # Deduct stock from correct Clover location based on fulfillment type (non-blocking)
     stock_task = asyncio.create_task(
-        _deduct_stock_for_order(order.items, order.fulfillment_type)
+        _deduct_stock_and_flag(order_id, order.items, order.fulfillment_type)
     )
     _keep_task(stock_task)
     stock_task.add_done_callback(lambda t: _log_task_error(t, "stock_deduct"))
@@ -3053,10 +3053,14 @@ async def _sync_leaflife_order(order: "CreateOrderRequest", order_number: str) -
     return result
 
 
-async def _deduct_stock_for_order(items: List[OrderItem], fulfillment_type: str = "shipping") -> None:
+async def _deduct_stock_for_order(items: List[OrderItem], fulfillment_type: str = "shipping") -> List[bool]:
     """Deduct stock from the correct Clover location based on fulfillment type.
     For pickup orders at East/West, resolves items by SKU/name since the
-    product_id from the website is HQ's Clover item ID which differs per merchant."""
+    product_id from the website is HQ's Clover item ID which differs per merchant.
+
+    Returns one flag per line item — True where Clover accepted the new count —
+    so a retry only touches the lines that never made it through."""
+    written = [False] * len(items)
     try:
         if fulfillment_type == "pickup_west" and WEST_MERCHANT_ID and WEST_API_TOKEN:
             merchant_id = WEST_MERCHANT_ID
@@ -3077,7 +3081,7 @@ async def _deduct_stock_for_order(items: List[OrderItem], fulfillment_type: str 
             location_lookup = await _resolve_location_items(merchant_id, api_token)
 
         async with httpx.AsyncClient(timeout=30.0) as client:
-            for item in items:
+            for index, item in enumerate(items):
                 clover_item_id = item.product_id
                 if not clover_item_id and not item.sku and not item.name:
                     print(f"[stock] Skipping stock deduction for '{item.name}' — no identifiers")
@@ -3115,6 +3119,7 @@ async def _deduct_stock_for_order(items: List[OrderItem], fulfillment_type: str 
                         json={"quantity": new_stock},
                     )
                     if update_resp.status_code in (200, 201):
+                        written[index] = True
                         print(f"[stock] Deducted {item.quantity} from '{item.name}' ({clover_item_id}): {current_stock} -> {new_stock}")
                     else:
                         print(f"[stock] Failed to update stock for {clover_item_id}: {update_resp.status_code} {update_resp.text[:200]}")
@@ -3122,9 +3127,94 @@ async def _deduct_stock_for_order(items: List[OrderItem], fulfillment_type: str 
                     print(f"[stock] Error deducting stock for '{item.name}': {e}")
 
         invalidate_product_cache()
-        print(f"[stock] Stock deduction complete for {len(items)} item(s), cache invalidated")
+        print(f"[stock] Stock deduction complete for {sum(written)}/{len(items)} item(s), cache invalidated")
     except Exception as e:
         print(f"[stock] Stock deduction task failed: {e}")
+    return written
+
+
+async def _pending_stock_lines(
+    db: aiosqlite.Connection, order_id: int
+) -> tuple[List[int], List[OrderItem]]:
+    """An order's line items whose stock hasn't left Clover yet, with their row ids."""
+    cursor = await db.execute(
+        """SELECT id, product_id, product_name, sku, price, quantity
+           FROM ecommerce_order_items
+           WHERE order_id = ? AND stock_deducted_at IS NULL
+           ORDER BY id""",
+        (order_id,),
+    )
+    rows = await cursor.fetchall()
+    return [row[0] for row in rows], [
+        OrderItem(
+            product_id=row[1] or "",
+            name=row[2] or "",
+            sku=row[3] or "",
+            price=row[4] or 0,
+            quantity=row[5] or 0,
+        )
+        for row in rows
+    ]
+
+
+async def _flag_deducted_lines(
+    db: aiosqlite.Connection, order_id: int, line_ids: List[int], written: List[bool]
+) -> bool:
+    """Stamp each line Clover accepted, and the order once no line is left.
+
+    Per-line stamps are what make a retry safe: a line already taken off the
+    shelf is never written a second time.
+    """
+    for line_id, ok in zip(line_ids, written):
+        if ok:
+            await db.execute(
+                "UPDATE ecommerce_order_items SET stock_deducted_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (line_id,),
+            )
+    cursor = await db.execute(
+        "SELECT COUNT(*) FROM ecommerce_order_items WHERE order_id = ? AND stock_deducted_at IS NULL",
+        (order_id,),
+    )
+    complete = (await cursor.fetchone())[0] == 0
+    if complete:
+        await db.execute(
+            "UPDATE ecommerce_orders SET stock_deducted_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (order_id,),
+        )
+    await db.commit()
+    return complete
+
+
+async def _deduct_order_stock_once(
+    db: aiosqlite.Connection, order_id: int, fulfillment_type: str
+) -> bool:
+    """Deduct whatever of an order hasn't been deducted yet. Safe to call repeatedly."""
+    line_ids, pending = await _pending_stock_lines(db, order_id)
+    if not pending:
+        return True
+    written = await _deduct_stock_for_order(pending, fulfillment_type)
+    complete = await _flag_deducted_lines(db, order_id, line_ids, written)
+    if not complete:
+        print(f"[stock] Order {order_id} not fully deducted — will retry when its status changes")
+    return complete
+
+
+async def _deduct_stock_and_flag(order_id: int, items: List[OrderItem], fulfillment_type: str) -> bool:
+    """Background stock deduction for a fresh order, on its own DB connection.
+
+    Falls back to the request's items when the order didn't make it into the DB —
+    the shelf still needs to be right even if the row is missing.
+    """
+    if not order_id:
+        written = await _deduct_stock_for_order(items, fulfillment_type)
+        return all(written)
+    try:
+        async with aiosqlite.connect(DB_PATH) as conn:
+            await conn.execute("PRAGMA busy_timeout = 30000")
+            return await _deduct_order_stock_once(conn, order_id, fulfillment_type)
+    except Exception as e:
+        print(f"[stock] Could not deduct stock for order {order_id}: {e}")
+        return False
 
 
 async def _award_loyalty_points_for_order(
@@ -3800,7 +3890,27 @@ async def update_order_status(
         (new_status, order_id),
     )
     await db.commit()
-    return {"success": True, "order_id": order_id, "status": new_status}
+
+    # Checkout deducts stock in a background task that can lose its Clover call
+    # (network blip, item not yet resolvable at the pickup location). Staff moving
+    # the order forward is the moment the goods really leave the shelf, so catch up
+    # here — stock_deducted_at keeps it to exactly once per order.
+    stock_deducted = False
+    if new_status in ("paid", "processing", "shipped", "delivered"):
+        cursor = await db.execute(
+            "SELECT fulfillment_type, stock_deducted_at FROM ecommerce_orders WHERE id = ?",
+            (order_id,),
+        )
+        row = await cursor.fetchone()
+        if row and not row[1]:
+            stock_deducted = await _deduct_order_stock_once(db, order_id, row[0] or "shipping")
+
+    return {
+        "success": True,
+        "order_id": order_id,
+        "status": new_status,
+        "stock_deducted": stock_deducted,
+    }
 
 
 @router.post("/orders/recover")
