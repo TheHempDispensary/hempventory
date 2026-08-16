@@ -1733,8 +1733,14 @@ async def push_reward_discounts(
                 if cents in amounts_present:
                     existing.append(label)
                     continue
-                await client.create_discount(_register_discount_name(reward), cents)
-                created.append(label)
+                try:
+                    # A reward is a fixed dollar amount, never a percentage.
+                    await client.create_discount(
+                        name=_register_discount_name(reward), amount=cents
+                    )
+                    created.append(label)
+                except Exception as e:
+                    errors.append(f"{label}: {e}")
                 await asyncio.sleep(0.3)
         except Exception as e:
             errors.append(f"{loc_name}: {e}")

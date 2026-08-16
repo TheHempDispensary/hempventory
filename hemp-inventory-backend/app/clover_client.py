@@ -279,37 +279,6 @@ class CloverClient:
             )
             return resp.json()
 
-    async def get_discounts(self, limit: int = 100) -> dict:
-        """Get the merchant's saved discounts — the buttons a budtender can tap on a ticket."""
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            all_discounts: list[dict] = []
-            offset = 0
-            while True:
-                resp = await self._request_with_retry(
-                    client, "get",
-                    f"{self.base_url}/discounts",
-                    headers=self._headers(),
-                    params={"limit": limit, "offset": offset},
-                )
-                elements = resp.json().get("elements", [])
-                all_discounts.extend(elements)
-                if len(elements) < limit:
-                    break
-                offset += limit
-                await asyncio.sleep(0.3)
-            return {"elements": all_discounts}
-
-    async def create_discount(self, name: str, amount_cents: int) -> dict:
-        """Create a fixed-amount discount button. Clover stores the amount negative."""
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await self._request_with_retry(
-                client, "post",
-                f"{self.base_url}/discounts",
-                headers=self._headers(),
-                json={"name": name, "amount": -abs(int(amount_cents))},
-            )
-            return resp.json()
-
     async def get_refunds_in_range(self, start_ms: int, end_ms: int, limit: int = 100) -> dict:
         """Get refund records created within a time range from Clover's refunds endpoint.
 
