@@ -164,6 +164,121 @@ async def test_no_match_order_is_awarded_once_the_account_exists(db):
     assert (rows[0][0], rows[0][1]) == ("awarded", 40)
 
 
+async def _add_reward(db, name, value, points):
+    cur = await db.execute(
+        """INSERT INTO loyalty_rewards (name, reward_type, reward_value, points_required, is_active)
+           VALUES (?, 'discount', ?, ?, 1)""",
+        (name, value, points),
+    )
+    await db.commit()
+    return cur.lastrowid
+
+
+def _reward_discount(order, name, amount_cents):
+    order["discounts"] = {"elements": [{"name": name, "amount": -abs(amount_cents)}]}
+    return order
+
+
+async def test_fully_discounted_ticket_still_takes_the_points_off(db):
+    # A $5 reward on a $5 item leaves the ticket at $0, and skipping those orders
+    # meant the member kept the points they had just spent.
+    await _add_reward(db, "$5 off any purchase", 5.0, 100)
+    customer_id = await _add_customer(db, "Kayla", "3865550101", clover_id="CLV_K")
+    await db.execute(
+        "UPDATE loyalty_customers SET points_balance = 223, lifetime_points = 223 WHERE id = ?",
+        (customer_id,),
+    )
+    await db.commit()
+    FakeClover.orders = [
+        _reward_discount(_order("O_ZERO", 0, "CLV_K"), "$5 OFF *SMOKEN TOKEN*", 500)
+    ]
+
+    result = await lr._do_sync_orders(db)
+
+    assert result["points_redeemed"] == 100
+    cur = await db.execute(
+        "SELECT points_balance, lifetime_redeemed FROM loyalty_customers WHERE id = ?",
+        (customer_id,),
+    )
+    assert tuple(await cur.fetchone()) == (123, 100)
+
+
+async def test_zero_total_order_recorded_before_the_fix_is_revisited(db):
+    await _add_reward(db, "$5 off any purchase", 5.0, 100)
+    customer_id = await _add_customer(db, "Kayla", "3865550101", clover_id="CLV_K")
+    await db.execute(
+        "UPDATE loyalty_customers SET points_balance = 223 WHERE id = ?", (customer_id,)
+    )
+    await db.execute(
+        """INSERT INTO loyalty_synced_orders
+           (clover_order_id, location_merchant_id, location_name, order_total, status)
+           VALUES ('O_ZERO', 'MERCH_W', 'West', 0, 'zero_total')""",
+    )
+    await db.commit()
+    FakeClover.orders = [
+        _reward_discount(_order("O_ZERO", 0, "CLV_K"), "$5 OFF *SMOKEN TOKEN*", 500)
+    ]
+
+    assert (await lr._do_sync_orders(db))["points_redeemed"] == 100
+
+    cur = await db.execute(
+        "SELECT status, points_redeemed FROM loyalty_synced_orders WHERE clover_order_id = 'O_ZERO'"
+    )
+    rows = await cur.fetchall()
+    assert len(rows) == 1, "the retry must update the existing row"
+    assert tuple(rows[0]) == ("zero_points", 100)
+
+
+async def test_fully_discounted_ticket_redeems_only_once(db):
+    await _add_reward(db, "$5 off any purchase", 5.0, 100)
+    customer_id = await _add_customer(db, "Kayla", "3865550101", clover_id="CLV_K")
+    await db.execute(
+        "UPDATE loyalty_customers SET points_balance = 223 WHERE id = ?", (customer_id,)
+    )
+    await db.commit()
+    FakeClover.orders = [
+        _reward_discount(_order("O_ZERO", 0, "CLV_K"), "$5 OFF *SMOKEN TOKEN*", 500)
+    ]
+
+    await lr._do_sync_orders(db)
+    await lr._do_sync_orders(db)
+    await lr._do_sync_orders(db)
+
+    cur = await db.execute(
+        "SELECT points_balance, lifetime_redeemed FROM loyalty_customers WHERE id = ?",
+        (customer_id,),
+    )
+    assert tuple(await cur.fetchone()) == (123, 100)
+
+
+async def test_zero_total_order_without_discounts_is_still_skipped(db):
+    await _add_customer(db, "Kayla", "3865550101", clover_id="CLV_K")
+    FakeClover.orders = [_order("O_VOID", 0, "CLV_K")]
+
+    result = await lr._do_sync_orders(db)
+
+    assert (result["orders_processed"], result["points_redeemed"]) == (0, 0)
+    cur = await db.execute(
+        "SELECT status FROM loyalty_synced_orders WHERE clover_order_id = 'O_VOID'"
+    )
+    assert (await cur.fetchone())[0] == "zero_total"
+
+
+async def test_unmatched_fully_discounted_ticket_is_recorded_for_retry(db):
+    await _add_reward(db, "$5 off any purchase", 5.0, 100)
+    FakeClover.orders = [
+        _reward_discount(_order("O_ZERO", 0, "CLV_UNKNOWN"), "Rewards", 500)
+    ]
+
+    result = await lr._do_sync_orders(db)
+
+    assert result["orders_no_match"] == 1
+    cur = await db.execute(
+        "SELECT status FROM loyalty_synced_orders WHERE clover_order_id = 'O_ZERO'"
+    )
+    assert (await cur.fetchone())[0] == "no_match"
+
+
 async def test_awarded_order_is_never_awarded_twice(db):
     await _add_customer(db, "Ada", "3865550101", clover_id="CLV_A")
     FakeClover.orders = [_order("O1", 5000, "CLV_A")]
