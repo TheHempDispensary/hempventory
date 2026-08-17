@@ -263,6 +263,16 @@ async def init_db():
         except Exception:
             pass
 
+        # Name the register put on the ticket. Clover profiles made at the
+        # register often carry a name but no phone, which is the only clue to
+        # who an uncredited sale belonged to.
+        try:
+            await db.execute(
+                "ALTER TABLE loyalty_synced_orders ADD COLUMN clover_customer_name TEXT"
+            )
+        except Exception:
+            pass
+
         # Migration: add clover_customer_id column if missing
         try:
             await db.execute("ALTER TABLE loyalty_customers ADD COLUMN clover_customer_id TEXT")

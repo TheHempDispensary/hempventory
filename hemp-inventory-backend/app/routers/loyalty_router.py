@@ -1229,6 +1229,23 @@ def _order_card_last4(order: dict) -> Optional[str]:
     return None
 
 
+def _order_customer_name(order: dict, names_by_clover_id: dict[str, tuple[str, str]]) -> Optional[str]:
+    """The name the register put on a ticket, when it has one.
+
+    Clover profiles created on the register often carry a name but no phone, so
+    the name is the only clue staff have about who the sale belonged to.
+    """
+    for oc in ((order.get("customers") or {}).get("elements", []) or []):
+        first, last = names_by_clover_id.get(
+            oc.get("id", ""),
+            ((oc.get("firstName") or "").strip(), (oc.get("lastName") or "").strip()),
+        )
+        full = f"{first} {last}".strip()
+        if full:
+            return full
+    return None
+
+
 async def _remember_order_cards(
     db: aiosqlite.Connection,
     customer_id: int,
@@ -1405,6 +1422,7 @@ async def _record_synced_order(
     points_redeemed: int = 0,
     is_retry: bool = False,
     card_last4: Optional[str] = None,
+    clover_customer_name: Optional[str] = None,
 ) -> None:
     """Store the outcome for a Clover order, updating the row on a retry."""
     if is_retry:
@@ -1412,19 +1430,21 @@ async def _record_synced_order(
             """UPDATE loyalty_synced_orders
                SET customer_id = ?, points_awarded = ?, points_redeemed = ?, status = ?,
                    order_total = ?, location_name = ?, card_last4 = COALESCE(?, card_last4),
+                   clover_customer_name = COALESCE(?, clover_customer_name),
                    synced_at = CURRENT_TIMESTAMP
                WHERE clover_order_id = ? AND location_merchant_id = ?""",
             (customer_id, points_awarded, points_redeemed, status, order_total,
-             loc_name, card_last4, order_id, merchant_id),
+             loc_name, card_last4, clover_customer_name, order_id, merchant_id),
         )
         return
     await db.execute(
         """INSERT INTO loyalty_synced_orders
            (clover_order_id, location_merchant_id, location_name, order_total,
-            customer_id, points_awarded, points_redeemed, status, card_last4)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            customer_id, points_awarded, points_redeemed, status, card_last4,
+            clover_customer_name)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (order_id, merchant_id, loc_name, order_total, customer_id,
-         points_awarded, points_redeemed, status, card_last4),
+         points_awarded, points_redeemed, status, card_last4, clover_customer_name),
     )
 
 
@@ -1664,6 +1684,9 @@ async def _do_sync_orders(
                         await _record_synced_order(
                             db, order_id, merchant_id, loc_name, order_total, "no_match",
                             is_retry=is_retry, card_last4=card_last4,
+                            clover_customer_name=_order_customer_name(
+                                order, clover_id_to_raw_name
+                            ),
                         )
                         total_no_match += 1
                     continue
@@ -1784,7 +1807,8 @@ async def list_unmatched_orders(
     until someone says who the sale belonged to.
     """
     cursor = await db.execute(
-        """SELECT clover_order_id, location_name, order_total, card_last4, synced_at
+        """SELECT clover_order_id, location_name, order_total, card_last4, synced_at,
+                  clover_customer_name
            FROM loyalty_synced_orders
            WHERE status = 'no_match' AND synced_at > datetime('now', ?)
            ORDER BY synced_at DESC LIMIT ?""",
@@ -1798,6 +1822,7 @@ async def list_unmatched_orders(
             "order_total": (r[2] or 0) / 100.0,
             "card_last4": r[3],
             "synced_at": r[4],
+            "register_name": r[5],
         } for r in rows],
     }
 

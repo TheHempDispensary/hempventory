@@ -108,6 +108,23 @@ async def test_card_only_ticket_is_listed_as_uncredited(db):
     ]
 
 
+async def test_uncredited_ticket_shows_the_name_the_register_used(db):
+    # A register profile can carry a name but no phone, and the name on it need
+    # not be the member's name in HempVentory ("Elena Gilbert" vs "Elena Regalado").
+    await _add_member(db, first_name="Elena", phone="7278312785")
+    FakeClover.customers = [
+        {"id": "CLV_ELENA", "firstName": "Elena", "lastName": "Gilbert"}
+    ]
+    FakeClover.orders = [_card_order("O_NAMED", 1598, "CLV_ELENA")]
+
+    await lr._do_sync_orders(db)
+
+    listed = (await lr.list_unmatched_orders(days=14, limit=50, user={}, db=db))["orders"]
+    assert [(o["clover_order_id"], o["register_name"]) for o in listed] == [
+        ("O_NAMED", "Elena Gilbert")
+    ]
+
+
 async def test_attaching_a_ticket_awards_the_points(db):
     member_id = await _add_member(db)
     FakeClover.orders = [_card_order("O_CARD", 3195, "CLV_NAMELESS")]

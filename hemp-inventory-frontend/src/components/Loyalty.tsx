@@ -112,6 +112,7 @@ interface UnmatchedOrder {
   order_total: number;
   card_last4: string | null;
   synced_at: string;
+  register_name: string | null;
 }
 
 type Tab = "overview" | "customers" | "rewards" | "settings";
@@ -251,12 +252,6 @@ export default function Loyalty() {
     }
   }, []);
 
-  const openAttachModal = (order: UnmatchedOrder) => {
-    setAttachTarget(order);
-    setAttachSearch("");
-    setAttachResults([]);
-  };
-
   const searchAttachMembers = async (term: string) => {
     setAttachSearch(term);
     if (term.trim().length < 2) {
@@ -268,6 +263,16 @@ export default function Loyalty() {
       setAttachResults(resp.data.customers);
     } catch (err) {
       console.error("Failed to search members:", err);
+    }
+  };
+
+  const openAttachModal = (order: UnmatchedOrder) => {
+    setAttachTarget(order);
+    setAttachResults([]);
+    if (order.register_name) {
+      searchAttachMembers(order.register_name);
+    } else {
+      setAttachSearch("");
     }
   };
 
@@ -772,6 +777,9 @@ export default function Loyalty() {
                       <p className="font-medium text-gray-900">
                         ${o.order_total.toFixed(2)}
                         <span className="text-gray-400 font-normal ml-2">@ {o.location}</span>
+                        {o.register_name && (
+                          <span className="text-gray-500 font-normal ml-2">· register: {o.register_name}</span>
+                        )}
                       </p>
                       <p className="text-xs text-gray-500">
                         {formatEtDateTime(o.synced_at)}
