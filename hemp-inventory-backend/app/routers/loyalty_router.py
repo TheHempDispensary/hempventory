@@ -42,6 +42,10 @@ class AwardPoints(BaseModel):
     location_name: Optional[str] = None
 
 
+class AttachOrderToMember(BaseModel):
+    customer_id: int
+
+
 class RedeemReward(BaseModel):
     reward_id: int
     location_name: Optional[str] = None
@@ -1199,6 +1203,49 @@ def _redemption_discount_names(settings: dict) -> tuple[str, ...]:
 _RETRYABLE_SYNC_STATUSES = ("no_match", "zero_total")
 
 
+def _order_card_fingerprints(order: dict) -> list[str]:
+    """The cards that paid for a Clover order.
+
+    A budtender who doesn't pick the member on the ticket leaves it on the
+    nameless profile Clover builds from the swiped card, so the card is the only
+    thing left tying the sale back to a member.
+    """
+    fingerprints: list[str] = []
+    for payment in (order.get("payments") or {}).get("elements", []) or []:
+        card = payment.get("cardTransaction") or {}
+        first6 = str(card.get("first6") or "").strip()
+        last4 = str(card.get("last4") or "").strip()
+        if first6 and last4:
+            fingerprint = f"{first6}-{last4}"
+            if fingerprint not in fingerprints:
+                fingerprints.append(fingerprint)
+    return fingerprints
+
+
+def _order_card_last4(order: dict) -> Optional[str]:
+    """Last four digits staff can read off the receipt to recognise a ticket."""
+    for fingerprint in _order_card_fingerprints(order):
+        return fingerprint.split("-")[-1]
+    return None
+
+
+async def _remember_order_cards(
+    db: aiosqlite.Connection,
+    customer_id: int,
+    order: dict,
+    merchant_id: str,
+    loc_name: str,
+) -> None:
+    """Tie the cards on a credited order to the member, for later tickets."""
+    for fingerprint in _order_card_fingerprints(order):
+        await db.execute(
+            """INSERT OR IGNORE INTO loyalty_card_links
+               (loyalty_customer_id, card_fingerprint, merchant_id, location_name)
+               VALUES (?, ?, ?, ?)""",
+            (customer_id, fingerprint, merchant_id, loc_name),
+        )
+
+
 def _order_discounts(order: dict) -> list[dict]:
     """Every discount on a Clover order, whether applied to the whole ticket or a line."""
     discounts = list((order.get("discounts") or {}).get("elements", []) or [])
@@ -1335,7 +1382,7 @@ async def _fetch_recent_paid_orders(client: CloverClient, lookback_days: int) ->
             limit=limit,
             offset=offset,
             filters=["payType!=NULL", f"createdTime>={start_ms}"],
-            expand="lineItems,lineItems.discounts,customers,discounts",
+            expand="lineItems,lineItems.discounts,customers,discounts,payments",
         )
         elements = data.get("elements", [])
         orders.extend(elements)
@@ -1357,25 +1404,27 @@ async def _record_synced_order(
     points_awarded: int = 0,
     points_redeemed: int = 0,
     is_retry: bool = False,
+    card_last4: Optional[str] = None,
 ) -> None:
     """Store the outcome for a Clover order, updating the row on a retry."""
     if is_retry:
         await db.execute(
             """UPDATE loyalty_synced_orders
                SET customer_id = ?, points_awarded = ?, points_redeemed = ?, status = ?,
-                   order_total = ?, location_name = ?, synced_at = CURRENT_TIMESTAMP
+                   order_total = ?, location_name = ?, card_last4 = COALESCE(?, card_last4),
+                   synced_at = CURRENT_TIMESTAMP
                WHERE clover_order_id = ? AND location_merchant_id = ?""",
             (customer_id, points_awarded, points_redeemed, status, order_total,
-             loc_name, order_id, merchant_id),
+             loc_name, card_last4, order_id, merchant_id),
         )
         return
     await db.execute(
         """INSERT INTO loyalty_synced_orders
            (clover_order_id, location_merchant_id, location_name, order_total,
-            customer_id, points_awarded, points_redeemed, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            customer_id, points_awarded, points_redeemed, status, card_last4)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (order_id, merchant_id, loc_name, order_total, customer_id,
-         points_awarded, points_redeemed, status),
+         points_awarded, points_redeemed, status, card_last4),
     )
 
 
@@ -1502,6 +1551,17 @@ async def _do_sync_orders(
             )
             recorded_status = {row[0]: row[1] for row in await recorded_cursor.fetchall()}
 
+            card_cursor = await db.execute(
+                """SELECT card_fingerprint, loyalty_customer_id FROM loyalty_card_links
+                   WHERE merchant_id = ?""",
+                (merchant_id,),
+            )
+            card_to_customer: dict[str, dict] = {}
+            for fingerprint, linked_id in await card_cursor.fetchall():
+                linked = customers_by_id.get(linked_id)
+                if linked:
+                    card_to_customer[fingerprint] = linked
+
             orders = await _fetch_recent_paid_orders(client, lookback_days)
 
             for order in orders:
@@ -1516,12 +1576,13 @@ async def _do_sync_orders(
                 is_retry = previous_status is not None
 
                 order_total = order.get("total", 0)  # cents
+                card_last4 = _order_card_last4(order)
                 if order_total <= 0 and not _order_discounts(order):
                     # Nothing to award and no register discount that could have
                     # been paid for with points.
                     await _record_synced_order(
                         db, order_id, merchant_id, loc_name, order_total,
-                        "zero_total", is_retry=is_retry,
+                        "zero_total", is_retry=is_retry, card_last4=card_last4,
                     )
                     total_skipped += 1
                     continue
@@ -1591,13 +1652,27 @@ async def _do_sync_orders(
                         break
 
                 if not matched_customer:
+                    # The ticket sits on a nameless profile Clover made from the
+                    # card; credit the member that card is known to belong to.
+                    for fingerprint in _order_card_fingerprints(order):
+                        matched_customer = card_to_customer.get(fingerprint)
+                        if matched_customer:
+                            break
+
+                if not matched_customer:
                     if previous_status != "no_match":
                         await _record_synced_order(
                             db, order_id, merchant_id, loc_name, order_total, "no_match",
-                            is_retry=is_retry,
+                            is_retry=is_retry, card_last4=card_last4,
                         )
                         total_no_match += 1
                     continue
+
+                await _remember_order_cards(
+                    db, matched_customer["id"], order, merchant_id, loc_name
+                )
+                for fingerprint in _order_card_fingerprints(order):
+                    card_to_customer.setdefault(fingerprint, matched_customer)
 
                 points_redeemed = await _redeem_pos_discounts(
                     db, matched_customer, order, order_id, loc_name,
@@ -1612,6 +1687,7 @@ async def _do_sync_orders(
                         db, order_id, merchant_id, loc_name, order_total, "zero_points",
                         customer_id=matched_customer["id"],
                         points_redeemed=points_redeemed, is_retry=is_retry,
+                        card_last4=card_last4,
                     )
                     total_skipped += 1
                     if points_redeemed:
@@ -1637,6 +1713,7 @@ async def _do_sync_orders(
                     db, order_id, merchant_id, loc_name, order_total, "awarded",
                     customer_id=matched_customer["id"], points_awarded=points_to_award,
                     points_redeemed=points_redeemed, is_retry=is_retry,
+                    card_last4=card_last4,
                 )
 
                 total_processed += 1
@@ -1691,6 +1768,172 @@ async def sync_clover_orders(
     """Poll Clover orders and award loyalty points for matched customers.
     Matches on the order's Clover customer id, then phone, then name, then email."""
     return await _do_sync_orders(db, lookback_days=lookback_days)
+
+
+@router.get("/unmatched-orders")
+async def list_unmatched_orders(
+    days: int = Query(14, ge=1, le=400),
+    limit: int = Query(100, ge=1, le=500),
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Register tickets nobody was credited for, newest first.
+
+    A budtender who doesn't pick the member on the ticket leaves it on the
+    nameless profile Clover creates from the card, and those points are lost
+    until someone says who the sale belonged to.
+    """
+    cursor = await db.execute(
+        """SELECT clover_order_id, location_name, order_total, card_last4, synced_at
+           FROM loyalty_synced_orders
+           WHERE status = 'no_match' AND synced_at > datetime('now', ?)
+           ORDER BY synced_at DESC LIMIT ?""",
+        (f"-{days} days", limit),
+    )
+    rows = await cursor.fetchall()
+    return {
+        "orders": [{
+            "clover_order_id": r[0],
+            "location": r[1],
+            "order_total": (r[2] or 0) / 100.0,
+            "card_last4": r[3],
+            "synced_at": r[4],
+        } for r in rows],
+    }
+
+
+@router.post("/unmatched-orders/{clover_order_id}/attach")
+async def attach_unmatched_order(
+    clover_order_id: str,
+    body: AttachOrderToMember,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Credit a register ticket to the member it belonged to.
+
+    Awards the points the sale earned, spends the points behind any reward
+    discount on the ticket, and remembers the ticket's Clover profile and card
+    so the same shopper matches on their own next time.
+    """
+    cust_cursor = await db.execute(
+        "SELECT id, first_name, last_name, phone, email FROM loyalty_customers WHERE id = ?",
+        (body.customer_id,),
+    )
+    cust_row = await cust_cursor.fetchone()
+    if not cust_row:
+        raise HTTPException(status_code=404, detail="Member not found")
+    customer = {
+        "id": cust_row[0], "first_name": cust_row[1], "last_name": cust_row[2],
+        "phone": cust_row[3], "email": cust_row[4],
+    }
+
+    order_cursor = await db.execute(
+        """SELECT location_merchant_id, location_name, status FROM loyalty_synced_orders
+           WHERE clover_order_id = ?""",
+        (clover_order_id,),
+    )
+    order_row = await order_cursor.fetchone()
+    if not order_row:
+        raise HTTPException(status_code=404, detail="Order has not been synced from Clover")
+    merchant_id, loc_name, status = order_row
+    if status == "awarded":
+        raise HTTPException(status_code=409, detail="Order already credited")
+
+    loc_cursor = await db.execute(
+        "SELECT name, api_token FROM locations WHERE merchant_id = ?", (merchant_id,)
+    )
+    loc_row = await loc_cursor.fetchone()
+    if not loc_row:
+        raise HTTPException(status_code=404, detail="Location for this order is not configured")
+    loc_name = loc_row[0] or loc_name
+
+    client = CloverClient(merchant_id, loc_row[1])
+    try:
+        order = await client.get_order(clover_order_id)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not read the order from Clover: {exc}")
+
+    settings = await _get_settings(db)
+    points_per_dollar = int(settings.get("points_per_dollar", "1"))
+    reward_cursor = await db.execute(
+        """SELECT id, name, points_required, reward_value FROM loyalty_rewards
+           WHERE is_active = 1 AND reward_type = 'discount'"""
+    )
+    active_rewards = [
+        {"id": r[0], "name": r[1], "points_required": r[2], "reward_value": r[3]}
+        for r in await reward_cursor.fetchall()
+    ]
+
+    for oc in ((order.get("customers") or {}).get("elements", []) or []):
+        clover_cust_id = oc.get("id", "")
+        if clover_cust_id:
+            await db.execute(
+                """INSERT OR IGNORE INTO loyalty_clover_id_map
+                   (loyalty_customer_id, clover_customer_id, merchant_id, location_name)
+                   VALUES (?, ?, ?, ?)""",
+                (customer["id"], clover_cust_id, merchant_id, loc_name),
+            )
+    await _remember_order_cards(db, customer["id"], order, merchant_id, loc_name)
+
+    points_redeemed = await _redeem_pos_discounts(
+        db, customer, order, clover_order_id, loc_name,
+        active_rewards, _redemption_discount_names(settings),
+    )
+
+    order_total = order.get("total", 0) or 0
+    order_dollars = order_total / 100.0
+    points_awarded = math.floor(order_dollars * points_per_dollar)
+
+    earned_cursor = await db.execute(
+        """SELECT 1 FROM loyalty_transactions
+           WHERE customer_id = ? AND order_id = ? AND type = 'earn' LIMIT 1""",
+        (customer["id"], clover_order_id),
+    )
+    if await earned_cursor.fetchone():
+        points_awarded = 0
+
+    if points_awarded > 0:
+        await db.execute(
+            """UPDATE loyalty_customers
+               SET points_balance = points_balance + ?,
+                   lifetime_points = lifetime_points + ?,
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            (points_awarded, points_awarded, customer["id"]),
+        )
+        await db.execute(
+            """INSERT INTO loyalty_transactions
+               (customer_id, type, points, description, order_id, location_name)
+               VALUES (?, 'earn', ?, ?, ?, ?)""",
+            (customer["id"], points_awarded,
+             f"POS purchase ${order_dollars:.2f} at {loc_name} (attached by staff)",
+             clover_order_id, loc_name),
+        )
+
+    await _record_synced_order(
+        db, clover_order_id, merchant_id, loc_name, order_total,
+        "awarded" if points_awarded > 0 else "zero_points",
+        customer_id=customer["id"], points_awarded=points_awarded,
+        points_redeemed=points_redeemed, is_retry=True,
+        card_last4=_order_card_last4(order),
+    )
+    await db.commit()
+    await _sync_balance_to_clover_quietly(db, customer["id"])
+
+    balance_cursor = await db.execute(
+        "SELECT points_balance FROM loyalty_customers WHERE id = ?", (customer["id"],)
+    )
+    balance_row = await balance_cursor.fetchone()
+    return {
+        "status": "attached",
+        "clover_order_id": clover_order_id,
+        "location": loc_name,
+        "customer_id": customer["id"],
+        "order_total": order_dollars,
+        "points_awarded": points_awarded,
+        "points_redeemed": points_redeemed,
+        "points_balance": balance_row[0] if balance_row else None,
+    }
 
 
 def _register_discount_name(reward: dict) -> str:

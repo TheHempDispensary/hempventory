@@ -21,6 +21,8 @@ import {
   pushLoyaltyCustomersToClover,
   pushLoyaltyBalancesToClover,
   pushLoyaltyRewardDiscounts,
+  getLoyaltyUnmatchedOrders,
+  attachLoyaltyOrderToMember,
 } from "../lib/api";
 import { formatEtDate, formatEtDateTime } from "../lib/utils";
 import {
@@ -104,6 +106,14 @@ interface TopCustomer {
   lifetime_points: number;
 }
 
+interface UnmatchedOrder {
+  clover_order_id: string;
+  location: string;
+  order_total: number;
+  card_last4: string | null;
+  synced_at: string;
+}
+
 type Tab = "overview" | "customers" | "rewards" | "settings";
 
 export default function Loyalty() {
@@ -153,6 +163,13 @@ export default function Loyalty() {
     last_sync: string | null;
     recent: { order_id: string; location: string; order_total: number; points_awarded: number; status: string; synced_at: string; customer_name: string }[];
   } | null>(null);
+
+  // Register tickets that ended up on nobody's account
+  const [unmatchedOrders, setUnmatchedOrders] = useState<UnmatchedOrder[]>([]);
+  const [attachTarget, setAttachTarget] = useState<UnmatchedOrder | null>(null);
+  const [attachSearch, setAttachSearch] = useState("");
+  const [attachResults, setAttachResults] = useState<LoyaltyCustomer[]>([]);
+  const [attaching, setAttaching] = useState(false);
 
   const showToast = (type: "success" | "error", text: string) => {
     setToast({ type, text });
@@ -225,6 +242,59 @@ export default function Loyalty() {
     }
   }, []);
 
+  const loadUnmatchedOrders = useCallback(async () => {
+    try {
+      const resp = await getLoyaltyUnmatchedOrders(14);
+      setUnmatchedOrders(resp.data.orders);
+    } catch (err) {
+      console.error("Failed to load unmatched orders:", err);
+    }
+  }, []);
+
+  const openAttachModal = (order: UnmatchedOrder) => {
+    setAttachTarget(order);
+    setAttachSearch("");
+    setAttachResults([]);
+  };
+
+  const searchAttachMembers = async (term: string) => {
+    setAttachSearch(term);
+    if (term.trim().length < 2) {
+      setAttachResults([]);
+      return;
+    }
+    try {
+      const resp = await getLoyaltyCustomers(term.trim(), 1);
+      setAttachResults(resp.data.customers);
+    } catch (err) {
+      console.error("Failed to search members:", err);
+    }
+  };
+
+  const handleAttachOrder = async (customer: LoyaltyCustomer) => {
+    if (!attachTarget) return;
+    setAttaching(true);
+    try {
+      const resp = await attachLoyaltyOrderToMember(attachTarget.clover_order_id, customer.id);
+      const data = resp.data as { points_awarded: number; points_redeemed: number };
+      showToast(
+        "success",
+        `Credited ${data.points_awarded} pts to ${customer.first_name} ${customer.last_name || ""}`.trim() +
+          (data.points_redeemed > 0 ? ` and took off ${data.points_redeemed} pts for the reward used` : ""),
+      );
+      setAttachTarget(null);
+      loadUnmatchedOrders();
+      loadDashboard();
+      loadSyncStatus();
+      loadCustomers(customerSearch || undefined, customerPage);
+    } catch (err) {
+      console.error("Failed to attach order:", err);
+      showToast("error", "Couldn't credit that ticket — try again");
+    } finally {
+      setAttaching(false);
+    }
+  };
+
   const handleSyncOrders = async () => {
     setSyncing(true);
     try {
@@ -237,6 +307,7 @@ export default function Loyalty() {
       }
       loadDashboard();
       loadSyncStatus();
+      loadUnmatchedOrders();
     } catch (err) {
       console.error("Failed to sync orders:", err);
       showToast("error", "Failed to sync orders from POS");
@@ -354,7 +425,8 @@ export default function Loyalty() {
     loadCustomers();
     loadRewards();
     loadSyncStatus();
-  }, [loadDashboard, loadCustomers, loadRewards, loadSyncStatus]);
+    loadUnmatchedOrders();
+  }, [loadDashboard, loadCustomers, loadRewards, loadSyncStatus, loadUnmatchedOrders]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -678,6 +750,45 @@ export default function Loyalty() {
               </div>
             )}
           </div>
+
+          {/* Register tickets nobody was credited for */}
+          {unmatchedOrders.length > 0 && (
+            <div className="bg-white rounded-xl border border-gray-200 p-5">
+              <div className="flex items-center gap-3 mb-3">
+                <div className="w-10 h-10 rounded-lg bg-amber-50 flex items-center justify-center">
+                  <Users className="w-5 h-5 text-amber-600" />
+                </div>
+                <div>
+                  <h3 className="font-semibold text-gray-900">Uncredited Register Tickets</h3>
+                  <p className="text-xs text-gray-500">
+                    The register didn't have a member on these tickets. Pick the member to award the points.
+                  </p>
+                </div>
+              </div>
+              <div className="divide-y divide-gray-50 max-h-72 overflow-y-auto">
+                {unmatchedOrders.map((o) => (
+                  <div key={o.clover_order_id} className="flex items-center justify-between py-2 text-sm">
+                    <div>
+                      <p className="font-medium text-gray-900">
+                        ${o.order_total.toFixed(2)}
+                        <span className="text-gray-400 font-normal ml-2">@ {o.location}</span>
+                      </p>
+                      <p className="text-xs text-gray-500">
+                        {formatEtDateTime(o.synced_at)}
+                        {o.card_last4 ? ` · card ending ${o.card_last4}` : ""}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => openAttachModal(o)}
+                      className="px-3 py-1.5 border border-indigo-300 bg-indigo-50 text-indigo-700 rounded-lg hover:bg-indigo-100 text-xs transition-colors"
+                    >
+                      Attach to member
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="grid lg:grid-cols-2 gap-6">
             {/* Recent Transactions */}
@@ -1101,6 +1212,48 @@ export default function Loyalty() {
             <button onClick={handleAddReward} className="w-full px-4 py-2.5 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700">
               Create Reward
             </button>
+          </div>
+        </Modal>
+      )}
+
+      {/* ── Attach Ticket To Member Modal ── */}
+      {attachTarget && (
+        <Modal
+          title={`Attach $${attachTarget.order_total.toFixed(2)} ticket — ${attachTarget.location}`}
+          onClose={() => setAttachTarget(null)}
+        >
+          <p className="text-sm text-gray-600 mb-3">
+            {formatEtDateTime(attachTarget.synced_at)}
+            {attachTarget.card_last4 ? ` · card ending ${attachTarget.card_last4}` : ""}
+          </p>
+          <div className="relative mb-3">
+            <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              autoFocus
+              value={attachSearch}
+              onChange={(e) => searchAttachMembers(e.target.value)}
+              placeholder="Search members by name or phone"
+              className="w-full pl-9 pr-3 py-2 border border-gray-200 rounded-lg text-sm"
+            />
+          </div>
+          <div className="space-y-2 max-h-64 overflow-y-auto">
+            {attachResults.map((c) => (
+              <button
+                key={c.id}
+                disabled={attaching}
+                onClick={() => handleAttachOrder(c)}
+                className="w-full flex items-center justify-between px-3 py-2 border border-gray-200 rounded-lg text-left hover:bg-gray-50 disabled:opacity-50"
+              >
+                <span className="text-sm text-gray-900">
+                  {c.first_name} {c.last_name}
+                  <span className="text-gray-400 ml-2">{c.phone}</span>
+                </span>
+                <span className="text-xs text-green-600 font-medium">{c.points_balance} pts</span>
+              </button>
+            ))}
+            {attachSearch.trim().length >= 2 && attachResults.length === 0 && (
+              <p className="text-sm text-gray-500 text-center py-3">No members match that search.</p>
+            )}
           </div>
         </Modal>
       )}

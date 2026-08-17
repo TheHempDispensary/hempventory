@@ -303,6 +303,12 @@ export const pushLoyaltyRewardDiscounts = () =>
 
 export const getLoyaltySyncStatus = () => api.get("/api/loyalty/sync-status");
 
+export const getLoyaltyUnmatchedOrders = (days?: number) =>
+  api.get("/api/loyalty/unmatched-orders", days ? { params: { days } } : undefined);
+
+export const attachLoyaltyOrderToMember = (cloverOrderId: string, customerId: number) =>
+  api.post(`/api/loyalty/unmatched-orders/${cloverOrderId}/attach`, { customer_id: customerId });
+
 export const updateLoyaltySettings = (data: {
   points_per_dollar?: string;
   signup_bonus?: string;
