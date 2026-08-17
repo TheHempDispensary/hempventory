@@ -1193,6 +1193,12 @@ def _redemption_discount_names(settings: dict) -> tuple[str, ...]:
     return tuple(configured) or _DEFAULT_REDEMPTION_DISCOUNT_NAMES
 
 
+# Outcomes worth re-examining on the next sync: the member may sign up (or get
+# linked) after the purchase, and a fully discounted ticket still has points to
+# take off even though it earns nothing.
+_RETRYABLE_SYNC_STATUSES = ("no_match", "zero_total")
+
+
 def _order_discounts(order: dict) -> list[dict]:
     """Every discount on a Clover order, whether applied to the whole ticket or a line."""
     discounts = list((order.get("discounts") or {}).get("elements", []) or [])
@@ -1379,7 +1385,9 @@ async def _do_sync_orders(
 ) -> dict:
     """Award loyalty points for Clover (POS) orders. Callable from the scheduler.
 
-    Orders previously recorded as `no_match` are re-examined on every run: the
+    Orders previously recorded as `no_match` or `zero_total` are re-examined on
+    every run — a ticket a reward paid for in full lands at $0 and still has
+    points to take off. In the `no_match` case the
     customer often signs up (or gets linked to their Clover record) after the
     purchase, and their points would otherwise never arrive. `lookback_days` can
     be widened to recover purchases that fell out of the default window while
@@ -1502,13 +1510,15 @@ async def _do_sync_orders(
                     continue
 
                 previous_status = recorded_status.get(order_id)
-                if previous_status is not None and previous_status != "no_match":
+                if previous_status is not None and previous_status not in _RETRYABLE_SYNC_STATUSES:
                     total_skipped += 1
                     continue
-                is_retry = previous_status == "no_match"
+                is_retry = previous_status is not None
 
                 order_total = order.get("total", 0)  # cents
-                if order_total <= 0:
+                if order_total <= 0 and not _order_discounts(order):
+                    # Nothing to award and no register discount that could have
+                    # been paid for with points.
                     await _record_synced_order(
                         db, order_id, merchant_id, loc_name, order_total,
                         "zero_total", is_retry=is_retry,
@@ -1581,9 +1591,10 @@ async def _do_sync_orders(
                         break
 
                 if not matched_customer:
-                    if not is_retry:
+                    if previous_status != "no_match":
                         await _record_synced_order(
                             db, order_id, merchant_id, loc_name, order_total, "no_match",
+                            is_retry=is_retry,
                         )
                         total_no_match += 1
                     continue
