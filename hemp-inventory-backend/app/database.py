@@ -256,6 +256,23 @@ async def init_db():
         except Exception:
             pass
 
+        # Last four digits of the card that paid, so staff can recognise a
+        # ticket that ended up on a nameless Clover profile.
+        try:
+            await db.execute("ALTER TABLE loyalty_synced_orders ADD COLUMN card_last4 TEXT")
+        except Exception:
+            pass
+
+        # Name the register put on the ticket. Clover profiles made at the
+        # register often carry a name but no phone, which is the only clue to
+        # who an uncredited sale belonged to.
+        try:
+            await db.execute(
+                "ALTER TABLE loyalty_synced_orders ADD COLUMN clover_customer_name TEXT"
+            )
+        except Exception:
+            pass
+
         # Migration: add clover_customer_id column if missing
         try:
             await db.execute("ALTER TABLE loyalty_customers ADD COLUMN clover_customer_id TEXT")
@@ -274,6 +291,22 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (loyalty_customer_id) REFERENCES loyalty_customers(id),
                 UNIQUE(clover_customer_id, merchant_id)
+            )
+        """)
+
+        # Cards a member has paid with. The register often leaves a ticket on the
+        # nameless Clover profile Clover creates from the swiped card, so the card
+        # is the only thing tying that ticket back to the member.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS loyalty_card_links (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                loyalty_customer_id INTEGER NOT NULL,
+                card_fingerprint TEXT NOT NULL,
+                merchant_id TEXT NOT NULL,
+                location_name TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (loyalty_customer_id) REFERENCES loyalty_customers(id),
+                UNIQUE(card_fingerprint, merchant_id)
             )
         """)
 

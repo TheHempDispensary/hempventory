@@ -136,6 +136,21 @@ class CloverClient:
             )
             return resp.json()
 
+    async def get_order(
+        self,
+        order_id: str,
+        expand: str = "lineItems,lineItems.discounts,customers,discounts,payments",
+    ) -> dict:
+        """A single order, for crediting one ticket without paging the day's sales."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await self._request_with_retry(
+                client, "get",
+                f"{self.base_url}/orders/{order_id}",
+                headers=self._headers(),
+                params={"expand": expand},
+            )
+            return resp.json()
+
     async def delete_item(self, item_id: str) -> None:
         """Delete an inventory item."""
         async with httpx.AsyncClient(timeout=30.0) as client:
