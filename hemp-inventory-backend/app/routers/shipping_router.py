@@ -1,6 +1,8 @@
 """Shipping integration with Shippo for creating labels and tracking shipments."""
 
 import asyncio
+import hashlib
+import hmac
 import os
 import smtplib
 from email.mime.multipart import MIMEMultipart
@@ -10,9 +12,11 @@ from typing import Optional
 import httpx
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 import aiosqlite
+from app import leaflife_orders
 from app.database import get_db
 
 router = APIRouter(prefix="/api/shipping", tags=["shipping"])
@@ -361,6 +365,119 @@ async def _purchase_shippo_label(headers: dict, rate_id: str, label_file_type: s
         return resp.json()
 
 
+def _label_token(short_order_no: str) -> str:
+    """Unguessable per-order token for the public print-label link."""
+    secret = os.environ.get("JWT_SECRET", "hemp-inventory-secret-key")
+    return hmac.new(secret.encode(), f"label:{short_order_no}".encode(), hashlib.sha256).hexdigest()[:20]
+
+
+def print_label_url(order_number: str) -> str:
+    """Stable link LeafLife can click to print a label.
+
+    Shippo's own ``label_url`` is a signed URL that expires, so the sheet gets
+    this permanent link instead; it redirects to a freshly signed label URL.
+    """
+    short = leaflife_orders.short_order_no(order_number)
+    base = os.environ.get("BASE_URL", "https://thd-inventory-api.fly.dev")
+    return f"{base}/api/shipping/print-label/{short}/{_label_token(short)}"
+
+
+async def _sync_leaflife_label(
+    db: aiosqlite.Connection,
+    order_id: int,
+    shipment_id: int | None,
+    tracking_number: str,
+) -> None:
+    """Best-effort: put the printable label link in the LeafLife sheet (column Z).
+
+    Only LeafLife shipments are written — for a split order that means the
+    Madison shipment, not the HQ one. Never raises.
+    """
+    try:
+        if shipment_id is not None:
+            cursor = await db.execute(
+                "SELECT shipment_type FROM order_shipments WHERE id = ?", (shipment_id,)
+            )
+            row = await cursor.fetchone()
+            if not row or row[0] != "leaflife":
+                return
+        else:
+            cursor = await db.execute(
+                "SELECT sku FROM ecommerce_order_items WHERE order_id = ?", (order_id,)
+            )
+            skus = [r[0] or "" for r in await cursor.fetchall()]
+            if not _has_leaflife_products_skus(skus):
+                return
+
+        cursor = await db.execute(
+            "SELECT order_number FROM ecommerce_orders WHERE id = ?", (order_id,)
+        )
+        row = await cursor.fetchone()
+        if not row or not row[0]:
+            return
+        order_number = row[0]
+
+        result = await leaflife_orders.sync_label(
+            order_number=order_number,
+            label_url=print_label_url(order_number),
+            tracking_number=tracking_number,
+        )
+        if not result.get("ok"):
+            print(f"[leaflife-label] {order_number}: {result.get('reason')}")
+    except Exception as e:  # noqa: BLE001 - sheet write must never fail a purchase
+        print(f"[leaflife-label] order {order_id}: {e}")
+
+
+@router.get("/print-label/{short_order_no}/{token}")
+async def print_label(
+    short_order_no: str,
+    token: str,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Public, token-protected redirect to an order's printable shipping label.
+
+    Used by the link written into the LeafLife Order Sheet. The Shippo label URL
+    is re-signed on each visit so the link keeps working.
+    """
+    if not hmac.compare_digest(token, _label_token(short_order_no)):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    cursor = await db.execute(
+        """SELECT id, label_url, shippo_transaction_id FROM ecommerce_orders
+           WHERE order_number = ? OR order_number LIKE ?""",
+        (short_order_no, f"HD-{short_order_no}-%"),
+    )
+    order = await cursor.fetchone()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    order_id, label_url, txn_id = order
+
+    # Prefer the LeafLife shipment's label on split orders.
+    cursor = await db.execute(
+        """SELECT label_url, shippo_transaction_id FROM order_shipments
+           WHERE order_id = ? AND shipment_type = 'leaflife' AND label_url != ''""",
+        (order_id,),
+    )
+    shipment = await cursor.fetchone()
+    if shipment:
+        label_url, txn_id = shipment
+
+    if txn_id and SHIPPO_API_TOKEN:
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(
+                    f"{SHIPPO_API_URL}/transactions/{txn_id}", headers=_get_shippo_headers()
+                )
+            if resp.status_code == 200:
+                label_url = resp.json().get("label_url") or label_url
+        except Exception as e:  # noqa: BLE001 - fall back to the stored URL
+            print(f"[print-label] refresh failed for {short_order_no}: {e}")
+
+    if not label_url:
+        raise HTTPException(status_code=404, detail="No label for this order")
+    return RedirectResponse(label_url)
+
+
 @router.post("/purchase-label")
 async def purchase_label(
     body: PurchaseLabelRequest,
@@ -486,6 +603,9 @@ async def purchase_label(
                         order_number or "", tracking_number, tracking_url, "shipped",
                     )
                 )
+
+    if tracking_number:
+        await _sync_leaflife_label(db, body.order_id, body.shipment_id, tracking_number)
 
     return {
         "success": True,
