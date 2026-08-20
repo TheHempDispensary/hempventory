@@ -181,7 +181,7 @@ async def classify_with_anthropic(client: httpx.AsyncClient, product_name: str, 
                 "content-type": "application/json",
             },
             json={
-                "model": "claude-sonnet-4-20250514",
+                "model": "claude-sonnet-4-6",
                 "max_tokens": 256,
                 "system": SYSTEM_PROMPT,
                 "messages": [{"role": "user", "content": user_msg}],

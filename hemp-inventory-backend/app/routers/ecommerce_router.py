@@ -23,6 +23,8 @@ from app import leaflife_orders
 
 STORE_EMAIL = "Support@TheHempDispensary.com"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+# Model used for product auto-tagging; overridable so a retirement is an env change.
+AUTOTAG_MODEL = os.environ.get("AUTOTAG_MODEL", "claude-sonnet-4-6").strip() or "claude-sonnet-4-6"
 
 # SMTP env-var fallbacks (so emails work even if DB settings are empty)
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
@@ -817,7 +819,7 @@ async def _call_anthropic_for_tag(product: dict) -> dict:
                     "content-type": "application/json",
                 },
                 json={
-                    "model": "claude-sonnet-4-20250514",
+                    "model": AUTOTAG_MODEL,
                     "max_tokens": 512,
                     "system": _AUTOTAG_SYSTEM_PROMPT,
                     "messages": [{"role": "user", "content": user_msg}],
