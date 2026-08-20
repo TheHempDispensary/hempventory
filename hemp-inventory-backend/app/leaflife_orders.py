@@ -5,8 +5,8 @@ staff used to copy it into a shared Google Sheet by hand. This module builds
 those rows automatically and appends them via the Google Sheets API, matching
 the sheet's existing format exactly.
 
-Only the THD-owned columns (A–Y) are written. LeafLife fills the rest
-(tracking #, shipping cost, cost/profit split) themselves.
+Only the THD-owned columns (A–Z) are written. LeafLife fills the rest
+(shipping cost, cost/profit split) themselves.
 """
 
 from __future__ import annotations
@@ -61,7 +61,8 @@ COL_NOTES = 21
 COL_TOTAL = 22
 COL_CARD_FEE = 23
 COL_SHIP_METHOD = 24
-_ROW_WIDTH = 25
+COL_LABEL = 25       # "Shipping Details (LL) Label/Tracking #"
+_ROW_WIDTH = 26
 
 
 def is_configured() -> bool:
@@ -315,7 +316,7 @@ def _append_rows_sync(rows: list[list[str]]) -> int:
     are array formulas that auto-extend to new rows. So we can't use
     values.append (it would write a full contiguous block over A/K/L/M and be
     rejected). Instead we find the next empty row and write only the two
-    unprotected column segments — B:J and N:Y — at explicit ranges. The
+    unprotected column segments — B:J and N:Z — at explicit ranges. The
     protected formulas fill A/K/L/M for the new rows on their own.
     """
     service = _sheets_service()
@@ -332,13 +333,95 @@ def _append_rows_sync(rows: list[list[str]]) -> int:
     end = start + len(rows) - 1
     data = [
         {"range": f"'{ORDER_TAB}'!B{start}:J{end}", "values": [r[1:10] for r in rows]},
-        {"range": f"'{ORDER_TAB}'!N{start}:Y{end}", "values": [r[13:25] for r in rows]},
+        {"range": f"'{ORDER_TAB}'!N{start}:Z{end}", "values": [r[13:26] for r in rows]},
     ]
     service.spreadsheets().values().batchUpdate(
         spreadsheetId=SHEET_ID,
         body={"valueInputOption": "USER_ENTERED", "data": data},
     ).execute()
     return start
+
+
+def label_cell(label_url: str, tracking_number: str) -> str:
+    """The column-Z value LeafLife clicks to print the label.
+
+    A HYPERLINK formula labelled with the tracking #, matching how the column is
+    already used (the existing entries link to the label file).
+    """
+    tracking = (tracking_number or "").strip()
+    url = (label_url or "").strip()
+    if not url:
+        return tracking
+    text = tracking or "Print Label"
+    return f'=HYPERLINK("{url}","{text}")'
+
+
+def _order_row_sync(short: str) -> Optional[int]:
+    """1-based row of the order-info row for `short` (its order # is column C)."""
+    resp = (
+        _sheets_service()
+        .spreadsheets()
+        .values()
+        .get(spreadsheetId=SHEET_ID, range=f"'{ORDER_TAB}'!C:C")
+        .execute()
+    )
+    for i, row in enumerate(resp.get("values", []), start=1):
+        if row and row[0].strip() == short:
+            return i
+    return None
+
+
+def _label_at_sync(row: int) -> str:
+    resp = (
+        _sheets_service()
+        .spreadsheets()
+        .values()
+        .get(spreadsheetId=SHEET_ID, range=f"'{ORDER_TAB}'!Z{row}")
+        .execute()
+    )
+    values = resp.get("values", [])
+    return values[0][0].strip() if values and values[0] else ""
+
+
+def _write_label_sync(row: int, value: str) -> None:
+    _sheets_service().spreadsheets().values().update(
+        spreadsheetId=SHEET_ID,
+        range=f"'{ORDER_TAB}'!Z{row}",
+        valueInputOption="USER_ENTERED",
+        body={"values": [[value]]},
+    ).execute()
+
+
+async def sync_label(
+    *,
+    order_number: str,
+    label_url: str,
+    tracking_number: str,
+    overwrite: bool = False,
+) -> dict:
+    """Write the printable label link into column Z of the order's row.
+
+    Idempotent: an existing value is kept unless `overwrite`. Never raises, so
+    callers can fire-and-forget right after buying a label.
+    """
+    if not is_configured():
+        return {"ok": False, "reason": "Google Sheets credentials not configured", "written": 0}
+    value = label_cell(label_url, tracking_number)
+    if not value:
+        return {"ok": False, "reason": "no label to write", "written": 0}
+
+    short = short_order_no(order_number)
+    try:
+        row = await asyncio.to_thread(_order_row_sync, short)
+        if row is None:
+            return {"ok": False, "reason": "order not on sheet", "written": 0}
+        if not overwrite and await asyncio.to_thread(_label_at_sync, row):
+            return {"ok": True, "reason": "already present", "written": 0, "order_number": short}
+        await asyncio.to_thread(_write_label_sync, row, value)
+        return {"ok": True, "written": 1, "row": row, "order_number": short}
+    except Exception as e:  # noqa: BLE001 - best-effort; log and report
+        print(f"[leaflife-orders] failed to sync label for {short}: {e}")
+        return {"ok": False, "reason": str(e), "written": 0}
 
 
 def leaflife_items(items: list[dict]) -> list[dict]:
