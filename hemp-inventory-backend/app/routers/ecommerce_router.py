@@ -2376,9 +2376,10 @@ async def create_order(
     if order.loyalty_discount > 0:
         item_subtotal = sum(item.price * item.quantity for item in order.items)
         effective_subtotal = order.subtotal - order.discount - order.volume_discount
-        # Cap: loyalty cannot exceed effective subtotal (no covering tax),
-        # AND must leave at least $1.00 of product cost for the customer to pay.
-        max_loyalty = max(min(item_subtotal - 100, effective_subtotal - 100), 0)
+        # Cap: loyalty can cover the whole product subtotal but never tax or shipping,
+        # and the card charge can never be $0.
+        pre_loyalty_total = effective_subtotal + order.shipping_cost + order.tax
+        max_loyalty = max(min(item_subtotal, effective_subtotal, pre_loyalty_total - 1), 0)
         if order.loyalty_discount > max_loyalty:
             # Reject rather than apply part of the reward — the customer would spend the
             # full points for less than the reward's value.
@@ -2386,8 +2387,8 @@ async def create_order(
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    f"This reward is worth ${order.loyalty_discount/100:.2f} and needs an order subtotal of at least "
-                    f"${(order.loyalty_discount + 100)/100:.2f} to be used in full. Please add more to your cart or pick a smaller reward."
+                    f"This reward is worth ${order.loyalty_discount/100:.2f}, which is more than this order can apply "
+                    f"(up to ${max_loyalty/100:.2f}). Please add more to your cart or pick a smaller reward."
                 ),
             )
 
