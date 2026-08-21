@@ -20,6 +20,11 @@ from app.routers.inventory_router import smart_par, _do_sync, _normalise_sales_n
 router = APIRouter(prefix="/api/production", tags=["production"])
 
 
+def _name_words(name: str) -> tuple:
+    """Normalised words of a product name, sorted, for order-insensitive matching."""
+    return tuple(sorted(_normalise_sales_name(name).split()))
+
+
 async def _add_to_hq_inventory(sku: str, qty: float, name: str = "") -> dict:
     """Add `qty` units to a product's stock at HQ (Clover). Returns a result dict.
 
@@ -43,6 +48,7 @@ async def _add_to_hq_inventory(sku: str, qty: float, name: str = "") -> dict:
     elements = data.get("elements", [])
 
     target = _normalise_sales_name(name) if name else ""
+    target_words = _name_words(name) if name else ()
 
     def _sku_hit(it: dict) -> bool:
         return bool(sku) and ((it.get("sku") or "") == sku or it.get("id") == sku)
@@ -50,14 +56,22 @@ async def _add_to_hq_inventory(sku: str, qty: float, name: str = "") -> dict:
     def _name_hit(it: dict) -> bool:
         return bool(target) and _normalise_sales_name(it.get("name") or "") == target
 
+    def _words_hit(it: dict) -> bool:
+        return bool(target_words) and _name_words(it.get("name") or "") == target_words
+
     # Prefer an item that matches BOTH the stored id/SKU and the name; then an
-    # exact name match; then the SKU/id alone. Flower items frequently have no
-    # user SKU (so the batch carries a Clover item id) and some products share
-    # a duplicate SKU, which makes the SKU alone unreliable — the product name
-    # is the dependable identifier, so it wins over a SKU-only hit.
+    # exact name match; then the same words in a different order (batch titles
+    # get typed by hand, e.g. "DIVINE SMALLS" vs Clover's "SMALLS DIVINE"), but
+    # only when it is unambiguous; then the SKU/id alone. Flower items
+    # frequently have no user SKU (so the batch carries a Clover item id) and
+    # some products share a duplicate SKU, which makes the SKU alone unreliable
+    # — the product name is the dependable identifier, so it wins over a
+    # SKU-only hit.
+    word_matches = [it for it in elements if _words_hit(it)] if target_words else []
     match = (
         next((it for it in elements if _sku_hit(it) and _name_hit(it)), None)
         or next((it for it in elements if _name_hit(it)), None)
+        or (word_matches[0] if len(word_matches) == 1 else None)
         or next((it for it in elements if _sku_hit(it)), None)
     )
     if not match:
@@ -551,6 +565,9 @@ async def create_batch(
 ):
     if body.status not in _STATUSES:
         raise HTTPException(status_code=400, detail=f"Invalid status '{body.status}'")
+    # Hand-typed titles often carry stray whitespace, which then shows up
+    # verbatim in "'NAME ' not found in HQ inventory" errors.
+    body.product_name = (body.product_name or "").strip()
     completed_expr = "CURRENT_TIMESTAMP" if body.status == "done" else "NULL"
     cursor = await db.execute(
         f"""INSERT INTO production_batches
@@ -619,7 +636,7 @@ async def update_batch(
     ]:
         val = getattr(body, col)
         if val is not None:
-            fields[col] = val
+            fields[col] = val.strip() if col == "product_name" else val
     if body.qa_check is not None:
         fields["qa_check"] = int(body.qa_check)
     if body.label_ordered is not None:
@@ -781,7 +798,8 @@ async def upsert_bulk_recipe(
     db: aiosqlite.Connection = Depends(get_db),
 ):
     """Create or update the bulk link for a packaged product (keyed by name)."""
-    key = _normalise_sales_name(body.packaged_name or "")
+    body.packaged_name = (body.packaged_name or "").strip()
+    key = _normalise_sales_name(body.packaged_name)
     if not key:
         raise HTTPException(status_code=400, detail="packaged_name is required")
     if not (body.bulk_name or "").strip():

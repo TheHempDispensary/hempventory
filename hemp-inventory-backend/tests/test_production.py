@@ -327,3 +327,65 @@ async def test_add_to_hq_inventory_name_wins_over_shared_sku(monkeypatch):
     assert res["ok"] is True
     assert res["item_id"] == "GREEN"  # not BLUE, despite the shared SKU
     assert res["new"] == 50
+
+
+def _patch_hq(monkeypatch, elements):
+    """Point _add_to_hq_inventory at a fake HQ Clover with `elements`."""
+    import app.routers.production_router as prod
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            self.updated = None
+
+        async def get_items(self, expand=""):
+            return {"elements": elements}
+
+        async def update_item_stock(self, item_id, qty):
+            self.updated = (item_id, qty)
+
+    monkeypatch.setattr(prod, "CloverClient", FakeClient)
+    monkeypatch.setattr("app.routers.ecommerce_router.HQ_MERCHANT_ID", "M", raising=False)
+    monkeypatch.setattr("app.routers.ecommerce_router.HQ_API_TOKEN", "T", raising=False)
+    monkeypatch.setattr(
+        "app.routers.ecommerce_router.invalidate_product_cache", lambda: None, raising=False
+    )
+    return prod
+
+
+async def test_add_to_hq_inventory_matches_reordered_words(monkeypatch):
+    """Hand-typed "DIVINE SMALLS" still finds Clover's "SMALLS DIVINE"."""
+    prod = _patch_hq(monkeypatch, [
+        {"id": "HQ1", "sku": "", "name": "THC FLOWER SMALLS DIVINE SATIVA 3.5 GRAMS",
+         "itemStock": {"quantity": 6}},
+        {"id": "HQ2", "sku": "", "name": "THC FLOWER SMALLS DIVINE SATIVA 2 GRAMS",
+         "itemStock": {"quantity": 9}},
+    ])
+    res = await prod._add_to_hq_inventory("", 50, "THC FLOWER DIVINE SMALLS SATIVA 3.5 GRAMS ")
+    assert res["ok"] is True
+    assert res["item_id"] == "HQ1"  # the 3.5g record, not the 2g one
+    assert res["new"] == 56
+
+
+async def test_add_to_hq_inventory_skips_ambiguous_word_match(monkeypatch):
+    """Two HQ records with the same words in different orders stay unresolved."""
+    prod = _patch_hq(monkeypatch, [
+        {"id": "A", "sku": "", "name": "THC FLOWER SMALLS DIVINE 3.5 GRAMS",
+         "itemStock": {"quantity": 1}},
+        {"id": "B", "sku": "", "name": "THC FLOWER DIVINE SMALLS 3.5 GRAMS",
+         "itemStock": {"quantity": 1}},
+    ])
+    res = await prod._add_to_hq_inventory("", 5, "THC SMALLS FLOWER DIVINE 3.5 GRAMS")
+    assert res["ok"] is False
+    assert "not found in HQ inventory" in res["reason"]
+
+
+async def test_batch_name_is_trimmed(db):
+    created = await pr.create_batch(
+        pr.BatchCreate(product_name="  Lemonade 2 oz  ", planned_qty=1, status="planned"),
+        user={}, db=db,
+    )
+    assert created["product_name"] == "Lemonade 2 oz"
+    updated = await pr.update_batch(
+        created["id"], pr.BatchUpdate(product_name="Lemonade 4 oz "), user={}, db=db,
+    )
+    assert updated["product_name"] == "Lemonade 4 oz"
