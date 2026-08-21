@@ -109,7 +109,9 @@ class CreateShipmentRequest(BaseModel):
 class PurchaseLabelRequest(BaseModel):
     rate_id: str
     order_id: int
-    label_file_type: str = "PDF"
+    # 4x6 is the standard label size; plain "PDF" is an 8.5x11 page with the
+    # label in one corner, which LeafLife can't print.
+    label_file_type: str = "PDF_4x6"
     shipment_id: int | None = None  # order_shipments.id for split-shipment orders
 
 

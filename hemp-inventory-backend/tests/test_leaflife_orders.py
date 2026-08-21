@@ -83,7 +83,7 @@ def test_build_rows_column_placement_and_totals():
     rows = lo.build_rows(
         order_number="HD-6A653011-1234",
         order_date="07/02/2026",
-        status="Processing",
+        status=lo.STATUS_AWAITING_LABEL,
         first_name="Jane",
         last_name="Doe",
         street="1 Main St",
@@ -99,7 +99,7 @@ def test_build_rows_column_placement_and_totals():
     assert len(rows) == 5
     info = rows[0]
     assert info[lo.COL_ORDER_NO] == "6A653011"
-    assert info[lo.COL_STATUS] == "Processing"
+    assert info[lo.COL_STATUS] == "Awaiting Label"
     assert info[lo.COL_FIRST] == "Jane"
     assert info[lo.COL_ZIP] == "34608"
     assert info[lo.COL_SHIP_METHOD] == "Priority"
@@ -134,7 +134,7 @@ def test_build_rows_one_row_per_unit():
     rows = lo.build_rows(
         order_number="6ABC",
         order_date="07/02/2026",
-        status="Processing",
+        status=lo.STATUS_AWAITING_LABEL,
         first_name="A",
         last_name="B",
         street="",
