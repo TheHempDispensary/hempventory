@@ -2376,13 +2376,21 @@ async def create_order(
     if order.loyalty_discount > 0:
         item_subtotal = sum(item.price * item.quantity for item in order.items)
         effective_subtotal = order.subtotal - order.discount - order.volume_discount
-        # Cap: loyalty cannot exceed effective subtotal (no covering tax),
-        # AND must leave at least $1.00 of product cost for the customer to pay.
-        max_loyalty = max(min(item_subtotal - 100, effective_subtotal - 100), 0)
+        # Cap: loyalty can cover the whole product subtotal but never tax or shipping,
+        # and the card charge can never be $0.
+        pre_loyalty_total = effective_subtotal + order.shipping_cost + order.tax
+        max_loyalty = max(min(item_subtotal, effective_subtotal, pre_loyalty_total - 1), 0)
         if order.loyalty_discount > max_loyalty:
-            print(f"[order] Loyalty capped: requested ${order.loyalty_discount/100:.2f}, max allowed ${max_loyalty/100:.2f} (item_subtotal ${item_subtotal/100:.2f}, effective_subtotal ${effective_subtotal/100:.2f})")
-            order.loyalty_discount = max_loyalty
-            order.total = effective_subtotal - order.loyalty_discount + order.shipping_cost + order.tax
+            # Reject rather than apply part of the reward — the customer would spend the
+            # full points for less than the reward's value.
+            print(f"[order] BLOCKED partial loyalty redemption: requested ${order.loyalty_discount/100:.2f}, max allowed ${max_loyalty/100:.2f} (item_subtotal ${item_subtotal/100:.2f}, effective_subtotal ${effective_subtotal/100:.2f})")
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"This reward is worth ${order.loyalty_discount/100:.2f}, which is more than this order can apply "
+                    f"(up to ${max_loyalty/100:.2f}). Please add more to your cart or pick a smaller reward."
+                ),
+            )
 
         # Server-side verification: look up the loyalty customer and verify they have
         # enough points for the selected reward before accepting the order.
