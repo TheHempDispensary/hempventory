@@ -622,6 +622,13 @@ export default function Production() {
   );
 }
 
+/** Server-supplied reason if there is one, else the transport-level message. */
+function errText(e: unknown): string {
+  const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+  if (detail) return detail;
+  return e instanceof Error ? e.message : "Unknown error";
+}
+
 function BatchModal({ batch, products, onClose, onSaved }: {
   batch: ProductionBatch;
   products: InvItem[];
@@ -685,7 +692,7 @@ function BatchModal({ batch, products, onClose, onSaved }: {
     if (!form.product_name.trim()) { setErr("Product name is required"); return; }
     setSaving(true); setErr("");
     const payload: BatchPayload = {
-      product_name: form.product_name,
+      product_name: form.product_name.trim(),
       sku: form.sku,
       size: form.size,
       planned_qty: Number(form.planned_qty) || 0,
@@ -709,10 +716,13 @@ function BatchModal({ batch, products, onClose, onSaved }: {
       setSaving(false);
       return;
     }
-    try {
+    // The link has to land before the batch save, since marking a batch Done is
+    // what triggers the bulk deduction. Retry once: a dropped request here would
+    // otherwise throw away everything else the operator just typed.
+    const saveLink = async () => {
       if (bulkName && perUnit > 0) {
         await upsertBulkRecipe({
-          packaged_name: form.product_name,
+          packaged_name: form.product_name.trim(),
           packaged_sku: form.sku,
           bulk_name: bulkName,
           bulk_per_unit: perUnit,
@@ -720,8 +730,15 @@ function BatchModal({ batch, products, onClose, onSaved }: {
       } else if (!bulkName && recipeId != null) {
         await deleteBulkRecipe(recipeId);
       }
+    };
+    try {
+      try {
+        await saveLink();
+      } catch {
+        await saveLink();
+      }
     } catch (e: unknown) {
-      setErr(e instanceof Error ? `Couldn't save the bulk link: ${e.message}` : "Couldn't save the bulk link");
+      setErr(`Couldn't save the bulk link, so nothing was saved — try again. (${errText(e)})`);
       setSaving(false);
       return;
     }
@@ -730,7 +747,7 @@ function BatchModal({ batch, products, onClose, onSaved }: {
       const res = isNew ? await createProductionBatch(payload) : await updateProductionBatch(form.id, payload);
       onSaved(res.data, isNew);
     } catch (e: unknown) {
-      setErr(e instanceof Error ? e.message : "Save failed");
+      setErr(errText(e));
       setSaving(false);
     }
   };

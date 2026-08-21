@@ -3,10 +3,16 @@ import os
 
 DB_PATH = os.environ.get("DB_PATH", "/data/app.db")
 
+# Background syncs (Clover inventory, loyalty, orders) hold the write lock for
+# long stretches, so a request that writes needs to be patient rather than fail
+# with "database is locked".
+BUSY_TIMEOUT_MS = 30000
+
+
 async def get_db():
     db = await aiosqlite.connect(DB_PATH)
     db.row_factory = aiosqlite.Row
-    await db.execute("PRAGMA busy_timeout = 5000")
+    await db.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
     await db.execute("PRAGMA journal_mode = WAL")
     try:
         yield db
@@ -16,7 +22,7 @@ async def get_db():
 async def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA busy_timeout = 5000")
+        await db.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
         await db.execute("PRAGMA journal_mode = WAL")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS locations (

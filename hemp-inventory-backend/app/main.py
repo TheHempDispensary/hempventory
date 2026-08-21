@@ -1,15 +1,17 @@
 import asyncio
+import traceback
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import JSONResponse
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 load_dotenv()
 
-from app.database import init_db, get_db, DB_PATH
+from app.database import init_db, get_db, DB_PATH, BUSY_TIMEOUT_MS
 from app.routers import auth_router, locations_router, inventory_router, par_router, alerts_router, ecommerce_router, loyalty_router, timeclock_router, sales_router, shipping_router, scraper_router, chat_router, coa_router, production_router
 from app.routers.inventory_router import _do_sync
 from app.routers.loyalty_router import _do_bulk_import_customers, _do_sync_orders
@@ -24,7 +26,7 @@ async def _connect_db():
     """Create a database connection with WAL mode and busy timeout."""
     db = await aiosqlite.connect(DB_PATH)
     db.row_factory = aiosqlite.Row
-    await db.execute("PRAGMA busy_timeout = 5000")
+    await db.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
     await db.execute("PRAGMA journal_mode = WAL")
     return db
 
@@ -260,6 +262,23 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Hemp Dispensary Inventory Manager", lifespan=lifespan)
+
+# Turn unhandled errors into a normal JSON response. Starlette's built-in
+# handler runs *outside* the CORS middleware, so its bare 500 carries no
+# Access-Control-Allow-Origin header and the browser hides the failure behind a
+# generic "Network Error" instead of showing what actually broke. Registered
+# first (= innermost), so its response still passes back out through CORS.
+@app.middleware("http")
+async def json_errors(request: Request, call_next):
+    try:
+        return await call_next(request)
+    except Exception as e:
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"{type(e).__name__}: {e}"},
+        )
+
 
 # Compress responses for faster transfer
 app.add_middleware(GZipMiddleware, minimum_size=1000)
