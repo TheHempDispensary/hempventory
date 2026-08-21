@@ -612,6 +612,16 @@ async def init_db():
         except Exception:
             pass  # column already exists
 
+        # Auto-tag bookkeeping: remembers which products the AI tagger already
+        # tried, so products it cannot classify aren't re-sent on every refresh.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS product_autotag_attempts (
+                product_key TEXT PRIMARY KEY,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_attempt_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Chat sessions table (Bud AI conversations)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS chat_sessions (

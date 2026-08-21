@@ -25,6 +25,14 @@ STORE_EMAIL = "Support@TheHempDispensary.com"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 # Model used for product auto-tagging; overridable so a retirement is an env change.
 AUTOTAG_MODEL = os.environ.get("AUTOTAG_MODEL", "claude-sonnet-4-6").strip() or "claude-sonnet-4-6"
+# Kill switch: set AUTOTAG_ENABLED=0 to stop all AI tagging without a deploy.
+AUTOTAG_ENABLED = os.environ.get("AUTOTAG_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+# Tagging costs money per product, so a pass is small, rate-limited, and rare.
+AUTOTAG_MAX_PER_RUN = 25
+AUTOTAG_MAX_ATTEMPTS = 3
+AUTOTAG_RUN_INTERVAL = 21600  # 6 hours between passes
+_autotag_last_run: float = 0.0
+_autotag_running: bool = False
 
 # SMTP env-var fallbacks (so emails work even if DB settings are empty)
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
@@ -695,9 +703,67 @@ async def _auto_tag_new_products(
     desc_by_sku: dict,
     desc_by_name: dict,
 ) -> None:
-    """Background task: find products missing attributes or descriptions, call Anthropic API to tag them."""
-    if not ANTHROPIC_API_KEY:
+    """Background task: find products missing attributes or descriptions, call Anthropic API to tag them.
+
+    The product cache refreshes every few minutes and on every inventory edit, so
+    this runs at most once per AUTOTAG_RUN_INTERVAL and only on a small batch of
+    products it has not already given up on — otherwise every refresh would re-send
+    the same unclassifiable products to Anthropic forever.
+    """
+    global _autotag_last_run, _autotag_running
+    if not ANTHROPIC_API_KEY or not AUTOTAG_ENABLED or _autotag_running:
         return
+    now = time.time()
+    if now - _autotag_last_run < AUTOTAG_RUN_INTERVAL:
+        return
+    _autotag_last_run = now
+    _autotag_running = True
+    try:
+        await _run_auto_tag_pass(products, attrs_by_sku, attrs_by_name, desc_by_sku, desc_by_name)
+    finally:
+        _autotag_running = False
+
+
+class _AutoTagUnavailable(Exception):
+    """Anthropic refused the whole pass (auth, quota or rate limit)."""
+
+
+def _autotag_key(sku: str, name: str) -> str:
+    return sku or name.upper()
+
+
+async def _load_autotag_attempts() -> dict[str, int]:
+    """Attempt counts per product, so exhausted products are skipped."""
+    from app.database import DB_PATH
+
+    db = await aiosqlite.connect(DB_PATH)
+    try:
+        cursor = await db.execute("SELECT product_key, attempts FROM product_autotag_attempts")
+        rows = await cursor.fetchall()
+    finally:
+        await db.close()
+    return {row[0]: row[1] for row in rows}
+
+
+async def _record_autotag_attempt(db: aiosqlite.Connection, product_key: str) -> None:
+    await db.execute(
+        """INSERT INTO product_autotag_attempts (product_key, attempts)
+           VALUES (?, 1)
+           ON CONFLICT(product_key) DO UPDATE SET
+               attempts = attempts + 1,
+               last_attempt_at = CURRENT_TIMESTAMP""",
+        (product_key,),
+    )
+
+
+async def _run_auto_tag_pass(
+    products: list,
+    attrs_by_sku: dict,
+    attrs_by_name: dict,
+    desc_by_sku: dict,
+    desc_by_name: dict,
+) -> None:
+    attempts_by_key = await _load_autotag_attempts()
 
     # Collect products that need tagging (no attributes) or descriptions
     needs_tagging: list[dict] = []
@@ -705,6 +771,9 @@ async def _auto_tag_new_products(
         sku = p.get("sku", "")
         name = p.get("name", "")
         cats = p.get("categories", [])
+
+        if attempts_by_key.get(_autotag_key(sku, name), 0) >= AUTOTAG_MAX_ATTEMPTS:
+            continue
 
         # Skip non-consumable categories
         if any(c in _SKIP_CATEGORIES for c in cats):
@@ -736,7 +805,9 @@ async def _auto_tag_new_products(
     if not needs_tagging:
         return
 
-    print(f"[auto-tag] {len(needs_tagging)} products need tagging/description")
+    pending = len(needs_tagging)
+    needs_tagging = needs_tagging[:AUTOTAG_MAX_PER_RUN]
+    print(f"[auto-tag] {pending} products need tagging/description; doing {len(needs_tagging)} this pass")
 
     from app.database import DB_PATH
 
@@ -747,11 +818,15 @@ async def _auto_tag_new_products(
         for product in batch:
             try:
                 result = await _call_anthropic_for_tag(product)
-                if not result:
-                    continue
 
                 db = await aiosqlite.connect(DB_PATH)
                 try:
+                    await _record_autotag_attempt(
+                        db, _autotag_key(product["sku"], product["name"])
+                    )
+                    if not result:
+                        await db.commit()
+                        continue
                     # Save attributes if needed
                     if product["needs_attrs"] and result.get("effect_tag"):
                         strain = result.get("strain_type", "N/A")
@@ -786,6 +861,9 @@ async def _auto_tag_new_products(
                 finally:
                     await db.close()
 
+            except _AutoTagUnavailable as e:
+                print(f"[auto-tag] Stopping pass — Anthropic unavailable: {e}")
+                return
             except Exception as e:
                 print(f"[auto-tag] Error tagging {product['name']}: {e}")
 
@@ -827,6 +905,10 @@ async def _call_anthropic_for_tag(product: dict) -> dict:
             )
             if resp.status_code != 200:
                 print(f"[auto-tag] Anthropic API error {resp.status_code} for {name}: {resp.text[:200]}")
+                # 400 covers a spend cap being hit, which applies to every product,
+                # so keep these from burning through the whole batch one by one.
+                if resp.status_code in (400, 401, 403, 429, 529):
+                    raise _AutoTagUnavailable(f"HTTP {resp.status_code}")
                 return {}
 
             data = resp.json()
@@ -837,6 +919,8 @@ async def _call_anthropic_for_tag(product: dict) -> dict:
     except json.JSONDecodeError:
         print(f"[auto-tag] Failed to parse JSON for {name}: {text[:200]}")
         return {}
+    except _AutoTagUnavailable:
+        raise
     except Exception as e:
         print(f"[auto-tag] API call failed for {name}: {e}")
         return {}
