@@ -2,8 +2,11 @@
 
 The Google Sheets calls are mocked — no live network or Sheet mutation.
 """
+import inspect
+from unittest.mock import MagicMock
+
 from app import leaflife_orders as lo
-from app.routers.shipping_router import _label_token, print_label_url
+from app.routers.shipping_router import PurchaseLabelRequest, _label_token, print_label_url
 
 
 def test_label_cell_is_hyperlink_labelled_with_tracking():
@@ -14,6 +17,12 @@ def test_label_cell_is_hyperlink_labelled_with_tracking():
 def test_label_cell_falls_back_to_tracking_only():
     assert lo.label_cell("", "93001208455") == "93001208455"
     assert lo.label_cell("", "") == ""
+
+
+def test_order_starts_awaiting_a_label():
+    # LeafLife only ships once column Z has a label, so the appended status says so.
+    default = inspect.signature(lo.sync_order).parameters["status"].default
+    assert default == lo.STATUS_AWAITING_LABEL == "Awaiting Label"
 
 
 def test_label_column_is_last_written_column():
@@ -76,6 +85,23 @@ async def test_sync_label_not_configured(monkeypatch):
         order_number="HD-1-1", label_url="https://api/x", tracking_number="930012"
     )
     assert res["ok"] is False and "not configured" in res["reason"]
+
+
+def test_writing_a_label_marks_the_order_shipped(monkeypatch):
+    service = MagicMock()
+    monkeypatch.setattr(lo, "_sheets_service", lambda: service)
+
+    lo._write_label_sync(641, '=HYPERLINK("https://api/x","930012")')
+
+    body = service.spreadsheets().values().batchUpdate.call_args.kwargs["body"]
+    ranges = {d["range"]: d["values"][0][0] for d in body["data"]}
+    assert ranges[f"'{lo.ORDER_TAB}'!Z641"].startswith("=HYPERLINK(")
+    assert ranges[f"'{lo.ORDER_TAB}'!D641"] == lo.STATUS_SHIPPED
+
+
+def test_labels_are_purchased_at_4x6():
+    # Plain "PDF" is an 8.5x11 page LeafLife can't print on a label printer.
+    assert PurchaseLabelRequest(rate_id="r", order_id=1).label_file_type == "PDF_4x6"
 
 
 def test_print_label_url_uses_short_order_no_and_token(monkeypatch):

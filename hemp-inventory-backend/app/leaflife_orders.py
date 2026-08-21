@@ -64,6 +64,11 @@ COL_SHIP_METHOD = 24
 COL_LABEL = 25       # "Shipping Details (LL) Label/Tracking #"
 _ROW_WIDTH = 26
 
+# Order Status (column D) values LeafLife reads. An order is only ready to ship
+# once its label is in column Z, so it starts as awaiting one.
+STATUS_AWAITING_LABEL = "Awaiting Label"
+STATUS_SHIPPED = "Shipped"
+
 
 def is_configured() -> bool:
     """True when a service-account key is available to write the sheet."""
@@ -384,11 +389,16 @@ def _label_at_sync(row: int) -> str:
 
 
 def _write_label_sync(row: int, value: str) -> None:
-    _sheets_service().spreadsheets().values().update(
+    """Fill the label cell and mark the order ready to ship."""
+    _sheets_service().spreadsheets().values().batchUpdate(
         spreadsheetId=SHEET_ID,
-        range=f"'{ORDER_TAB}'!Z{row}",
-        valueInputOption="USER_ENTERED",
-        body={"values": [[value]]},
+        body={
+            "valueInputOption": "USER_ENTERED",
+            "data": [
+                {"range": f"'{ORDER_TAB}'!Z{row}", "values": [[value]]},
+                {"range": f"'{ORDER_TAB}'!D{row}", "values": [[STATUS_SHIPPED]]},
+            ],
+        },
     ).execute()
 
 
@@ -447,7 +457,7 @@ async def sync_order(
     shipping_service: str,
     items: list[dict],
     order_date: Optional[str] = None,
-    status: str = "Processing",
+    status: str = STATUS_AWAITING_LABEL,
 ) -> dict:
     """Append one LeafLife order to the sheet. Idempotent by order #.
 
