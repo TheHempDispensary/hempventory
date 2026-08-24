@@ -39,7 +39,7 @@ _EASTERN = ZoneInfo("America/New_York")
 COL_GROUP = 0        # order # repeated on every row of the group
 COL_DATE = 1
 COL_ORDER_NO = 2
-COL_STATUS = 3
+COL_STATUS = 3       # LeafLife's own column: they set it once they ship
 COL_FLOWER = 4
 COL_FLOWER_QTY = 5
 COL_CONC = 6
@@ -57,17 +57,12 @@ COL_CITY = 17
 COL_STATE = 18
 COL_ZIP = 19
 COL_ORDER_LINK = 20
-COL_NOTES = 21
+COL_NOTES = 21       # LeafLife's own column
 COL_TOTAL = 22
 COL_CARD_FEE = 23
 COL_SHIP_METHOD = 24
 COL_LABEL = 25       # "Shipping Details (LL) Label/Tracking #"
 _ROW_WIDTH = 26
-
-# Order Status (column D) values LeafLife reads. An order is only ready to ship
-# once its label is in column Z, so it starts as awaiting one.
-STATUS_AWAITING_LABEL = "Awaiting Label"
-STATUS_SHIPPED = "Shipped"
 
 
 def is_configured() -> bool:
@@ -216,14 +211,12 @@ def build_rows(
     *,
     order_number: str,
     order_date: str,
-    status: str,
     first_name: str,
     last_name: str,
     street: str,
     city: str,
     state: str,
     zip_code: str,
-    notes: str,
     ship_method: str,
     lf_items: list[dict],
     lookup: dict[str, dict],
@@ -237,6 +230,8 @@ def build_rows(
     fills them itself via array formulas (A carries the order # down; K/L/M
     VLOOKUP the product name against the 'Pricing Archive' tab). Those columns
     are protected, so we must not write them.
+
+    Order Status (D) and Order Notes (V) belong to LeafLife and are left blank.
     """
     total_cents = sum(int(it["price"]) * int(it["quantity"]) for it in lf_items)
 
@@ -247,14 +242,12 @@ def build_rows(
     info = blank_row()
     info[COL_DATE] = order_date
     info[COL_ORDER_NO] = short_order_no(order_number)
-    info[COL_STATUS] = status
     info[COL_FIRST] = first_name
     info[COL_LAST] = last_name
     info[COL_STREET] = street
     info[COL_CITY] = city
     info[COL_STATE] = state_name(state)
     info[COL_ZIP] = zip_code
-    info[COL_NOTES] = notes
     info[COL_TOTAL] = _money(total_cents)
     info[COL_CARD_FEE] = _money(card_fee_cents(total_cents))
     info[COL_SHIP_METHOD] = ship_method
@@ -389,15 +382,12 @@ def _label_at_sync(row: int) -> str:
 
 
 def _write_label_sync(row: int, value: str) -> None:
-    """Fill the label cell and mark the order ready to ship."""
+    """Fill the label cell, leaving the status column for LeafLife to set."""
     _sheets_service().spreadsheets().values().batchUpdate(
         spreadsheetId=SHEET_ID,
         body={
             "valueInputOption": "USER_ENTERED",
-            "data": [
-                {"range": f"'{ORDER_TAB}'!Z{row}", "values": [[value]]},
-                {"range": f"'{ORDER_TAB}'!D{row}", "values": [[STATUS_SHIPPED]]},
-            ],
+            "data": [{"range": f"'{ORDER_TAB}'!Z{row}", "values": [[value]]}],
         },
     ).execute()
 
@@ -453,11 +443,9 @@ async def sync_order(
     city: str,
     state: str,
     zip_code: str,
-    notes: str,
     shipping_service: str,
     items: list[dict],
     order_date: Optional[str] = None,
-    status: str = STATUS_AWAITING_LABEL,
 ) -> dict:
     """Append one LeafLife order to the sheet. Idempotent by order #.
 
@@ -480,14 +468,12 @@ async def sync_order(
         rows = build_rows(
             order_number=order_number,
             order_date=order_date or today_eastern(),
-            status=status,
             first_name=first_name,
             last_name=last_name,
             street=street,
             city=city,
             state=state,
             zip_code=zip_code,
-            notes=notes,
             ship_method=usps_method(shipping_service),
             lf_items=lf,
             lookup=lookup,

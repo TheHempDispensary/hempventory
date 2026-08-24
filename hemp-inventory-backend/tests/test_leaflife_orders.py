@@ -83,14 +83,12 @@ def test_build_rows_column_placement_and_totals():
     rows = lo.build_rows(
         order_number="HD-6A653011-1234",
         order_date="07/02/2026",
-        status=lo.STATUS_AWAITING_LABEL,
         first_name="Jane",
         last_name="Doe",
         street="1 Main St",
         city="Spring Hill",
         state="FL",
         zip_code="34608",
-        notes="leave at door",
         ship_method="Priority",
         lf_items=lf_items,
         lookup=_lookup(),
@@ -99,7 +97,9 @@ def test_build_rows_column_placement_and_totals():
     assert len(rows) == 5
     info = rows[0]
     assert info[lo.COL_ORDER_NO] == "6A653011"
-    assert info[lo.COL_STATUS] == "Awaiting Label"
+    # Status and notes belong to LeafLife — we never write them.
+    assert info[lo.COL_STATUS] == ""
+    assert info[lo.COL_NOTES] == ""
     assert info[lo.COL_FIRST] == "Jane"
     assert info[lo.COL_ZIP] == "34608"
     assert info[lo.COL_SHIP_METHOD] == "Priority"
@@ -134,14 +134,12 @@ def test_build_rows_one_row_per_unit():
     rows = lo.build_rows(
         order_number="6ABC",
         order_date="07/02/2026",
-        status=lo.STATUS_AWAITING_LABEL,
         first_name="A",
         last_name="B",
         street="",
         city="",
         state="",
         zip_code="",
-        notes="",
         ship_method="",
         lf_items=[{"name": "Blue Dream 28 gram", "sku": "LF-BD", "price": 100, "quantity": 3}],
         lookup=_lookup(),
@@ -153,7 +151,7 @@ async def test_sync_order_no_lf_items():
     res = await lo.sync_order(
         order_number="HD-1-1",
         first_name="A", last_name="B", street="", city="", state="", zip_code="",
-        notes="", shipping_service="", items=[{"name": "x", "sku": "THD-1", "price": 1, "quantity": 1}],
+        shipping_service="", items=[{"name": "x", "sku": "THD-1", "price": 1, "quantity": 1}],
     )
     assert res["ok"] is False and res["written"] == 0
 
@@ -164,7 +162,7 @@ async def test_sync_order_not_configured(monkeypatch):
     res = await lo.sync_order(
         order_number="HD-1-1",
         first_name="A", last_name="B", street="", city="", state="", zip_code="",
-        notes="", shipping_service="", items=[{"name": "OG", "sku": "LF-OG", "price": 1, "quantity": 1}],
+        shipping_service="", items=[{"name": "OG", "sku": "LF-OG", "price": 1, "quantity": 1}],
     )
     assert res["ok"] is False and "not configured" in res["reason"]
 
@@ -190,7 +188,7 @@ async def test_sync_order_appends_with_mocks(monkeypatch):
         order_number="HD-6A653011-1234",
         first_name="Jane", last_name="Doe",
         street="1 Main St", city="Spring Hill", state="FL", zip_code="34608",
-        notes="", shipping_service="USPS Priority",
+        shipping_service="USPS Priority",
         items=[{"name": "Blue Dream 28 gram", "sku": "LF-BD-28", "price": 10000, "quantity": 1}],
     )
     assert res["ok"] is True
@@ -219,7 +217,7 @@ async def test_sync_order_idempotent_when_present(monkeypatch):
         order_number="HD-6A653011-1234",
         first_name="Jane", last_name="Doe",
         street="", city="", state="", zip_code="",
-        notes="", shipping_service="",
+        shipping_service="",
         items=[{"name": "Blue Dream 28 gram", "sku": "LF-BD-28", "price": 10000, "quantity": 1}],
     )
     assert res["ok"] is True and res["written"] == 0

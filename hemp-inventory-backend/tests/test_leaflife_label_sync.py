@@ -19,10 +19,9 @@ def test_label_cell_falls_back_to_tracking_only():
     assert lo.label_cell("", "") == ""
 
 
-def test_order_starts_awaiting_a_label():
-    # LeafLife only ships once column Z has a label, so the appended status says so.
-    default = inspect.signature(lo.sync_order).parameters["status"].default
-    assert default == lo.STATUS_AWAITING_LABEL == "Awaiting Label"
+def test_order_status_is_never_written():
+    # LeafLife owns the status column; they mark orders shipped themselves.
+    assert "status" not in inspect.signature(lo.sync_order).parameters
 
 
 def test_label_column_is_last_written_column():
@@ -87,7 +86,7 @@ async def test_sync_label_not_configured(monkeypatch):
     assert res["ok"] is False and "not configured" in res["reason"]
 
 
-def test_writing_a_label_marks_the_order_shipped(monkeypatch):
+def test_writing_a_label_leaves_the_status_column_alone(monkeypatch):
     service = MagicMock()
     monkeypatch.setattr(lo, "_sheets_service", lambda: service)
 
@@ -95,8 +94,8 @@ def test_writing_a_label_marks_the_order_shipped(monkeypatch):
 
     body = service.spreadsheets().values().batchUpdate.call_args.kwargs["body"]
     ranges = {d["range"]: d["values"][0][0] for d in body["data"]}
+    assert list(ranges) == [f"'{lo.ORDER_TAB}'!Z641"]
     assert ranges[f"'{lo.ORDER_TAB}'!Z641"].startswith("=HYPERLINK(")
-    assert ranges[f"'{lo.ORDER_TAB}'!D641"] == lo.STATUS_SHIPPED
 
 
 def test_labels_are_purchased_at_4x6():
