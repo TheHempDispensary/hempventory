@@ -3135,7 +3135,6 @@ async def _sync_leaflife_order(order: "CreateOrderRequest", order_number: str) -
         city=ship.city,
         state=ship.state,
         zip_code=ship.zip,
-        notes=order.notes,
         shipping_service=order.shipping_service,
         items=items,
     )
@@ -4090,7 +4089,7 @@ async def _sync_leaflife_from_db(db: aiosqlite.Connection, order_number: str) ->
     """Reconstruct a stored order and (re)write its LeafLife items to the sheet."""
     cur = await db.execute(
         """SELECT customer_first_name, customer_last_name, shipping_address,
-                  shipping_city, shipping_state, shipping_zip, notes,
+                  shipping_city, shipping_state, shipping_zip,
                   shipping_service, fulfillment_type, id
              FROM ecommerce_orders WHERE order_number = ?""",
         (order_number,),
@@ -4098,12 +4097,12 @@ async def _sync_leaflife_from_db(db: aiosqlite.Connection, order_number: str) ->
     row = await cur.fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail=f"Order {order_number} not found")
-    if not _is_shipping_fulfillment(row[8]):
+    if not _is_shipping_fulfillment(row[7]):
         return {"ok": False, "reason": "not a shipping order", "written": 0}
 
     items_cur = await db.execute(
         "SELECT product_name, sku, price, quantity FROM ecommerce_order_items WHERE order_id = ?",
-        (row[9],),
+        (row[8],),
     )
     item_rows = await items_cur.fetchall()
     items = [
@@ -4121,8 +4120,7 @@ async def _sync_leaflife_from_db(db: aiosqlite.Connection, order_number: str) ->
         city=row[3] or "",
         state=row[4] or "",
         zip_code=row[5] or "",
-        notes=row[6] or "",
-        shipping_service=row[7] or "",
+        shipping_service=row[6] or "",
         items=items,
     )
     if result.get("ok"):
