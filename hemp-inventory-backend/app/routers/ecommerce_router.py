@@ -200,6 +200,92 @@ def _enforce_leaflife_price_floor(sku: str, name: str, price: int) -> int:
     return price
 
 
+def _family_key(name: str) -> Optional[str]:
+    """Return the first matching product family for an image fallback."""
+    name_upper = name.upper()
+    family_patterns = (
+        ("Tinctures", "TINCTURE"),
+        ("PetTreats", "PET TREATS"),
+        ("BabyJ", "BABY J"),
+        ("PreRoll", r"PRE ?ROLL|\bJOINT"),
+        ("Disposable", "DISPOSABLE"),
+        ("VapeCart", r"CARTRIDGE|\bCARTS?\b|\bPODS?\b|ALL IN ONE|\bAIO\b|\bVAPE\b"),
+        ("Wax", r"\bWAX\b"),
+        ("SnowCap", "SNOW CAP"),
+        ("MoonRock", "MOON ?ROCK"),
+        ("IceCream", "ICE CREAM"),
+        ("Chocolate", "CHOCOLATE"),
+        ("Coffee", "COFFEE"),
+        ("Lemonade", "LEMONADE"),
+        ("Syrup", "AGAVE|HONEY|SYRUP"),
+        ("Flower", "FLOWER|SMALLS|SHAKE"),
+        ("Isolate", "ISOLATE"),
+        ("Lubricant", "LUBRICANT"),
+        ("Sticker", "STICKER"),
+        ("Poster", "POSTER"),
+        ("GlassPipe", r"GLASS PIPE|\bPIPE\b"),
+        ("Grinder", "GRINDER"),
+        ("RollingPaper", "ROLLING PAPER|CONES"),
+        ("Lighter", "LIGHTER|TORCH"),
+        ("Battery", "BATTERY"),
+        ("ChubbyGorilla", "CHUBBY GORILLA"),
+        ("CalyxDram", "CALYX"),
+        ("Apparel", r"SHOES|HOODIE|T-SHIRT|\bTEE\b|SHIRT|HAT\b"),
+    )
+    for family, pattern in family_patterns:
+        if re.search(pattern, name_upper):
+            return family
+    return None
+
+
+def _image_url(image_base_url: str, sku: str, updated_at: object) -> str:
+    return (
+        f"{image_base_url}/{url_quote(sku, safe='')}?v=2&bg=1"
+        f"&t={str(updated_at or '').replace(' ', '_')}"
+    )
+
+
+def _build_family_image_urls(
+    image_rows: list[tuple], image_base_url: str
+) -> dict[str, str]:
+    """Build deterministic family-to-donor image URLs from image rows."""
+    donors: dict[str, tuple[str, str, str]] = {}
+    for row in image_rows:
+        sku, product_name, updated_at = row[0], row[1], row[2]
+        if not sku or sku.upper().startswith("LF-") or not product_name:
+            continue
+        family = _family_key(product_name)
+        if not family:
+            continue
+        updated_value = str(updated_at or "")
+        current = donors.get(family)
+        if (
+            current is None
+            or updated_value > current[1]
+            or (updated_value == current[1] and sku < current[0])
+        ):
+            donors[family] = (sku, updated_value, product_name)
+    return {
+        family: _image_url(image_base_url, sku, updated_at)
+        for family, (sku, updated_at, _) in donors.items()
+    }
+
+
+def _build_image_lookups(
+    image_rows: list[tuple], image_base_url: str
+) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+    image_by_sku = {
+        row[0]: _image_url(image_base_url, row[0], row[2])
+        for row in image_rows
+        if row[0]
+    }
+    image_by_name: dict[str, str] = {}
+    for row in image_rows:
+        if row[1]:
+            image_by_name[row[1].upper()] = _image_url(image_base_url, row[0], row[2])
+    return image_by_sku, image_by_name, _build_family_image_urls(image_rows, image_base_url)
+
+
 def invalidate_product_cache():
     """Invalidate ALL product cache layers so the next request fetches fresh data.
     Called from inventory_router when images are uploaded/changed."""
@@ -339,11 +425,9 @@ async def _fetch_and_cache_products() -> dict:
             image_rows = await cursor.fetchall()
         finally:
             await db.close()
-        image_by_sku = {row[0]: f"{image_base_url}/{url_quote(row[0], safe='')}?v=2&bg=1&t={str(row[2] or '').replace(' ', '_')}" for row in image_rows}
-        image_by_name = {}
-        for row in image_rows:
-            if row[1]:
-                image_by_name[row[1].upper()] = f"{image_base_url}/{url_quote(row[0], safe='')}?v=2&bg=1&t={str(row[2] or '').replace(' ', '_')}"
+        image_by_sku, image_by_name, family_image_url = _build_image_lookups(
+            image_rows, image_base_url
+        )
         # All gummy products share one canonical cube image (env-overridable).
         gummy_image_sku = os.environ.get("GUMMY_IMAGE_SKU", "2025754319138")
         gummy_image_url = f"{image_base_url}/{url_quote(gummy_image_sku, safe='')}?v=2&bg=1"
@@ -535,6 +619,8 @@ async def _fetch_and_cache_products() -> dict:
             name_up = name.upper()
             if "GUMMIES" in name_up or "GUMMY" in name_up:
                 image_url = gummy_image_url
+            if not image_url:
+                image_url = family_image_url.get(_family_key(name))
 
             slug = name.lower()
             slug = slug.replace("/", "-").replace('"', "").replace("(", "").replace(")", "").replace("$", "").replace("'", "").replace("&", "-and-")
@@ -3762,18 +3848,20 @@ async def get_product_detail(product_id: str):
     from app.database import DB_PATH
     db = await aiosqlite.connect(DB_PATH)
     try:
-        cursor = await db.execute(
-            "SELECT sku, updated_at FROM product_images WHERE sku = ? OR UPPER(product_name) = ?",
-            (sku, name.upper()),
-        )
-        row = await cursor.fetchone()
+        cursor = await db.execute("SELECT sku, product_name, updated_at FROM product_images")
+        image_rows = await cursor.fetchall()
     finally:
         await db.close()
-    image_url = f"{image_base_url}/{url_quote(row[0], safe='')}?v=2&bg=1&t={str(row[1] or '').replace(' ', '_')}" if row else None
+    image_by_sku, image_by_name, family_image_url = _build_image_lookups(
+        image_rows, image_base_url
+    )
+    image_url = image_by_sku.get(sku) or image_by_name.get(name.upper())
     name_up = name.upper()
     if "GUMMIES" in name_up or "GUMMY" in name_up:
         gummy_image_sku = os.environ.get("GUMMY_IMAGE_SKU", "2025754319138")
         image_url = f"{image_base_url}/{url_quote(gummy_image_sku, safe='')}?v=2&bg=1"
+    if not image_url:
+        image_url = family_image_url.get(_family_key(name))
 
     is_shipping_only = sku.startswith("LF-") if isinstance(sku, str) else False
 
