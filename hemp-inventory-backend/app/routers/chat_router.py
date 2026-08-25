@@ -5,6 +5,7 @@ import re
 import time
 import json
 import asyncio
+import html
 from typing import Optional
 from urllib.parse import urlparse, unquote
 
@@ -16,6 +17,7 @@ import anthropic
 
 from app.database import get_db
 from app.auth import get_current_user
+from app.routers.alerts_router import send_service_alert_email
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -34,6 +36,15 @@ _DEFAULT_MODEL = "claude-sonnet-4-5"
 # Cheaper/faster model tried automatically if the primary model call fails
 # (e.g. a misconfigured/retired CLAUDE_MODEL) so Bud degrades instead of erroring.
 _FALLBACK_MODEL = "claude-haiku-4-5"
+CLAUDE_ALERT_INTERVAL = 6 * 60 * 60
+CLAUDE_ALERT_RETRY_INTERVAL = 5 * 60
+
+_claude_consecutive_failures = 0
+_claude_last_error: Optional[str] = None
+_claude_last_failure_at: Optional[float] = None
+_claude_last_success_at: Optional[float] = None
+_claude_last_alert_at: Optional[float] = None
+_claude_last_alert_attempt_at: Optional[float] = None
 
 
 def _resolve_model() -> str:
@@ -869,17 +880,88 @@ async def _prepare_turn(req: ChatMessageRequest, db: aiosqlite.Connection) -> tu
     return system, messages
 
 
-async def _call_claude(system: str, messages: list[dict]) -> str:
+async def _note_claude_failure(db: aiosqlite.Connection, error: str) -> None:
+    """Record a Claude outage and notify the team when the alert is due."""
+    global _claude_consecutive_failures, _claude_last_error
+    global _claude_last_failure_at, _claude_last_alert_at
+    global _claude_last_alert_attempt_at
+    now = time.time()
+    was_healthy = _claude_consecutive_failures == 0
+    _claude_consecutive_failures += 1
+    _claude_last_error = error
+    _claude_last_failure_at = now
+    if was_healthy:
+        alert_due = True
+    elif _claude_last_alert_at is not None:
+        alert_due = now - _claude_last_alert_at >= CLAUDE_ALERT_INTERVAL
+    else:
+        alert_due = (
+            _claude_last_alert_attempt_at is None
+            or now - _claude_last_alert_attempt_at >= CLAUDE_ALERT_RETRY_INTERVAL
+        )
+    if not alert_due:
+        return
+
+    _claude_last_alert_attempt_at = now
+    subject = "Bud is offline"
+    html_body = f"""
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <h2 style="color: #dc2626;">Bud is offline</h2>
+        <p>Customers are currently seeing Bud's fallback reply because every Anthropic model call is failing.</p>
+        <p><strong>Anthropic error:</strong> {html.escape(error)}</p>
+    </div>
+    """
+    try:
+        sent = await send_service_alert_email(db, subject, html_body)
+        if sent:
+            _claude_last_alert_at = now
+    except Exception as e:
+        print(f"[chat] Failed to send Bud outage alert: {e}")
+
+
+async def _note_claude_success(db: aiosqlite.Connection) -> None:
+    """Record a successful Claude call and notify after an outage recovers."""
+    global _claude_consecutive_failures, _claude_last_success_at, _claude_last_alert_at
+    had_failures = _claude_consecutive_failures > 0
+    now = time.time()
+    _claude_consecutive_failures = 0
+    _claude_last_success_at = now
+    if not had_failures:
+        return
+
+    try:
+        sent = await send_service_alert_email(
+            db,
+            "Bud is back online",
+            """
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                <h2 style="color: #2d5016;">Bud is back online</h2>
+                <p>Anthropic calls are succeeding again and Bud is no longer serving the fallback reply.</p>
+            </div>
+            """,
+        )
+        if sent:
+            _claude_last_alert_at = now
+    except Exception as e:
+        print(f"[chat] Failed to send Bud recovery alert: {e}")
+
+
+async def _call_claude(system: str, messages: list[dict], db: aiosqlite.Connection) -> str:
     """Non-blocking Claude call with automatic fallback to a cheaper model."""
     client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+    last_error = ""
     for model in (MODEL, _FALLBACK_MODEL):
         try:
             response = await client.messages.create(
                 model=model, max_tokens=1024, system=system, messages=messages,
             )
-            return response.content[0].text.strip()
+            response_text = response.content[0].text.strip()
+            await _note_claude_success(db)
+            return response_text
         except Exception as e:
+            last_error = str(e)
             print(f"[chat] Claude API error (model={model}): {e}")
+    await _note_claude_failure(db, last_error)
     return FALLBACK_MESSAGE
 
 
@@ -977,7 +1059,7 @@ async def send_message(
     _check_rate_limit(request, req.session_id)
 
     system, messages = await _prepare_turn(req, db)
-    raw_text = await _call_claude(system, messages)
+    raw_text = await _call_claude(system, messages, db)
     assistant_message = await _finalize_turn(req, db, raw_text)
     return ChatMessageResponse(message=assistant_message, intent=_infer_intent(req.message))
 
@@ -1003,6 +1085,7 @@ async def send_message_stream(
         collected: list[str] = []
         client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
         streamed = False
+        last_error = ""
         for model in (MODEL, _FALLBACK_MODEL):
             try:
                 async with client.messages.stream(
@@ -1013,13 +1096,16 @@ async def send_message_stream(
                             collected.append(text)
                             yield f"data: {json.dumps({'delta': text})}\n\n"
                 streamed = True
+                await _note_claude_success(db)
                 break
             except Exception as e:
+                last_error = str(e)
                 print(f"[chat] Claude stream error (model={model}): {e}")
                 collected = []  # discard partial output before trying fallback
                 continue
 
         if not streamed:
+            await _note_claude_failure(db, last_error)
             collected = [FALLBACK_MESSAGE]
             yield f"data: {json.dumps({'delta': FALLBACK_MESSAGE})}\n\n"
 
@@ -1040,6 +1126,18 @@ async def send_message_stream(
 
 ADMIN_PANEL_URL = "https://inventory.thehempdispensary.com"
 LEAD_NOTIFY_EMAIL = "Support@TheHempDispensary.com"
+
+
+@router.get("/health")
+async def get_chat_health(user: dict = Depends(get_current_user)):
+    """Return Bud's current Claude service health state."""
+    return {
+        "consecutive_failures": _claude_consecutive_failures,
+        "last_error": _claude_last_error,
+        "last_failure_at": _claude_last_failure_at,
+        "last_success_at": _claude_last_success_at,
+        "healthy": _claude_consecutive_failures == 0,
+    }
 
 
 async def _get_chat_smtp_settings(db: aiosqlite.Connection) -> dict[str, str]:
@@ -1077,7 +1175,6 @@ async def _send_lead_notification(
     intent: str,
 ) -> None:
     """Send an email notification to the support team when Bud captures a new lead."""
-    import html as html_mod
     import smtplib
     from email.mime.text import MIMEText
     from email.mime.multipart import MIMEMultipart
@@ -1089,10 +1186,10 @@ async def _send_lead_notification(
         return
 
     # Escape user-controlled values to prevent HTML injection
-    safe_name = html_mod.escape(name)
-    safe_phone = html_mod.escape(phone) if phone else ""
-    safe_email = html_mod.escape(email) if email else ""
-    safe_message = html_mod.escape(first_message[:300])
+    safe_name = html.escape(name)
+    safe_phone = html.escape(phone) if phone else ""
+    safe_email = html.escape(email) if email else ""
+    safe_message = html.escape(first_message[:300])
 
     contact_line = ""
     if safe_phone:
