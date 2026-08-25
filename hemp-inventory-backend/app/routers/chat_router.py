@@ -37,12 +37,14 @@ _DEFAULT_MODEL = "claude-sonnet-4-5"
 # (e.g. a misconfigured/retired CLAUDE_MODEL) so Bud degrades instead of erroring.
 _FALLBACK_MODEL = "claude-haiku-4-5"
 CLAUDE_ALERT_INTERVAL = 6 * 60 * 60
+CLAUDE_ALERT_RETRY_INTERVAL = 5 * 60
 
 _claude_consecutive_failures = 0
 _claude_last_error: Optional[str] = None
 _claude_last_failure_at: Optional[float] = None
 _claude_last_success_at: Optional[float] = None
 _claude_last_alert_at: Optional[float] = None
+_claude_last_alert_attempt_at: Optional[float] = None
 
 
 def _resolve_model() -> str:
@@ -882,19 +884,25 @@ async def _note_claude_failure(db: aiosqlite.Connection, error: str) -> None:
     """Record a Claude outage and notify the team when the alert is due."""
     global _claude_consecutive_failures, _claude_last_error
     global _claude_last_failure_at, _claude_last_alert_at
+    global _claude_last_alert_attempt_at
     now = time.time()
     was_healthy = _claude_consecutive_failures == 0
     _claude_consecutive_failures += 1
     _claude_last_error = error
     _claude_last_failure_at = now
-    alert_due = (
-        was_healthy
-        or _claude_last_alert_at is None
-        or now - _claude_last_alert_at >= CLAUDE_ALERT_INTERVAL
-    )
+    if was_healthy:
+        alert_due = True
+    elif _claude_last_alert_at is not None:
+        alert_due = now - _claude_last_alert_at >= CLAUDE_ALERT_INTERVAL
+    else:
+        alert_due = (
+            _claude_last_alert_attempt_at is None
+            or now - _claude_last_alert_attempt_at >= CLAUDE_ALERT_RETRY_INTERVAL
+        )
     if not alert_due:
         return
 
+    _claude_last_alert_attempt_at = now
     subject = "Bud is offline"
     html_body = f"""
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
@@ -1167,7 +1175,6 @@ async def _send_lead_notification(
     intent: str,
 ) -> None:
     """Send an email notification to the support team when Bud captures a new lead."""
-    import html as html_mod
     import smtplib
     from email.mime.text import MIMEText
     from email.mime.multipart import MIMEMultipart
@@ -1179,10 +1186,10 @@ async def _send_lead_notification(
         return
 
     # Escape user-controlled values to prevent HTML injection
-    safe_name = html_mod.escape(name)
-    safe_phone = html_mod.escape(phone) if phone else ""
-    safe_email = html_mod.escape(email) if email else ""
-    safe_message = html_mod.escape(first_message[:300])
+    safe_name = html.escape(name)
+    safe_phone = html.escape(phone) if phone else ""
+    safe_email = html.escape(email) if email else ""
+    safe_message = html.escape(first_message[:300])
 
     contact_line = ""
     if safe_phone:

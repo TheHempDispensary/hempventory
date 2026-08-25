@@ -22,12 +22,14 @@ def reset_health_state():
     cr._claude_last_failure_at = None
     cr._claude_last_success_at = None
     cr._claude_last_alert_at = None
+    cr._claude_last_alert_attempt_at = None
     yield
     cr._claude_consecutive_failures = 0
     cr._claude_last_error = None
     cr._claude_last_failure_at = None
     cr._claude_last_success_at = None
     cr._claude_last_alert_at = None
+    cr._claude_last_alert_attempt_at = None
 
 
 class FailingMessages:
@@ -48,6 +50,11 @@ class FakeClient:
 async def _record_alert(alerts, subject, html):
     alerts.append((subject, html))
     return True
+
+
+async def _record_failed_attempt(attempts):
+    attempts.append(False)
+    return False
 
 
 @pytest.mark.asyncio
@@ -89,6 +96,22 @@ async def test_failure_alert_is_throttled_then_repeated(db, reset_health_state, 
     await cr._call_claude("system", [], db)
     assert len(alerts) == 2
     assert all(subject == "Bud is offline" for subject, _ in alerts)
+
+
+@pytest.mark.asyncio
+async def test_failed_alert_attempt_is_throttled(db, reset_health_state, monkeypatch):
+    attempts = []
+    monkeypatch.setattr(
+        cr,
+        "send_service_alert_email",
+        lambda db, subject, html: _record_failed_attempt(attempts),
+    )
+    monkeypatch.setattr(cr.anthropic, "AsyncAnthropic", lambda api_key: FakeClient(FailingMessages()))
+
+    await cr._call_claude("system", [], db)
+    await cr._call_claude("system", [], db)
+
+    assert attempts == [False]
 
 
 @pytest.mark.asyncio

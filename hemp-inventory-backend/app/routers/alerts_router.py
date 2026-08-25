@@ -14,6 +14,7 @@ from app.database import get_db
 from app.clover_client import CloverClient
 
 router = APIRouter(prefix="/api/alerts", tags=["alerts"])
+DEFAULT_NOTIFICATION_EMAIL = "Support@TheHempDispensary.com"
 
 
 class EmailSettings(BaseModel):
@@ -122,7 +123,7 @@ async def check_and_notify(
     email_sent = False
     if alerts:
         try:
-            email_sent = await _send_alert_email(db, notification_email, alerts)
+            email_sent = await _send_alert_email(db, alerts)
             if email_sent:
                 await db.execute(
                     "UPDATE alert_history SET email_sent = 1 WHERE email_sent = 0"
@@ -139,7 +140,7 @@ async def check_and_notify(
     }
 
 
-async def _send_alert_email(db: aiosqlite.Connection, to_email: str, alerts: list[dict]) -> bool:
+async def _send_alert_email(db: aiosqlite.Connection, alerts: list[dict]) -> bool:
     # Build HTML body
     rows_html = ""
     for alert in alerts:
@@ -202,16 +203,23 @@ async def send_service_alert_email(db: aiosqlite.Connection, subject: str, html:
     """Send a service alert email using the configured SMTP settings."""
     smtp_settings: dict[str, str] = {}
     for key in ["smtp_host", "smtp_port", "smtp_user", "smtp_password", "notification_email"]:
-        cursor = await db.execute("SELECT value FROM settings WHERE key = ?", (key,))
-        row = await cursor.fetchone()
-        if row:
-            smtp_settings[key] = row[0]
+        try:
+            cursor = await db.execute("SELECT value FROM settings WHERE key = ?", (key,))
+            row = await cursor.fetchone()
+            if row and row[0]:
+                smtp_settings[key] = row[0]
+        except Exception:
+            pass
 
-    smtp_host = smtp_settings.get("smtp_host", "smtp.gmail.com")
-    smtp_port = int(smtp_settings.get("smtp_port", "587"))
-    smtp_user = smtp_settings.get("smtp_user", "")
-    smtp_password = smtp_settings.get("smtp_password", "")
-    notification_email = smtp_settings.get("notification_email", "")
+    smtp_host = smtp_settings.get("smtp_host") or os.environ.get("SMTP_HOST", "smtp.gmail.com")
+    smtp_port = int(smtp_settings.get("smtp_port") or os.environ.get("SMTP_PORT", "587"))
+    smtp_user = smtp_settings.get("smtp_user") or os.environ.get("SMTP_USER", "")
+    smtp_password = smtp_settings.get("smtp_password") or os.environ.get("SMTP_PASSWORD", "")
+    notification_email = (
+        smtp_settings.get("notification_email")
+        or os.environ.get("NOTIFICATION_EMAIL")
+        or DEFAULT_NOTIFICATION_EMAIL
+    )
 
     if not notification_email or not smtp_user or not smtp_password:
         print("SMTP credentials not configured, skipping email")
