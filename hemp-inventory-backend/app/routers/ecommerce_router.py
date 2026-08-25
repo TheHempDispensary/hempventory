@@ -116,6 +116,46 @@ DELIVERY_FEE_DISCOUNTED = 500  # $5.00 in cents
 DELIVERY_DISCOUNT_THRESHOLD = 15000  # $150.00 in cents — orders above this get $5 delivery
 
 
+def _infer_categories(name: str) -> list[str]:
+    """Infer a catalog category from a product name when Clover has none."""
+    name_upper = name.upper()
+    if any(keyword in name_upper for keyword in ("GIFT CARD", "SHIPPING", "PROMOTIONAL", "DEPOSIT")):
+        return []
+    if re.search(r"\bPETS?\b(?!-)", name_upper):
+        return ["Pets"]
+    if any(keyword in name_upper for keyword in ("CONTAINER", "MYLAR", "LINER", "JAR", "POP TOP", "ZIP BAG", "WHOLESALE BAG")):
+        return ["Packaging"]
+    if "TINCTURE" in name_upper:
+        return ["Tinctures"]
+    if (
+        any(keyword in name_upper for keyword in ("VAPE", "CARTRIDGE", "DISPOSABLE", "ALL IN ONE", "AIO"))
+        or re.search(r"\bCARTS?\b(?!-)", name_upper)
+        or re.search(r"\bPODS?\b(?!-)", name_upper)
+    ):
+        return ["Vapor"]
+    has_moonrock = "MOON ROCK" in name_upper or "MOONROCK" in name_upper
+    if (
+        any(keyword in name_upper for keyword in ("BALM", "SALVE", "LOTION", "ROLL ON", "ROLL-ON", "PATCH", "MUSCLE"))
+        or ("CREAM" in name_upper and not (has_moonrock and "ICE CREAM" in name_upper))
+    ):
+        return ["Topicals"]
+    if any(keyword in name_upper for keyword in ("GUMM", "CHOCOLATE", "AGAVE", "HONEY", "SYRUP", "SELTZER", "DRINK", "LOLLIPOP", "TAFFY", "CAPSULE", "BROWNIE", "RICE KRISPY")):
+        return ["Edibles"]
+    if has_moonrock:
+        return ["MoonRocks"]
+    if any(keyword in name_upper for keyword in ("FLOWER", "PRE ROLL", "PRE-ROLL", "PREROLL", "JOINT", "SHAKE", "SMALLS", "BLUNT")):
+        return ["Flower"]
+    if (
+        any(keyword in name_upper for keyword in ("WAX", "ISOLATE", "SHATTER", "ROSIN", "RESIN", "DISTILLATE", "BADDER", "BATTER", "CRUMBLE", "DIAMOND", "SNOW CAP", "SYRINGE", "SAUCE"))
+        or re.search(r"\bHASHS?\b(?!-)", name_upper)
+        or re.search(r"\bDABS?\b(?!-)", name_upper)
+    ):
+        return ["Concentrates"]
+    if any(keyword in name_upper for keyword in ("STICKER", "POSTER", "GLASS", "PIPE", "GRINDER", "LIGHTER", "TRAY", "CARB CAP", "TORCH", "BUTANE", "BANGER", "ROLLING PAPER")):
+        return ["Accessories"]
+    return []
+
+
 def _haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Calculate distance in miles between two lat/lon points using Haversine formula."""
     R = 3958.8  # Earth radius in miles
@@ -507,6 +547,8 @@ async def _fetch_and_cache_products() -> dict:
                 item_categories = [c if c != "Accessories" else "Apparel" for c in item_categories]
                 if not item_categories:
                     item_categories = ["Apparel"]
+            if not item_categories:
+                item_categories = _infer_categories(name)
             stock_info = item.get("itemStock", {})
             hq_stock = stock_info.get("quantity", 0) if stock_info else 0
             # Look up description by product name first (handles shared-SKU items like syringes),
