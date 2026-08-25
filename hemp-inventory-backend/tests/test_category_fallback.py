@@ -13,6 +13,11 @@ from app.routers.ecommerce_router import _infer_categories
         ("CBD ISOLATE ONE GRAM", "Concentrates"),
         ("THC MOON ROCK ICE CREAM COOKIES 1 GRAM", "MoonRocks"),
         ("THC Flower Smalls Lemon Cherry Gelato Hybrid 3.5 Grams", "Flower"),
+        ("COCONUT CREAM LIVE RESIN 1 GRAM", "Concentrates"),
+        ("DELTA 9 THC VANILLA ICE CREAM 1.66 OZ", "Edibles"),
+        ("Ooze Slim Twist Battery Black", "Accessories"),
+        ("THC SNOW CAPS 1 GRAM", "Flower"),
+        ('GLASS PIPE FLOWER COLOR CHANGING 3"', "Accessories"),
     ],
 )
 def test_infers_categories_from_product_names(name, category):
@@ -45,6 +50,12 @@ def test_excludes_non_products(name):
 )
 def test_infers_all_category_rules(name, category):
     assert _infer_categories(name) == [category]
+
+
+def test_batter_is_concentrate_but_battery_is_accessory():
+    assert _infer_categories("GRAPE CREAM CAKE BADDER 1 GRAM") == ["Concentrates"]
+    assert _infer_categories("BATTER 1 GRAM") == ["Concentrates"]
+    assert _infer_categories("BATTERY") == ["Accessories"]
 
 
 @pytest.mark.parametrize(

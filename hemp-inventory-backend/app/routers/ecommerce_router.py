@@ -133,26 +133,23 @@ def _infer_categories(name: str) -> list[str]:
         or re.search(r"\bPODS?\b(?!-)", name_upper)
     ):
         return ["Vapor"]
-    has_moonrock = "MOON ROCK" in name_upper or "MOONROCK" in name_upper
-    if (
-        any(keyword in name_upper for keyword in ("BALM", "SALVE", "LOTION", "ROLL ON", "ROLL-ON", "PATCH", "MUSCLE"))
-        or ("CREAM" in name_upper and not (has_moonrock and "ICE CREAM" in name_upper))
-    ):
+    if any(keyword in name_upper for keyword in ("BALM", "SALVE", "LOTION", "ROLL ON", "ROLL-ON", "PATCH", "MUSCLE")):
         return ["Topicals"]
-    if any(keyword in name_upper for keyword in ("GUMM", "CHOCOLATE", "AGAVE", "HONEY", "SYRUP", "SELTZER", "DRINK", "LOLLIPOP", "TAFFY", "CAPSULE", "BROWNIE", "RICE KRISPY")):
-        return ["Edibles"]
-    if has_moonrock:
+    if "MOON ROCK" in name_upper or "MOONROCK" in name_upper:
         return ["MoonRocks"]
-    if any(keyword in name_upper for keyword in ("FLOWER", "PRE ROLL", "PRE-ROLL", "PREROLL", "JOINT", "SHAKE", "SMALLS", "BLUNT")):
+    if any(keyword in name_upper for keyword in ("GUMM", "CHOCOLATE", "AGAVE", "HONEY", "SYRUP", "SELTZER", "DRINK", "LOLLIPOP", "TAFFY", "CAPSULE", "BROWNIE", "RICE KRISPY", "ICE CREAM")):
+        return ["Edibles"]
+    if any(keyword in name_upper for keyword in ("STICKER", "POSTER", "GLASS", "PIPE", "GRINDER", "LIGHTER", "TRAY", "CARB CAP", "TORCH", "BUTANE", "BANGER", "ROLLING PAPER", "BATTERY")):
+        return ["Accessories"]
+    if any(keyword in name_upper for keyword in ("FLOWER", "PRE ROLL", "PRE-ROLL", "PREROLL", "JOINT", "SHAKE", "SMALLS", "BLUNT", "SNOW CAP")):
         return ["Flower"]
     if (
-        any(keyword in name_upper for keyword in ("WAX", "ISOLATE", "SHATTER", "ROSIN", "RESIN", "DISTILLATE", "BADDER", "BATTER", "CRUMBLE", "DIAMOND", "SNOW CAP", "SYRINGE", "SAUCE"))
+        any(keyword in name_upper for keyword in ("WAX", "ISOLATE", "SHATTER", "ROSIN", "RESIN", "DISTILLATE", "BADDER", "CRUMBLE", "DIAMOND", "SYRINGE", "SAUCE"))
+        or re.search(r"\bBATTERS?\b(?!-)", name_upper)
         or re.search(r"\bHASHS?\b(?!-)", name_upper)
         or re.search(r"\bDABS?\b(?!-)", name_upper)
     ):
         return ["Concentrates"]
-    if any(keyword in name_upper for keyword in ("STICKER", "POSTER", "GLASS", "PIPE", "GRINDER", "LIGHTER", "TRAY", "CARB CAP", "TORCH", "BUTANE", "BANGER", "ROLLING PAPER")):
-        return ["Accessories"]
     return []
 
 
