@@ -1,5 +1,6 @@
 import os
 import smtplib
+import asyncio
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -119,7 +120,7 @@ async def check_and_notify(
 
     # Send email if configured
     email_sent = False
-    if notification_email and alerts:
+    if alerts:
         try:
             email_sent = await _send_alert_email(db, notification_email, alerts)
             if email_sent:
@@ -139,30 +140,6 @@ async def check_and_notify(
 
 
 async def _send_alert_email(db: aiosqlite.Connection, to_email: str, alerts: list[dict]) -> bool:
-    """Send alert email using configured SMTP settings."""
-    # Get SMTP settings
-    smtp_settings: dict[str, str] = {}
-    for key in ["smtp_host", "smtp_port", "smtp_user", "smtp_password"]:
-        cursor = await db.execute("SELECT value FROM settings WHERE key = ?", (key,))
-        row = await cursor.fetchone()
-        if row:
-            smtp_settings[key] = row[0]
-
-    smtp_host = smtp_settings.get("smtp_host", "smtp.gmail.com")
-    smtp_port = int(smtp_settings.get("smtp_port", "587"))
-    smtp_user = smtp_settings.get("smtp_user", "")
-    smtp_password = smtp_settings.get("smtp_password", "")
-
-    if not smtp_user or not smtp_password:
-        print("SMTP credentials not configured, skipping email")
-        return False
-
-    # Build email
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"Hemp Dispensary PAR Alert - {len(alerts)} item(s) below threshold"
-    msg["From"] = smtp_user
-    msg["To"] = to_email
-
     # Build HTML body
     rows_html = ""
     for alert in alerts:
@@ -204,13 +181,57 @@ async def _send_alert_email(db: aiosqlite.Connection, to_email: str, alerts: lis
     </html>
     """
 
+    subject = f"Hemp Dispensary PAR Alert - {len(alerts)} item(s) below threshold"
+    return await send_service_alert_email(db, subject, html)
+
+
+def _send_email_sync(
+    smtp_host: str,
+    smtp_port: int,
+    smtp_user: str,
+    smtp_password: str,
+    msg: MIMEMultipart,
+) -> None:
+    with smtplib.SMTP(smtp_host, smtp_port) as server:
+        server.starttls()
+        server.login(smtp_user, smtp_password)
+        server.send_message(msg)
+
+
+async def send_service_alert_email(db: aiosqlite.Connection, subject: str, html: str) -> bool:
+    """Send a service alert email using the configured SMTP settings."""
+    smtp_settings: dict[str, str] = {}
+    for key in ["smtp_host", "smtp_port", "smtp_user", "smtp_password", "notification_email"]:
+        cursor = await db.execute("SELECT value FROM settings WHERE key = ?", (key,))
+        row = await cursor.fetchone()
+        if row:
+            smtp_settings[key] = row[0]
+
+    smtp_host = smtp_settings.get("smtp_host", "smtp.gmail.com")
+    smtp_port = int(smtp_settings.get("smtp_port", "587"))
+    smtp_user = smtp_settings.get("smtp_user", "")
+    smtp_password = smtp_settings.get("smtp_password", "")
+    notification_email = smtp_settings.get("notification_email", "")
+
+    if not notification_email or not smtp_user or not smtp_password:
+        print("SMTP credentials not configured, skipping email")
+        return False
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = smtp_user
+    msg["To"] = notification_email
     msg.attach(MIMEText(html, "html"))
 
     try:
-        with smtplib.SMTP(smtp_host, smtp_port) as server:
-            server.starttls()
-            server.login(smtp_user, smtp_password)
-            server.send_message(msg)
+        await asyncio.to_thread(
+            _send_email_sync,
+            smtp_host,
+            smtp_port,
+            smtp_user,
+            smtp_password,
+            msg,
+        )
         return True
     except Exception as e:
         print(f"Failed to send email: {e}")
