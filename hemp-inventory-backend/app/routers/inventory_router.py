@@ -3399,6 +3399,19 @@ async def get_inventory_changes(
 _smart_par_cache: dict = {"data": None, "updated_at": 0}
 _SMART_PAR_TTL = 3600  # 1 hour cache
 
+# Velocity for a product is computed over its own sales history, not the
+# store's. A floor keeps a couple of day-one sales from producing a huge PAR.
+_MIN_VELOCITY_DAYS = 14.0
+
+
+def _product_days_of_data(
+    first_ts: float | None, latest_ts: float, days_of_data: float
+) -> float:
+    """Days of sales history for one product, bounded by the overall window."""
+    if not first_ts or not latest_ts or first_ts == float("inf"):
+        return days_of_data
+    return min(days_of_data, max((latest_ts - first_ts) / 86400, _MIN_VELOCITY_DAYS))
+
 
 async def _fetch_all_clover_orders(client: CloverClient) -> list[dict]:
     """Paginate through all paid Clover orders with lineItems expanded.
@@ -3827,12 +3840,18 @@ async def smart_par(
 
     # ----- 2. Gather sales data (check cache first) -----
     now = time.time()
-    if _smart_par_cache["data"] and (now - _smart_par_cache["updated_at"]) < _SMART_PAR_TTL:
+    if (
+        _smart_par_cache["data"]
+        and (now - _smart_par_cache["updated_at"]) < _SMART_PAR_TTL
+        and "first_sale_ts" in _smart_par_cache["data"]
+    ):
         sales_by_product = _smart_par_cache["data"]["sales_by_product"]
+        first_sale_ts = _smart_par_cache["data"]["first_sale_ts"]
         earliest_ts = _smart_par_cache["data"]["earliest_ts"]
         latest_ts = _smart_par_cache["data"]["latest_ts"]
     else:
         sales_by_product: dict[str, int] = {}  # normalised name -> total units
+        first_sale_ts: dict[str, float] = {}  # normalised name -> first sale ts
         earliest_ts = float("inf")
         latest_ts = 0.0
 
@@ -3864,6 +3883,10 @@ async def smart_par(
                     qty = max(round(raw_qty / 1000), 1)
                     norm = _normalise_sales_name(li_name)
                     sales_by_product[norm] = sales_by_product.get(norm, 0) + qty
+                    if order_ts > 0:
+                        first_sale_ts[norm] = min(
+                            first_sale_ts.get(norm, float("inf")), order_ts
+                        )
 
         # 2b. Ecommerce orders (website)
         cursor = await db.execute(
@@ -3887,11 +3910,13 @@ async def smart_par(
                     ts = dt.timestamp()
                     earliest_ts = min(earliest_ts, ts)
                     latest_ts = max(latest_ts, ts)
+                    first_sale_ts[norm] = min(first_sale_ts.get(norm, float("inf")), ts)
                 except Exception:
                     pass
 
         _smart_par_cache["data"] = {
             "sales_by_product": sales_by_product,
+            "first_sale_ts": first_sale_ts,
             "earliest_ts": earliest_ts,
             "latest_ts": latest_ts,
         }
@@ -3927,7 +3952,10 @@ async def smart_par(
             continue
         norm = _normalise_sales_name(item["name"])
         units_sold = sales_by_product.get(norm, 0)
-        units_per_day = units_sold / days_of_data
+        product_days = _product_days_of_data(
+            first_sale_ts.get(norm), latest_ts, days_of_data
+        )
+        units_per_day = units_sold / product_days
         units_per_month = units_per_day * 30.44  # avg days/month
         par_level = round(units_per_month * months)
 
@@ -4019,6 +4047,7 @@ async def auto_set_par(
 
         # 1. Tally this location's own sales by normalised product name.
         sales_by_name: dict[str, int] = {}
+        first_sale_ts: dict[str, float] = {}
         earliest_ts = float("inf")
         latest_ts = 0.0
         try:
@@ -4044,6 +4073,8 @@ async def auto_set_par(
                 qty = max(round(li.get("unitQty", 1000) / 1000), 1)
                 norm = _normalise_sales_name(li_name)
                 sales_by_name[norm] = sales_by_name.get(norm, 0) + qty
+                if order_ts > 0:
+                    first_sale_ts[norm] = min(first_sale_ts.get(norm, float("inf")), order_ts)
 
         # HQ is the e-commerce/warehouse location: its real per-product demand
         # lives in the website order tables. Clover records online sales as
@@ -4068,6 +4099,7 @@ async def auto_set_par(
                         ts = dt.timestamp()
                         earliest_ts = min(earliest_ts, ts)
                         latest_ts = max(latest_ts, ts)
+                        first_sale_ts[norm] = min(first_sale_ts.get(norm, float("inf")), ts)
                     except (ValueError, TypeError):
                         pass
 
@@ -4097,7 +4129,10 @@ async def auto_set_par(
             name = " ".join((item.get("name") or "").split())
             norm = _normalise_sales_name(name)
             units_sold = sales_by_name.get(norm, 0)
-            units_per_month = (units_sold / days_of_data) * 30.44
+            product_days = _product_days_of_data(
+                first_sale_ts.get(norm), latest_ts, days_of_data
+            )
+            units_per_month = (units_sold / product_days) * 30.44
             par_level = round(units_per_month * months)
             par_rows.append((display_sku, loc_id, float(par_level)))
             loc_items += 1
