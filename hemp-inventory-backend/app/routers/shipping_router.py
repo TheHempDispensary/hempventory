@@ -296,10 +296,23 @@ async def create_shipment(
     headers = _get_shippo_headers()
     is_mixed = bool(store_items) and bool(leaflife_items)
 
-    # Clear any previous shipment records for this order (in case admin retries)
-    await db.execute("DELETE FROM order_shipments WHERE order_id = ?", (body.order_id,))
+    # A shipment whose label is already bought must survive a retry: deleting
+    # it would lose the purchased tracking/label and invite a double purchase.
+    # Only unpurchased shipment records are cleared and recreated.
+    cursor = await db.execute(
+        """SELECT id, shipment_type, from_label, item_ids, tracking_number, tracking_url, label_url
+           FROM order_shipments
+           WHERE order_id = ? AND tracking_number IS NOT NULL AND tracking_number != ''""",
+        (body.order_id,),
+    )
+    purchased_rows = await cursor.fetchall()
+    purchased_types = {r[1] for r in purchased_rows}
+    await db.execute(
+        "DELETE FROM order_shipments WHERE order_id = ? AND (tracking_number IS NULL OR tracking_number = '')",
+        (body.order_id,),
+    )
 
-    # Build shipment groups
+    # Build shipment groups, skipping any that already have a purchased label
     groups_to_create: list[tuple[str, dict, list[tuple]]] = []
     if is_mixed:
         groups_to_create.append(("store", DEFAULT_FROM_ADDRESS, store_items))
@@ -308,8 +321,24 @@ async def create_shipment(
         groups_to_create.append(("leaflife", LEAFLIFE_FROM_ADDRESS, leaflife_items))
     else:
         groups_to_create.append(("store", DEFAULT_FROM_ADDRESS, store_items or list(item_rows)))
+    groups_to_create = [g for g in groups_to_create if g[0] not in purchased_types]
 
+    items_by_id = {i[0]: (i[2] or i[1] or "?") for i in item_rows}
     shipment_groups: list[dict] = []
+    for row_id, stype, from_label, item_ids, p_tracking, p_tracking_url, p_label_url in purchased_rows:
+        ids = [int(x) for x in (item_ids or "").split(",") if x.strip()]
+        shipment_groups.append({
+            "shipment_id": row_id,
+            "shipment_type": stype,
+            "from_label": from_label,
+            "item_names": [items_by_id.get(i, "?") for i in ids],
+            "rates": [],
+            "purchased": True,
+            "tracking_number": p_tracking,
+            "tracking_url": p_tracking_url or "",
+            "label_url": p_label_url or "",
+        })
+
     for stype, from_addr, items in groups_to_create:
         shipment = await _create_shippo_shipment(headers, from_addr, to_address, parcel, body.is_hazmat)
         rates = _filter_usps_rates(shipment.get("rates", []))
@@ -332,6 +361,7 @@ async def create_shipment(
             "from_label": from_label,
             "item_names": item_names,
             "rates": rates,
+            "purchased": False,
             "address_from": from_addr,
             "shippo_shipment_id": shippo_shipment_id,
         })
@@ -348,7 +378,7 @@ async def create_shipment(
         # Legacy fields for single-shipment orders (backwards compat)
         "shipment_id": shipment_groups[0].get("shippo_shipment_id", "") if shipment_groups else "",
         "rates": shipment_groups[0]["rates"] if len(shipment_groups) == 1 else [],
-        "address_from": shipment_groups[0]["address_from"] if shipment_groups else DEFAULT_FROM_ADDRESS,
+        "address_from": shipment_groups[0].get("address_from", DEFAULT_FROM_ADDRESS) if shipment_groups else DEFAULT_FROM_ADDRESS,
     }
 
 
@@ -364,7 +394,20 @@ async def _purchase_shippo_label(headers: dict, rate_id: str, label_file_type: s
         if resp.status_code not in (200, 201):
             print(f"[shippo] Label purchase failed: {resp.status_code} {resp.text}")
             raise HTTPException(status_code=resp.status_code, detail=f"Shippo error: {resp.text}")
-        return resp.json()
+        transaction = resp.json()
+
+        # Even with async=False, Shippo sometimes responds before the label is
+        # ready (status QUEUED/PROCESSING with no tracking number). Poll briefly
+        # so the caller gets the tracking number to persist.
+        txn_id = transaction.get("object_id", "")
+        for _ in range(5):
+            if transaction.get("status") == "ERROR" or transaction.get("tracking_number") or not txn_id:
+                break
+            await asyncio.sleep(2)
+            poll = await client.get(f"{SHIPPO_API_URL}/transactions/{txn_id}", headers=headers)
+            if poll.status_code == 200:
+                transaction = poll.json()
+        return transaction
 
 
 def _label_token(short_order_no: str) -> str:
@@ -428,6 +471,143 @@ async def _sync_leaflife_label(
             print(f"[leaflife-label] {order_number}: {result.get('reason')}")
     except Exception as e:  # noqa: BLE001 - sheet write must never fail a purchase
         print(f"[leaflife-label] order {order_id}: {e}")
+
+
+async def _fetch_transaction(client: httpx.AsyncClient, headers: dict, txn_id: str) -> dict | None:
+    resp = await client.get(f"{SHIPPO_API_URL}/transactions/{txn_id}", headers=headers)
+    return resp.json() if resp.status_code == 200 else None
+
+
+async def _list_recent_transactions(client: httpx.AsyncClient, headers: dict) -> list[dict]:
+    resp = await client.get(f"{SHIPPO_API_URL}/transactions/", headers=headers, params={"results": 100})
+    return resp.json().get("results", []) if resp.status_code == 200 else []
+
+
+async def _find_shipment_transaction(
+    client: httpx.AsyncClient, headers: dict, shippo_shipment_id: str, transactions: list[dict]
+) -> dict | None:
+    """Match a successful Shippo transaction to a shipment via its rate ids."""
+    resp = await client.get(
+        f"{SHIPPO_API_URL}/shipments/{shippo_shipment_id}/rates/",
+        headers=headers,
+        params={"results": 100},
+    )
+    if resp.status_code != 200:
+        return None
+    rate_ids = {r.get("object_id") for r in resp.json().get("results", [])}
+    for txn in transactions:
+        if txn.get("status") == "SUCCESS" and txn.get("rate") in rate_ids and txn.get("tracking_number"):
+            return txn
+    return None
+
+
+async def recover_missing_split_labels(db: aiosqlite.Connection) -> dict:
+    """Repair shipment rows whose Shippo label purchase was never persisted.
+
+    A purchase can succeed on Shippo's side while the local write is lost (app
+    restart mid-request, deploy, crash). Those rows keep their Shippo shipment
+    id but have no tracking number; this sweep finds the completed transaction
+    on Shippo, saves it, and writes the LeafLife sheet link where applicable.
+    """
+    if not SHIPPO_API_TOKEN:
+        return {"checked": 0, "recovered": 0}
+
+    cursor = await db.execute(
+        """SELECT id, order_id, shipment_type, shippo_shipment_id, shippo_transaction_id
+           FROM order_shipments
+           WHERE (tracking_number IS NULL OR tracking_number = '')
+             AND shippo_shipment_id IS NOT NULL AND shippo_shipment_id != ''
+             AND created_at <= datetime('now', '-10 minutes')
+             AND created_at >= datetime('now', '-30 days')"""
+    )
+    rows = await cursor.fetchall()
+    if not rows:
+        return {"checked": 0, "recovered": 0}
+
+    headers = _get_shippo_headers()
+    recovered = 0
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        transactions = await _list_recent_transactions(client, headers)
+
+        for row_id, order_id, stype, shippo_shipment_id, txn_id in rows:
+            try:
+                txn = None
+                if txn_id:
+                    txn = await _fetch_transaction(client, headers, txn_id)
+                    if txn and (txn.get("status") != "SUCCESS" or not txn.get("tracking_number")):
+                        txn = None
+                if txn is None:
+                    txn = await _find_shipment_transaction(client, headers, shippo_shipment_id, transactions)
+                if txn is None:
+                    continue
+
+                tracking_number = txn.get("tracking_number", "")
+                await db.execute(
+                    """UPDATE order_shipments
+                       SET tracking_number = ?, tracking_url = ?, label_url = ?,
+                           shippo_transaction_id = ?, tracking_status = 'label_created'
+                       WHERE id = ?""",
+                    (
+                        tracking_number,
+                        txn.get("tracking_url_provider", ""),
+                        txn.get("label_url", ""),
+                        txn.get("object_id", ""),
+                        row_id,
+                    ),
+                )
+
+                cursor = await db.execute(
+                    "SELECT tracking_number, tracking_url, label_url, shippo_transaction_id FROM order_shipments WHERE order_id = ? ORDER BY id",
+                    (order_id,),
+                )
+                all_shipments = await cursor.fetchall()
+                first_labelled = next((s for s in all_shipments if s[0]), None)
+                if first_labelled:
+                    await db.execute(
+                        """UPDATE ecommerce_orders
+                           SET tracking_number = ?, tracking_url = ?, label_url = ?,
+                               shippo_transaction_id = ?, tracking_status = 'label_created'
+                           WHERE id = ? AND (tracking_number IS NULL OR tracking_number = '')""",
+                        (first_labelled[0], first_labelled[1], first_labelled[2], first_labelled[3], order_id),
+                    )
+                if all(s[0] for s in all_shipments):
+                    await db.execute(
+                        """UPDATE ecommerce_orders
+                           SET payment_status = CASE WHEN payment_status IN ('paid', 'processing') THEN 'shipped' ELSE payment_status END
+                           WHERE id = ?""",
+                        (order_id,),
+                    )
+                await db.commit()
+                recovered += 1
+                print(f"[label-recovery] shipment {row_id} (order {order_id}, {stype}): recovered {tracking_number}")
+
+                if stype == "leaflife" and tracking_number:
+                    await _sync_leaflife_label(db, order_id, row_id, tracking_number)
+            except Exception as e:  # noqa: BLE001 - one bad row must not stop the sweep
+                print(f"[label-recovery] shipment {row_id} failed: {e}")
+
+    return {"checked": len(rows), "recovered": recovered}
+
+
+async def resync_leaflife_sheet_labels(db: aiosqlite.Connection) -> dict:
+    """Make sure recent LeafLife shipments have their label link on the sheet.
+
+    ``sync_label`` skips rows that already have a link, so this only repairs
+    sheet writes that were lost to a restart or a Sheets error.
+    """
+    if not leaflife_orders.is_configured():
+        return {"checked": 0}
+    cursor = await db.execute(
+        """SELECT order_id, id, tracking_number
+           FROM order_shipments
+           WHERE shipment_type = 'leaflife'
+             AND tracking_number IS NOT NULL AND tracking_number != ''
+             AND created_at >= datetime('now', '-30 days')"""
+    )
+    rows = await cursor.fetchall()
+    for order_id, shipment_id, tracking in rows:
+        await _sync_leaflife_label(db, order_id, shipment_id, tracking)
+    return {"checked": len(rows)}
 
 
 @router.get("/print-label/{short_order_no}/{token}")
@@ -510,14 +690,18 @@ async def purchase_label(
     tracking_url = transaction.get("tracking_url_provider", "")
     txn_id = transaction.get("object_id", "")
 
-    if body.shipment_id and tracking_number:
-        # Split-shipment: store tracking in order_shipments row
+    if body.shipment_id and txn_id:
+        # Split-shipment: store tracking in order_shipments row. Persist even if
+        # the tracking number hasn't materialized yet — the purchase already
+        # happened, and the recovery sweep fills in the rest from the saved
+        # transaction id.
         await db.execute(
             """UPDATE order_shipments
                SET tracking_number = ?, tracking_url = ?, label_url = ?,
-                   shippo_transaction_id = ?, tracking_status = 'label_created'
+                   shippo_transaction_id = ?, tracking_status = ?
                WHERE id = ?""",
-            (tracking_number, tracking_url, label_url, txn_id, body.shipment_id),
+            (tracking_number, tracking_url, label_url, txn_id,
+             "label_created" if tracking_number else "purchase_pending", body.shipment_id),
         )
 
         # Check if ALL shipment groups for this order now have labels

@@ -27,6 +27,9 @@ interface ShipmentGroup {
   from_label: string;
   item_names: string[];
   rates: ShippingRate[];
+  purchased?: boolean;
+  tracking_number?: string;
+  label_url?: string;
 }
 
 interface Order {
@@ -552,9 +555,11 @@ export default function OnlineOrders() {
         const groups: ShipmentGroup[] = res.data.shipment_groups;
         setShipmentGroups(groups);
 
+        const unpurchased = groups.filter(g => !g.purchased);
+
         if (canAutoBuy) {
-          const matches = groups.map(g => ({ group: g, rate: findMatchingRate(g.rates, customerService!) }));
-          if (matches.every(m => m.rate)) {
+          const matches = unpurchased.map(g => ({ group: g, rate: findMatchingRate(g.rates, customerService!) }));
+          if (matches.length > 0 && matches.every(m => m.rate)) {
             for (const m of matches) {
               await handlePurchaseSplitLabel(m.rate!.id, orderId, m.group.shipment_id);
             }
@@ -562,7 +567,7 @@ export default function OnlineOrders() {
           }
         }
 
-        if (groups.some(g => g.rates.length === 0)) {
+        if (unpurchased.some(g => g.rates.length === 0)) {
           setShippingError("No shipping rates available for one or more shipment groups.");
         }
       } else {
@@ -1870,7 +1875,17 @@ export default function OnlineOrders() {
                                   <p className="text-xs text-gray-500">Items: {group.item_names.join(", ")}</p>
                                 </div>
                                 <div className="p-3 space-y-2">
-                                  {group.rates.length === 0 ? (
+                                  {group.purchased ? (
+                                    <p className="text-sm text-green-700">
+                                      Label already purchased{group.tracking_number ? ` — tracking ${group.tracking_number}` : ""}
+                                      {group.label_url && (
+                                        <>
+                                          {" "}
+                                          <a href={group.label_url} target="_blank" rel="noopener noreferrer" className="underline text-green-800">View label</a>
+                                        </>
+                                      )}
+                                    </p>
+                                  ) : group.rates.length === 0 ? (
                                     <p className="text-sm text-red-600">No rates available for this shipment.</p>
                                   ) : group.rates.map((rate) => (
                                     <div key={rate.id} className="flex items-center justify-between p-3 border border-gray-200 rounded-lg hover:border-green-300 transition-colors">
