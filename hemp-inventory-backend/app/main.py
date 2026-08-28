@@ -174,6 +174,25 @@ async def _scheduled_leaflife_order_sweep():
         print(f"[auto-sync] LeafLife order sheet sweep failed: {e}")
 
 
+async def _scheduled_split_label_recovery():
+    """Background job: re-save shipment labels whose Shippo purchase wasn't persisted."""
+    try:
+        db = await _connect_db()
+        try:
+            from app.routers.shipping_router import recover_missing_split_labels, resync_leaflife_sheet_labels
+            result = await recover_missing_split_labels(db)
+            if result.get("recovered"):
+                print(
+                    f"[auto-sync] Label recovery: {result['recovered']} recovered "
+                    f"({result['checked']} checked)"
+                )
+            await resync_leaflife_sheet_labels(db)
+        finally:
+            await db.close()
+    except Exception as e:
+        print(f"[auto-sync] Label recovery failed: {e}")
+
+
 async def _scheduled_auto_par():
     """Background job: recompute every item's PAR from sales velocity nightly.
 
@@ -237,6 +256,7 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(_scheduled_coa_sync, "interval", minutes=30, id="coa_sync", replace_existing=True)
     scheduler.add_job(_scheduled_leaflife_sync, "interval", minutes=15, id="leaflife_sync", replace_existing=True)
     scheduler.add_job(_scheduled_leaflife_order_sweep, "interval", minutes=10, id="leaflife_order_sweep", replace_existing=True)
+    scheduler.add_job(_scheduled_split_label_recovery, "interval", minutes=15, id="split_label_recovery", replace_existing=True)
     # Recompute PAR from sales velocity once a night (heavy: pulls all orders).
     scheduler.add_job(_scheduled_auto_par, "cron", hour=5, id="auto_par", replace_existing=True)
     # Pull in-store discount redemptions from Clover so promo "Uses" is accurate
