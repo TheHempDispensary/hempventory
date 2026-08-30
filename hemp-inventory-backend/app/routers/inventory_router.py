@@ -144,6 +144,18 @@ async def _get_locations(db: aiosqlite.Connection, location_ids: Optional[list[i
     return await cursor.fetchall()
 
 
+def _is_hq(location_name: str) -> bool:
+    return (location_name or "").strip().upper() == "HQ"
+
+
+def _hq_locations_for_bulk(locations: list, name: str) -> list:
+    """Bulk items are produced and stored at HQ only, so they are never created
+    at the retail locations."""
+    if not is_bulk_name(name):
+        return locations
+    return [loc for loc in locations if _is_hq(loc[1])]
+
+
 async def _get_par_levels(db: aiosqlite.Connection) -> dict:
     """Returns dict of (sku, location_id) -> par_level."""
     cursor = await db.execute("SELECT sku, location_id, par_level FROM par_levels")
@@ -489,6 +501,9 @@ async def create_item(
     locations = await _get_locations(db, item.locations)
     if not locations:
         raise HTTPException(status_code=400, detail="No locations configured")
+    locations = _hq_locations_for_bulk(locations, item.name)
+    if not locations:
+        raise HTTPException(status_code=400, detail="Bulk items can only be created at HQ")
 
     # Build per-location stock map
     stock_map: dict[int, float] = {}
@@ -867,6 +882,9 @@ async def push_item_to_location(
     if not source_item:
         raise HTTPException(status_code=404, detail=f"Item with SKU '{sku}' not found in any location")
 
+    if not _hq_locations_for_bulk([target_loc], source_item.get("name") or ""):
+        raise HTTPException(status_code=400, detail="Bulk items only exist at HQ")
+
     # Build item data from source
     item_data: dict = {
         "name": source_item.get("name", ""),
@@ -999,6 +1017,52 @@ async def normalize_bulk_strain_types(
         await _invalidate_cache()
         invalidate_product_cache()
     return {"dry_run": req.dry_run, "renames": renames, "results": results}
+
+
+@router.post("/purge-bulk-from-retail")
+async def purge_bulk_from_retail(
+    req: BulkStrainTypeRequest,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Delete bulk items from the retail locations, where they never belong.
+
+    Bulk items pushed to every location show up as stockless duplicates of the
+    HQ records. Items holding stock are reported instead of deleted.
+    """
+    locations = await _get_locations(db)
+    if not locations:
+        raise HTTPException(status_code=400, detail="No locations configured")
+
+    deleted: list[dict] = []
+    skipped: list[dict] = []
+    results: list[dict] = []
+    for loc in locations:
+        loc_name, merchant_id, api_token = loc[1], loc[2], loc[3]
+        if _is_hq(loc_name):
+            continue  # HQ is where bulk items live
+        try:
+            client = CloverClient(merchant_id, api_token)
+            items = (await client.get_items(expand="itemStock")).get("elements", [])
+            for item in items:
+                name = " ".join((item.get("name") or "").split())
+                if not is_bulk_name(name):
+                    continue
+                quantity = (item.get("itemStock") or {}).get("quantity") or 0
+                if quantity:
+                    skipped.append({"location": loc_name, "name": name, "stock": quantity})
+                    continue
+                deleted.append({"location": loc_name, "name": name})
+                if not req.dry_run:
+                    await client.delete_item(item["id"])
+            results.append({"location": loc_name, "status": "ok"})
+        except Exception as e:
+            results.append({"location": loc_name, "status": "error", "error": str(e)})
+
+    if not req.dry_run and deleted:
+        await _invalidate_cache()
+        invalidate_product_cache()
+    return {"dry_run": req.dry_run, "deleted": deleted, "skipped": skipped, "results": results}
 
 
 class BulkCategoryRequest(BaseModel):
@@ -3059,6 +3123,9 @@ async def create_item_group(
     locations = await _get_locations(db)
     if not locations:
         raise HTTPException(status_code=400, detail="No locations configured")
+    locations = _hq_locations_for_bulk(locations, req.item_name)
+    if not locations:
+        raise HTTPException(status_code=400, detail="Bulk items can only be created at HQ")
 
     # Merge duplicate attribute names (case-insensitive): combine options from attributes with the same name.
     # This prevents accidental cartesian explosion (e.g. two "Size" attributes with 3 opts each → 9 combos).
