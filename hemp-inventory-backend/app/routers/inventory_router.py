@@ -19,6 +19,12 @@ from urllib.parse import quote
 from PIL import Image as PILImage
 
 from app.auth import get_current_user
+from app.catalog import (
+    is_bulk_name,
+    name_with_strain_type,
+    resolve_categories,
+    strain_types_by_phrase,
+)
 from app.database import get_db
 from app.clover_client import CloverClient
 from app.routers.ecommerce_router import invalidate_product_cache
@@ -229,14 +235,9 @@ async def _do_sync(db: aiosqlite.Connection) -> dict:
             quantity = item_stock.get("quantity", 0) if item_stock else 0
 
             categories = item.get("categories", {}).get("elements", [])
-            category_names = [c.get("name", "") for c in categories]
-
-            # Remap apparel items (hoodies, t-shirts, shirts) to "Apparel" category
-            name_lower = item_name.lower()
-            if re.search(r'\b(hoodie|t-shirt|shirt|tee|jersey|hat|beanie)\b', name_lower):
-                category_names = [c if c != "Accessories" else "Apparel" for c in category_names]
-                if not category_names:
-                    category_names = ["Apparel"]
+            category_names = resolve_categories(
+                base_name, [c.get("name", "") for c in categories]
+            )
 
             par = par_levels.get((display_sku, loc_id), None)
 
@@ -944,6 +945,60 @@ async def push_item_to_location(
         raise HTTPException(status_code=400, detail=f"Failed to create item at {target_loc_name}: {error_detail}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create item at {target_loc_name}: {str(e)}")
+
+
+class BulkStrainTypeRequest(BaseModel):
+    dry_run: bool = True
+
+
+@router.post("/normalize-bulk-strain-types")
+async def normalize_bulk_strain_types(
+    req: BulkStrainTypeRequest,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Name bulk items after their retail counterparts' strain type.
+
+    Bulk items are created without the Indica/Sativa/Hybrid label the packaged
+    products carry, so the strain type is copied from the retail item of the
+    same strain ("Bulk - Green Crack THC Flower Grams" -> "... Green Crack
+    Sativa ..."). Bulk recipes match on names with the strain type stripped, so
+    renaming keeps their production links intact.
+    """
+    locations = await _get_locations(db)
+    if not locations:
+        raise HTTPException(status_code=400, detail="No locations configured")
+
+    renames: list[dict] = []
+    results: list[dict] = []
+    for loc in locations:
+        loc_name, merchant_id, api_token = loc[1], loc[2], loc[3]
+        try:
+            client = CloverClient(merchant_id, api_token)
+            items = (await client.get_items(expand="categories")).get("elements", [])
+            strain_types = strain_types_by_phrase(
+                " ".join((i.get("name") or "").split()) for i in items
+            )
+            renamed = 0
+            for item in items:
+                name = " ".join((item.get("name") or "").split())
+                if not is_bulk_name(name):
+                    continue
+                new_name = name_with_strain_type(name, strain_types)
+                if new_name == name:
+                    continue
+                renames.append({"location": loc_name, "from": name, "to": new_name})
+                if not req.dry_run:
+                    await client.update_item(item["id"], {"name": new_name})
+                renamed += 1
+            results.append({"location": loc_name, "renamed": renamed, "status": "ok"})
+        except Exception as e:
+            results.append({"location": loc_name, "renamed": 0, "status": "error", "error": str(e)})
+
+    if not req.dry_run and renames:
+        await _invalidate_cache()
+        invalidate_product_cache()
+    return {"dry_run": req.dry_run, "renames": renames, "results": results}
 
 
 class BulkCategoryRequest(BaseModel):
