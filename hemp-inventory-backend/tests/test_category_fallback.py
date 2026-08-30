@@ -1,6 +1,6 @@
 import pytest
 
-from app.routers.ecommerce_router import _infer_categories
+from app.catalog import infer_categories as _infer_categories, resolve_categories
 
 
 @pytest.mark.parametrize(
@@ -64,3 +64,17 @@ def test_batter_is_concentrate_but_battery_is_accessory():
 )
 def test_short_tokens_require_word_boundaries(name):
     assert _infer_categories(name) == []
+
+
+def test_baby_js_are_flower():
+    assert _infer_categories("GREEN CRACK BABY JS") == ["Flower"]
+
+
+def test_resolve_keeps_clover_categories():
+    assert resolve_categories("THC FLOWER 3.5G", ["Flower"]) == ["Flower"]
+
+
+def test_resolve_remaps_apparel_and_falls_back_when_clover_has_none():
+    assert resolve_categories("HEMP HOODIE", ["Accessories"]) == ["Apparel"]
+    assert resolve_categories("HEMP HOODIE", []) == ["Apparel"]
+    assert resolve_categories("DELTA 9 THC TINCTURE", []) == ["Tinctures"]
