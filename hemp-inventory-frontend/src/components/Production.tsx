@@ -8,6 +8,7 @@ import {
   updateProductionBatch, deleteProductionBatch, getCachedInventory, addBatchToInventory,
   reorderProductionBatches, getBulkItems, getBulkRecipes, upsertBulkRecipe, deleteBulkRecipe,
   type ProductionPlanItem, type ProductionBatch, type BatchPayload, type BulkItem,
+  type BulkRecipe,
 } from "../lib/api";
 import { etToday, formatDateOnly, matchesSearch } from "../lib/utils";
 
@@ -50,6 +51,15 @@ interface InvItem {
   locations?: Record<string, LocationStock>;
 }
 
+// Packaged-product names are typed by hand in places, so recipes are matched
+// on a whitespace/case-normalised name (mirrors the backend's packaged_key).
+const normName = (s: string) => s.trim().replace(/\s+/g, " ").toLowerCase();
+
+// Bulk on hand for a packaged product, plus how many finished units it covers.
+interface BulkStock { name: string; stock: number; perUnit: number; makes: number; }
+
+type SortField = "name" | "in_stock" | "units_per_month" | "needed" | "already_planned" | "to_produce" | "bulk";
+
 // "Hemp Dispensary East Location" -> "East"
 const shortLocation = (name: string) =>
   name.replace(" Location", "").replace("Hemp Dispensary ", "");
@@ -71,6 +81,12 @@ export default function Production() {
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bulkAdding, setBulkAdding] = useState(false);
+
+  const [bulkItems, setBulkItems] = useState<BulkItem[]>([]);
+  const [bulkRecipes, setBulkRecipes] = useState<BulkRecipe[]>([]);
+
+  const [sortField, setSortField] = useState<SortField>("to_produce");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
 
   const dragIdRef = useRef<number | null>(null);
   const [dragId, setDragId] = useState<number | null>(null);
@@ -149,8 +165,16 @@ export default function Production() {
     } catch { /* non-fatal */ }
   };
 
+  const loadBulk = async () => {
+    try {
+      const [items, recipes] = await Promise.all([getBulkItems(), getBulkRecipes()]);
+      setBulkItems(items.data.items);
+      setBulkRecipes(recipes.data.recipes);
+    } catch { /* non-fatal */ }
+  };
+
   useEffect(() => { loadPlan(months); }, [months]);
-  useEffect(() => { loadBatches(); loadInventory(); }, []);
+  useEffect(() => { loadBatches(); loadInventory(); loadBulk(); }, []);
 
   const flash = (msg: string) => {
     setToast(msg);
@@ -267,10 +291,46 @@ export default function Production() {
     return map;
   }, [inventory]);
 
+  // Bulk on hand for each planned product, via its packaged->bulk recipe.
+  const bulkByProduct = useMemo(() => {
+    const stockByBulk = new Map(bulkItems.map((b) => [normName(b.name), b.stock]));
+    const map = new Map<string, BulkStock>();
+    for (const r of bulkRecipes) {
+      const stock = stockByBulk.get(normName(r.bulk_name));
+      if (stock === undefined) continue;
+      const perUnit = r.bulk_per_unit || 0;
+      map.set(normName(r.packaged_name), {
+        name: r.bulk_name,
+        stock,
+        perUnit,
+        makes: perUnit > 0 ? Math.floor(stock / perUnit) : 0,
+      });
+    }
+    return map;
+  }, [bulkItems, bulkRecipes]);
+
+  const toggleSort = (field: SortField) => {
+    if (field === sortField) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortField(field);
+      setSortDir(field === "name" ? "asc" : "desc");
+    }
+  };
+
   const filteredPlan = useMemo(() => {
-    if (!planSearch) return plan;
-    return plan.filter((p) => matchesSearch(planSearch, p.name, p.sku));
-  }, [plan, planSearch]);
+    const rows = planSearch
+      ? plan.filter((p) => matchesSearch(planSearch, p.name, p.sku))
+      : [...plan];
+    const value = (p: ProductionPlanItem): number =>
+      sortField === "bulk" ? (bulkByProduct.get(normName(p.name))?.stock ?? -1) : Number(p[sortField]);
+    const dir = sortDir === "asc" ? 1 : -1;
+    return rows.sort((a, b) => {
+      if (sortField === "name") return dir * a.name.localeCompare(b.name);
+      const diff = value(a) - value(b);
+      return diff !== 0 ? dir * diff : a.name.localeCompare(b.name);
+    });
+  }, [plan, planSearch, sortField, sortDir, bulkByProduct]);
 
   const selectablePlan = useMemo(
     () => filteredPlan.filter((p) => p.to_produce > 0),
@@ -416,17 +476,20 @@ export default function Production() {
                               title="Select all"
                             />
                           </th>
-                          <th className="px-4 py-3 font-medium text-gray-600">Product</th>
-                          <th className="px-4 py-3 font-medium text-gray-600 text-right whitespace-nowrap">In Stock</th>
-                          <th className="px-4 py-3 font-medium text-gray-600 text-right whitespace-nowrap">Sold/mo</th>
-                          <th className="px-4 py-3 font-medium text-gray-600 text-right whitespace-nowrap">Need</th>
-                          <th className="px-4 py-3 font-medium text-gray-600 text-right whitespace-nowrap">Planned</th>
-                          <th className="px-4 py-3 font-medium text-amber-700 bg-amber-50 text-right whitespace-nowrap">To Produce</th>
+                          <SortHeader field="name" label="Product" sortField={sortField} sortDir={sortDir} onSort={toggleSort} />
+                          <SortHeader field="in_stock" label="In Stock" align="right" sortField={sortField} sortDir={sortDir} onSort={toggleSort} />
+                          <SortHeader field="bulk" label="Bulk On Hand" align="right" sortField={sortField} sortDir={sortDir} onSort={toggleSort} />
+                          <SortHeader field="units_per_month" label="Sold/mo" align="right" sortField={sortField} sortDir={sortDir} onSort={toggleSort} />
+                          <SortHeader field="needed" label="Need" align="right" sortField={sortField} sortDir={sortDir} onSort={toggleSort} />
+                          <SortHeader field="already_planned" label="Planned" align="right" sortField={sortField} sortDir={sortDir} onSort={toggleSort} />
+                          <SortHeader field="to_produce" label="To Produce" align="right" className="text-amber-700 bg-amber-50" sortField={sortField} sortDir={sortDir} onSort={toggleSort} />
                           <th className="px-4 py-3"></th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-100">
-                        {filteredPlan.map((p) => (
+                        {filteredPlan.map((p) => {
+                          const bulk = bulkByProduct.get(normName(p.name));
+                          return (
                           <tr key={planKey(p)} className={`hover:bg-gray-50 ${selected.has(planKey(p)) ? "bg-green-50/60" : ""}`}>
                             <td className="px-4 py-3">
                               {p.to_produce > 0 && (
@@ -451,6 +514,16 @@ export default function Production() {
                                     .join(" · ")}
                                 </div>
                               )}
+                            </td>
+                            <td className="px-4 py-3 text-right text-gray-600">
+                              {bulk ? (
+                                <>
+                                  {bulk.stock}
+                                  <div className="text-xs text-gray-400 mt-0.5">
+                                    {bulk.name}{bulk.makes > 0 ? ` · makes ${bulk.makes}` : ""}
+                                  </div>
+                                </>
+                              ) : <span className="text-gray-300">&mdash;</span>}
                             </td>
                             <td className="px-4 py-3 text-right text-gray-600">{p.units_per_month}</td>
                             <td className="px-4 py-3 text-right text-gray-600">{p.needed}</td>
@@ -479,9 +552,10 @@ export default function Production() {
                               )}
                             </td>
                           </tr>
-                        ))}
+                          );
+                        })}
                         {filteredPlan.length === 0 && (
-                          <tr><td colSpan={8} className="px-4 py-8 text-center text-gray-500">Nothing to produce right now.</td></tr>
+                          <tr><td colSpan={9} className="px-4 py-8 text-center text-gray-500">Nothing to produce right now.</td></tr>
                         )}
                       </tbody>
                     </table>
@@ -660,6 +734,30 @@ export default function Production() {
         />
       )}
     </div>
+  );
+}
+
+function SortHeader({ field, label, align = "left", className = "", sortField, sortDir, onSort }: {
+  field: SortField;
+  label: string;
+  align?: "left" | "right";
+  className?: string;
+  sortField: SortField;
+  sortDir: "asc" | "desc";
+  onSort: (f: SortField) => void;
+}) {
+  const active = sortField === field;
+  const Arrow = sortDir === "asc" ? ChevronUp : ChevronDown;
+  return (
+    <th className={`px-4 py-3 font-medium whitespace-nowrap ${align === "right" ? "text-right" : ""} ${className || "text-gray-600"}`}>
+      <button
+        onClick={() => onSort(field)}
+        className={`inline-flex items-center gap-0.5 hover:text-green-700 ${active ? "text-green-700" : ""}`}
+      >
+        {label}
+        <Arrow className={`w-3.5 h-3.5 ${active ? "" : "opacity-25"}`} />
+      </button>
+    </th>
   );
 }
 
