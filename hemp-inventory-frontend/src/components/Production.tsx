@@ -56,7 +56,33 @@ interface InvItem {
 const normName = (s: string) => s.trim().replace(/\s+/g, " ").toLowerCase();
 
 // Bulk on hand for a packaged product, plus how many finished units it covers.
-interface BulkStock { name: string; stock: number; perUnit: number; makes: number; }
+// `inferred` marks a match found by product name rather than a saved recipe.
+interface BulkStock { name: string; stock: number; perUnit: number; makes: number; inferred: boolean; }
+
+// Words that appear in nearly every product/bulk name and so can't identify
+// which bulk a packaged item comes from on their own.
+const GENERIC_TOKENS = new Set([
+  "bulk", "thc", "cbd", "cbg", "cbn", "delta", "flower", "smalls", "shake", "bigs",
+  "gram", "grams", "g", "oz", "mg", "ct", "count", "pack", "pk", "piece", "pieces",
+  "pre", "roll", "rolled", "joint", "gummy", "gummies", "the", "and", "of", "with",
+  "for", "a", "in", "by", "per", "each", "hybrid", "sativa", "indica", "variety",
+]);
+
+const tokenize = (name: string): Set<string> =>
+  new Set(name.toLowerCase().replace(/[^a-z0-9]+/g, " ").split(" ").filter(Boolean));
+
+/**
+ * Bulk names describe their source product ("Bulk - Skywalker OG Indica THC
+ * Flower Grams"), so a bulk item belongs to a packaged product when every one
+ * of its words also appears in the product name. At least one of those words
+ * has to be distinguishing (a strain/flavour), otherwise a generic "Bulk THC
+ * Flower" would claim every flower product.
+ */
+const bulkMatchesProduct = (bulkTokens: Set<string>, productTokens: Set<string>): boolean => {
+  const specific = [...bulkTokens].filter((t) => !GENERIC_TOKENS.has(t) && !/^\d+$/.test(t));
+  if (specific.length === 0) return false;
+  return [...bulkTokens].every((t) => GENERIC_TOKENS.has(t) || /^\d+$/.test(t) || productTokens.has(t));
+};
 
 type SortField = "name" | "in_stock" | "units_per_month" | "needed" | "already_planned" | "to_produce" | "bulk";
 
@@ -291,7 +317,8 @@ export default function Production() {
     return map;
   }, [inventory]);
 
-  // Bulk on hand for each planned product, via its packaged->bulk recipe.
+  // Bulk on hand for each planned product: a saved packaged->bulk recipe when
+  // there is one, otherwise the best name match among the bulk products.
   const bulkByProduct = useMemo(() => {
     const stockByBulk = new Map(bulkItems.map((b) => [normName(b.name), b.stock]));
     const map = new Map<string, BulkStock>();
@@ -304,10 +331,23 @@ export default function Production() {
         stock,
         perUnit,
         makes: perUnit > 0 ? Math.floor(stock / perUnit) : 0,
+        inferred: false,
       });
     }
+    const tokenised = bulkItems.map((b) => ({ item: b, tokens: tokenize(b.name) }));
+    for (const p of plan) {
+      const key = normName(p.name);
+      if (map.has(key)) continue;
+      const productTokens = tokenize(p.name);
+      // Most words in common wins, so a specific bulk beats a broader one.
+      const best = tokenised
+        .filter(({ tokens }) => bulkMatchesProduct(tokens, productTokens))
+        .sort((a, b) => b.tokens.size - a.tokens.size)[0];
+      if (!best) continue;
+      map.set(key, { name: best.item.name, stock: best.item.stock, perUnit: 0, makes: 0, inferred: true });
+    }
     return map;
-  }, [bulkItems, bulkRecipes]);
+  }, [bulkItems, bulkRecipes, plan]);
 
   const toggleSort = (field: SortField) => {
     if (field === sortField) {
@@ -521,6 +561,9 @@ export default function Production() {
                                   {bulk.stock}
                                   <div className="text-xs text-gray-400 mt-0.5">
                                     {bulk.name}{bulk.makes > 0 ? ` · makes ${bulk.makes}` : ""}
+                                    {bulk.inferred && (
+                                      <span title="Matched by name — set a bulk link on a batch to pin it"> · matched by name</span>
+                                    )}
                                   </div>
                                 </>
                               ) : <span className="text-gray-300">&mdash;</span>}
