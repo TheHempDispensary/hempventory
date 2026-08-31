@@ -42,7 +42,17 @@ const bulkFlash = (bulk: ProductionBatch["bulk_result"]): string =>
       ? ` (bulk deduction skipped: ${bulk.reason})`
       : "";
 
-interface InvItem { sku: string; name: string; categories?: string[]; }
+interface LocationStock { stock: number; }
+interface InvItem {
+  sku: string;
+  name: string;
+  categories?: string[];
+  locations?: Record<string, LocationStock>;
+}
+
+// "Hemp Dispensary East Location" -> "East"
+const shortLocation = (name: string) =>
+  name.replace(" Location", "").replace("Hemp Dispensary ", "");
 
 export default function Production() {
   const [tab, setTab] = useState<Tab>("plan");
@@ -133,7 +143,7 @@ export default function Production() {
     try {
       const res = await getCachedInventory();
       const items: InvItem[] = (res.data.items || []).map((i: InvItem) => ({
-        sku: i.sku, name: i.name, categories: i.categories || [],
+        sku: i.sku, name: i.name, categories: i.categories || [], locations: i.locations || {},
       }));
       setInventory(items);
     } catch { /* non-fatal */ }
@@ -241,6 +251,21 @@ export default function Production() {
     setBatches((prev) => prev.filter((b) => b.id !== id));
     await loadPlan(months);
   };
+
+  // Live stock per catalog SKU, so a board card can show what's already on the
+  // shelves next to what's being made.
+  const stockBySku = useMemo(() => {
+    const map = new Map<string, { total: number; byLocation: [string, number][] }>();
+    for (const item of inventory) {
+      const byLocation = Object.entries(item.locations || {})
+        .map(([loc, l]) => [shortLocation(loc), l.stock || 0] as [string, number]);
+      map.set(item.sku, {
+        total: byLocation.reduce((sum, [, qty]) => sum + qty, 0),
+        byLocation,
+      });
+    }
+    return map;
+  }, [inventory]);
 
   const filteredPlan = useMemo(() => {
     if (!planSearch) return plan;
@@ -503,7 +528,9 @@ export default function Production() {
                     <span className="ml-auto text-xs text-gray-400">{colBatches.length}</span>
                   </div>
                   <div className="space-y-2 min-h-[8px]">
-                    {colBatches.map((b, idx) => (
+                    {colBatches.map((b, idx) => {
+                      const stock = b.sku ? stockBySku.get(b.sku) : undefined;
+                      return (
                       <div
                         key={b.id}
                         draggable
@@ -557,6 +584,16 @@ export default function Production() {
                         <div className="text-xs text-gray-500 mt-1 space-y-0.5">
                           {b.size && <div>Size: {b.size}</div>}
                           {b.plan_date && <div>Working: {formatDateOnly(b.plan_date)}</div>}
+                          {stock && (
+                            <div>
+                              In stock: {stock.total}
+                              {stock.byLocation.length > 0 && (
+                                <span className="text-gray-400">
+                                  {" "}({stock.byLocation.map(([loc, qty]) => `${loc}: ${qty}`).join(" · ")})
+                                </span>
+                              )}
+                            </div>
+                          )}
                           <div>
                             Qty: {b.status === "done" || b.produced_qty ? `${b.produced_qty || b.planned_qty} made` : `${b.planned_qty} planned`}
                           </div>
@@ -588,7 +625,8 @@ export default function Production() {
                           </button>
                         )}
                       </div>
-                    ))}
+                      );
+                    })}
                     {colBatches.length === 0 && (
                       <p className="text-xs text-gray-400 text-center py-4">Empty</p>
                     )}
