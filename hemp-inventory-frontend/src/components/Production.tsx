@@ -9,7 +9,7 @@ import {
   reorderProductionBatches, getBulkItems, getBulkRecipes, upsertBulkRecipe, deleteBulkRecipe,
   type ProductionPlanItem, type ProductionBatch, type BatchPayload, type BulkItem,
 } from "../lib/api";
-import { matchesSearch } from "../lib/utils";
+import { etToday, formatDateOnly, matchesSearch } from "../lib/utils";
 
 const MONTH_OPTIONS = [1, 3, 4, 6, 12];
 
@@ -154,6 +154,7 @@ export default function Production() {
       planned_qty: item.to_produce,
       status: "planned",
       source: "smart_par",
+      plan_date: etToday(),
     };
     const res = await createProductionBatch(payload);
     setBatches((prev) => [res.data, ...prev]);
@@ -166,7 +167,7 @@ export default function Production() {
       planned_qty: item.to_produce || 0, produced_qty: 0,
       status: "planned", batch_no: null, expiration_date: null, made_by: null,
       qa_check: false, label_ordered: false, label_qty: null, notes: null,
-      source: "smart_par", plan_date: null, completed_at: null,
+      source: "smart_par", plan_date: etToday(), completed_at: null,
       inventoried: false, inventoried_at: null, inventoried_qty: null,
       sort_order: 0, created_at: "", updated_at: "",
     });
@@ -193,6 +194,7 @@ export default function Production() {
           planned_qty: item.to_produce,
           status: "planned",
           source: "smart_par",
+          plan_date: etToday(),
         });
         created.push(res.data);
       }
@@ -475,7 +477,7 @@ export default function Production() {
                 id: 0, sku: null, product_name: "", size: null, planned_qty: 0, produced_qty: 0,
                 status: "planned", batch_no: null, expiration_date: null, made_by: null,
                 qa_check: false, label_ordered: false, label_qty: null, notes: null,
-                source: "manual", plan_date: null, completed_at: null,
+                source: "manual", plan_date: etToday(), completed_at: null,
                 inventoried: false, inventoried_at: null, inventoried_qty: null,
                 sort_order: 0, created_at: "", updated_at: "",
               })}
@@ -554,6 +556,7 @@ export default function Production() {
                         </div>
                         <div className="text-xs text-gray-500 mt-1 space-y-0.5">
                           {b.size && <div>Size: {b.size}</div>}
+                          {b.plan_date && <div>Working: {formatDateOnly(b.plan_date)}</div>}
                           <div>
                             Qty: {b.status === "done" || b.produced_qty ? `${b.produced_qty || b.planned_qty} made` : `${b.planned_qty} planned`}
                           </div>
@@ -690,6 +693,7 @@ function BatchModal({ batch, products, onClose, onSaved }: {
 
   const save = async () => {
     if (!form.product_name.trim()) { setErr("Product name is required"); return; }
+    if (!form.plan_date) { setErr("Work date is required"); return; }
     setSaving(true); setErr("");
     const payload: BatchPayload = {
       product_name: form.product_name.trim(),
@@ -705,6 +709,7 @@ function BatchModal({ batch, products, onClose, onSaved }: {
       label_ordered: form.label_ordered,
       label_qty: form.label_qty,
       notes: form.notes,
+      plan_date: form.plan_date,
       add_to_inventory: addToInventory,
     };
     // Persist the packaged->bulk link before finishing so the deduction on
@@ -795,6 +800,19 @@ function BatchModal({ batch, products, onClose, onSaved }: {
             </div>
           </div>
           <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className={label}>
+                Work date <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="date"
+                required
+                className={`${input} ${form.plan_date ? "" : "border-red-300"}`}
+                value={form.plan_date || ""}
+                onChange={(e) => set("plan_date", e.target.value || null)}
+              />
+              <p className="text-xs text-gray-400 mt-1">Day this item is being worked on</p>
+            </div>
             <div>
               <label className={label}>Size</label>
               <input className={input} value={form.size || ""} onChange={(e) => set("size", e.target.value)} placeholder="e.g. 2 oz, 100 ct" />

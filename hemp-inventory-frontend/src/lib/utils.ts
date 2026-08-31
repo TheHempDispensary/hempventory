@@ -32,6 +32,18 @@ export function formatEtDate(value: string | number | Date): string {
   return parseServerDate(value).toLocaleDateString("en-US", { timeZone: ET });
 }
 
+/** Today in Eastern time as "YYYY-MM-DD", for date inputs. */
+export function etToday(): string {
+  return new Date().toLocaleDateString("en-CA", { timeZone: ET });
+}
+
+/** A "YYYY-MM-DD" calendar date as "M/D/YYYY", without shifting the day. */
+export function formatDateOnly(value: string): string {
+  const m = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return value;
+  return `${Number(m[2])}/${Number(m[3])}/${m[1]}`;
+}
+
 /**
  * Word-order-insensitive search: every whitespace-separated term in the query
  * must appear (as a substring) in at least one of the provided fields. So
