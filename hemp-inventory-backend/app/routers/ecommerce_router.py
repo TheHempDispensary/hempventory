@@ -4037,6 +4037,100 @@ async def get_orders(
     return {"orders": orders, "total": total}
 
 
+async def _send_order_cancelled_email(
+    db: aiosqlite.Connection,
+    order_id: int,
+    order: dict,
+) -> bool:
+    """Email the customer that their order was cancelled. Returns True if the email went out."""
+    customer_email = order.get("customer_email", "")
+    if not customer_email:
+        return False
+
+    order_number = order.get("order_number", f"THD-{order_id}")
+    first_name = order.get("customer_first_name") or "Customer"
+    total = order.get("total", 0) or 0
+    refund_amount = order.get("refund_amount", 0) or 0
+    was_charged = bool(order.get("charge_id"))
+
+    item_cursor = await db.execute(
+        "SELECT product_name, price, quantity FROM ecommerce_order_items WHERE order_id = ?",
+        (order_id,),
+    )
+    item_cols = [desc[0] for desc in item_cursor.description]
+    items = [dict(zip(item_cols, r)) for r in await item_cursor.fetchall()]
+
+    items_html = ""
+    for item in items:
+        items_html += f"""
+        <tr>
+            <td style="padding: 10px 12px; border-bottom: 1px solid #e5e7eb;">{item["product_name"]}</td>
+            <td style="padding: 10px 12px; border-bottom: 1px solid #e5e7eb; text-align: center;">{item["quantity"]}</td>
+            <td style="padding: 10px 12px; border-bottom: 1px solid #e5e7eb; text-align: right;">{_format_price(item["price"] * item["quantity"])}</td>
+        </tr>
+        """
+
+    if refund_amount:
+        refund_html = (
+            f'<p>A refund of <strong>{_format_price(refund_amount)}</strong> has been issued to your original '
+            "payment method. It typically posts within 3–5 business days.</p>"
+        )
+    elif was_charged:
+        refund_html = (
+            f'<p>Your payment of <strong>{_format_price(total)}</strong> is being refunded to your original '
+            "payment method. Refunds typically post within 3–5 business days.</p>"
+        )
+    else:
+        refund_html = "<p>You have not been charged for this order.</p>"
+
+    customer_html = f"""
+    <html>
+    <body style="font-family: 'Helvetica Neue', Arial, sans-serif; color: #1f2937; max-width: 600px; margin: 0 auto;">
+        <div style="background: #991b1b; padding: 20px; text-align: center;">
+            <h1 style="color: white; margin: 0; font-size: 22px;">Order Cancelled</h1>
+        </div>
+        <div style="padding: 24px; background: #f9fafb;">
+            <p style="font-size: 16px;">Hi {first_name},</p>
+            <p>Your order <strong>{order_number}</strong> has been cancelled.</p>
+            {refund_html}
+
+            <h3>Cancelled Items</h3>
+            <table style="width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden;">
+                <thead>
+                    <tr style="background: #991b1b; color: white;">
+                        <th style="padding: 10px 12px; text-align: left;">Product</th>
+                        <th style="padding: 10px 12px; text-align: center;">Qty</th>
+                        <th style="padding: 10px 12px; text-align: right;">Total</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {items_html}
+                </tbody>
+            </table>
+
+            <p style="margin-top: 20px;">Questions about this cancellation? Reply to this email or contact us at <a href="mailto:{STORE_EMAIL}">{STORE_EMAIL}</a>.</p>
+            <p>We hope to see you again soon!</p>
+        </div>
+        <div style="padding: 16px; text-align: center; color: #9ca3af; font-size: 12px;">
+            The Hemp Dispensary — Premium Hemp Products<br>
+            Spring Hill, FL
+        </div>
+    </body>
+    </html>
+    """
+
+    smtp_settings = await _get_smtp_settings(db)
+    subject = f"Order Cancelled — {order_number} | The Hemp Dispensary"
+    try:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, _send_smtp_email, smtp_settings, customer_email, subject, customer_html
+        )
+    except Exception as e:
+        print(f"[order] Failed to send cancellation email for {order_number}: {e}")
+        return False
+
+
 @router.patch("/orders/{order_id}/status")
 async def update_order_status(
     order_id: int,
@@ -4061,11 +4155,23 @@ async def update_order_status(
     if new_status not in ("pending", "paid", "processing", "shipped", "delivered", "cancelled"):
         raise HTTPException(status_code=400, detail="Invalid status")
 
+    cursor = await db.execute("SELECT * FROM ecommerce_orders WHERE id = ?", (order_id,))
+    columns = [desc[0] for desc in cursor.description]
+    row = await cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Order not found")
+    order = dict(zip(columns, row))
+    previous_status = order.get("payment_status", "")
+
     await db.execute(
         "UPDATE ecommerce_orders SET payment_status = ? WHERE id = ?",
         (new_status, order_id),
     )
     await db.commit()
+
+    cancellation_email_sent = False
+    if new_status == "cancelled" and previous_status != "cancelled":
+        cancellation_email_sent = await _send_order_cancelled_email(db, order_id, order)
 
     # Checkout deducts stock in a background task that can lose its Clover call
     # (network blip, item not yet resolvable at the pickup location). Staff moving
@@ -4086,6 +4192,7 @@ async def update_order_status(
         "order_id": order_id,
         "status": new_status,
         "stock_deducted": stock_deducted,
+        "cancellation_email_sent": cancellation_email_sent,
     }
 
 
@@ -4751,6 +4858,42 @@ async def resend_order_confirmation(
         raise HTTPException(status_code=500, detail=f"Failed to send email: {str(e)}")
 
     return {"success": True, "order_id": order_id, "email": customer_email}
+
+
+@router.post("/orders/{order_id}/send-cancellation")
+async def send_order_cancellation_email(
+    order_id: int,
+    request: Request,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Send (or re-send) the cancellation email for an order (requires admin auth)."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    import jwt
+    token = auth.split(" ", 1)[1]
+    jwt_secret = os.environ.get("JWT_SECRET", "hemp-inventory-secret-key")
+    try:
+        jwt.decode(token, jwt_secret, algorithms=["HS256"])
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    cursor = await db.execute("SELECT * FROM ecommerce_orders WHERE id = ?", (order_id,))
+    columns = [desc[0] for desc in cursor.description]
+    row = await cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Order not found")
+    order = dict(zip(columns, row))
+
+    if not order.get("customer_email"):
+        raise HTTPException(status_code=400, detail="No customer email on this order")
+
+    sent = await _send_order_cancelled_email(db, order_id, order)
+    if not sent:
+        raise HTTPException(status_code=500, detail="Failed to send email — SMTP not configured or credentials invalid")
+
+    return {"success": True, "order_id": order_id, "email": order["customer_email"]}
 
 
 async def _restock_items(items: list, fulfillment_type: str = "shipping") -> None:

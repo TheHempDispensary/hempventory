@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { getOnlineOrders, updateOrderStatus, updateOrderNotes, updateOrderCustomer, createShipment, purchaseLabel, getShippingLabel, refundOrder, resendOrderConfirmation, convertToShipping, getOrderShipments, updateFulfillmentType, recoverOrder } from "../lib/api";
+import { getOnlineOrders, updateOrderStatus, updateOrderNotes, updateOrderCustomer, createShipment, purchaseLabel, getShippingLabel, refundOrder, resendOrderConfirmation, sendCancellationEmail, convertToShipping, getOrderShipments, updateFulfillmentType, recoverOrder } from "../lib/api";
 import { MessageSquare, Save, Edit2, X } from "lucide-react";
 import { RefreshCw, Search, Package, ChevronDown, ChevronUp, Truck, CheckCircle, XCircle, Clock, ShoppingCart, Printer, Tag, ExternalLink, Loader2, RotateCcw, AlertTriangle, DollarSign, Mail, MapPin, PlusCircle } from "lucide-react";
 
@@ -501,10 +501,20 @@ export default function OnlineOrders() {
   const handleStatusChange = async (orderId: number, newStatus: string) => {
     setUpdatingStatus(orderId);
     try {
-      await updateOrderStatus(orderId, newStatus);
+      const res = await updateOrderStatus(orderId, newStatus);
       setOrders((prev) =>
         prev.map((o) => (o.id === orderId ? { ...o, payment_status: newStatus } : o))
       );
+      if (newStatus === "cancelled") {
+        setResendingOrderId(orderId);
+        setResendSuccess(res.data?.cancellation_email_sent ? "Cancellation email sent to the customer" : "");
+        setResendError(res.data?.cancellation_email_sent ? "" : "Cancellation email could not be sent — use \"Send Cancellation Email\" to retry");
+        setTimeout(() => {
+          setResendingOrderId(null);
+          setResendSuccess("");
+          setResendError("");
+        }, 5000);
+      }
     } catch (err) {
       console.error("Error updating status:", err);
     } finally {
@@ -772,6 +782,29 @@ export default function OnlineOrders() {
       const msg = (err && typeof err === "object" && "response" in err)
         ? ((err as { response?: { data?: { detail?: string } } }).response?.data?.detail || "Failed to send email")
         : "Failed to send confirmation email";
+      setResendError(msg);
+      setTimeout(() => {
+        setResendingOrderId(null);
+        setResendError("");
+      }, 5000);
+    }
+  };
+
+  const handleSendCancellationEmail = async (order: Order) => {
+    setResendingOrderId(order.id);
+    setResendSuccess("");
+    setResendError("");
+    try {
+      await sendCancellationEmail(order.id);
+      setResendSuccess(`Cancellation email sent to ${order.customer_email}`);
+      setTimeout(() => {
+        setResendingOrderId(null);
+        setResendSuccess("");
+      }, 3000);
+    } catch (err: unknown) {
+      const msg = (err && typeof err === "object" && "response" in err)
+        ? ((err as { response?: { data?: { detail?: string } } }).response?.data?.detail || "Failed to send email")
+        : "Failed to send cancellation email";
       setResendError(msg);
       setTimeout(() => {
         setResendingOrderId(null);
@@ -1432,6 +1465,17 @@ export default function OnlineOrders() {
                         {resendingOrderId === order.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />}
                         {resendingOrderId === order.id ? "Sending..." : "Resend Confirmation"}
                       </button>
+
+                      {order.payment_status === "cancelled" && (
+                        <button
+                          onClick={() => handleSendCancellationEmail(order)}
+                          disabled={resendingOrderId === order.id}
+                          className="flex items-center gap-2 px-4 py-2 bg-red-100 text-red-700 rounded-lg hover:bg-red-200 disabled:opacity-50 transition-colors text-sm font-medium"
+                        >
+                          {resendingOrderId === order.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <XCircle className="w-4 h-4" />}
+                          {resendingOrderId === order.id ? "Sending..." : "Send Cancellation Email"}
+                        </button>
+                      )}
 
                       {order.payment_status !== "refunded" && order.payment_status !== "cancelled" && order.charge_id && (
                         <button

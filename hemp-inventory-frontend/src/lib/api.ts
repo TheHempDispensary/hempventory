@@ -602,6 +602,9 @@ export const getOrderShipments = (orderId: number) =>
 export const resendOrderConfirmation = (orderId: number) =>
   api.post(`/api/ecommerce/orders/${orderId}/resend-confirmation`);
 
+export const sendCancellationEmail = (orderId: number) =>
+  api.post(`/api/ecommerce/orders/${orderId}/send-cancellation`);
+
 // Refunds
 export const refundOrder = (orderId: number, data?: { amount?: number; refunded_items?: { product_id: string; product_name: string; sku: string; price: number; quantity: number }[] }) =>
   api.post(`/api/ecommerce/orders/${orderId}/refund`, data || {});
