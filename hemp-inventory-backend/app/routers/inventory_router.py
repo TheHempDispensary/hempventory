@@ -2375,6 +2375,41 @@ async def get_refund_history(
     }
 
 
+def _item_stock(item: dict) -> float:
+    return (item.get("itemStock") or {}).get("quantity", 0) or 0
+
+
+def _merge_identity(item: dict) -> tuple[str, str]:
+    """The (sku, base name) pair the cached inventory merges duplicates on."""
+    name = " ".join((item.get("name") or "").split())
+    return (item.get("sku") or "", _strip_batch_suffix(name).upper())
+
+
+def _resolve_location_items(items: list[dict], sku: str, item_name: Optional[str]) -> list[dict]:
+    """Every Clover item at one location that makes up a single inventory row.
+
+    A store often holds the same product as more than one Clover item (a
+    re-created item, or a per-lot "... BATCH 0118" copy), and the sync adds
+    their stock together into one row. A transfer therefore has to consider all
+    of them: matching only the first copy fails with "Insufficient stock: 0
+    available" whenever the stock sits on one of the others.
+
+    Returned highest-stock first, so a deduction drains the fullest copy.
+    """
+    primary = next((i for i in items if (i.get("sku") or i.get("id", "")) == sku), None)
+    if primary is None:
+        primary = next((i for i in items if i.get("id", "") == sku), None)
+    if primary is None and item_name:
+        wanted = _strip_batch_suffix(" ".join(item_name.split())).upper()
+        primary = next((i for i in items if _merge_identity(i)[1] == wanted), None)
+    if primary is None:
+        return []
+    identity = _merge_identity(primary)
+    matches = [i for i in items if _merge_identity(i) == identity]
+    matches.sort(key=_item_stock, reverse=True)
+    return matches
+
+
 class StockTransferRequest(BaseModel):
     sku: str
     from_location_id: int
@@ -2416,24 +2451,8 @@ async def transfer_stock(
     from_client = CloverClient(from_loc[2], from_loc[3])
     from_data = await from_client.get_items(expand="itemStock")
     from_items = from_data.get("elements", [])
-    source_item = None
-    for item in from_items:
-        if (item.get("sku") or item.get("id", "")) == req.sku:
-            source_item = item
-            break
-    # Fallback: match by Clover item ID directly
-    if not source_item:
-        for item in from_items:
-            if item.get("id", "") == req.sku:
-                source_item = item
-                break
-    # Fallback: match by name (handles items with different Clover IDs per location)
-    if not source_item and req.item_name:
-        normalized_name = " ".join(req.item_name.split())
-        for item in from_items:
-            if " ".join((item.get("name") or "").split()) == normalized_name:
-                source_item = item
-                break
+    source_items = _resolve_location_items(from_items, req.sku, req.item_name)
+    source_item = source_items[0] if source_items else None
 
     if not source_item:
         # Log failed lookup
@@ -2452,8 +2471,8 @@ async def transfer_stock(
             print(f"[transfer] Failed to log transfer history: {log_err}")
         raise HTTPException(status_code=404, detail=f"Item with SKU '{req.sku}' not found at {from_name}")
 
-    item_name = source_item.get("name", req.sku)
-    current_stock = (source_item.get("itemStock") or {}).get("quantity", 0)
+    item_name = _strip_batch_suffix(source_item.get("name", req.sku))
+    current_stock = sum(_item_stock(i) for i in source_items)
     if current_stock < req.quantity:
         try:
             await db.execute(
@@ -2478,24 +2497,8 @@ async def transfer_stock(
     to_client = CloverClient(to_loc[2], to_loc[3])
     to_data = await to_client.get_items(expand="itemStock")
     to_items = to_data.get("elements", [])
-    dest_item = None
-    for item in to_items:
-        if (item.get("sku") or item.get("id", "")) == req.sku:
-            dest_item = item
-            break
-    # Fallback: match by Clover item ID directly
-    if not dest_item:
-        for item in to_items:
-            if item.get("id", "") == req.sku:
-                dest_item = item
-                break
-    # Fallback: match by name (handles items with different Clover IDs per location)
-    if not dest_item and req.item_name:
-        normalized_name = " ".join(req.item_name.split())
-        for item in to_items:
-            if " ".join((item.get("name") or "").split()) == normalized_name:
-                dest_item = item
-                break
+    dest_items = _resolve_location_items(to_items, req.sku, req.item_name)
+    dest_item = dest_items[0] if dest_items else None
 
     if not dest_item:
         try:
@@ -2516,18 +2519,38 @@ async def transfer_stock(
             detail=f"Item with SKU '{req.sku}' not found at {to_name}. Push the item to that location first."
         )
 
-    dest_stock = (dest_item.get("itemStock") or {}).get("quantity", 0)
+    # Stock shown for the destination row is the sum of its copies too, but the
+    # incoming quantity all lands on the fullest one.
+    dest_stock = sum(_item_stock(i) for i in dest_items)
 
     # Execute transfer: deduct from source, then add to destination
     new_from_stock = current_stock - req.quantity
     new_to_stock = dest_stock + req.quantity
-    source_deducted = False
 
-    # Step 1: Deduct from source
+    # Step 1: Deduct from source, draining its copies in turn
+    applied: list[tuple[str, float]] = []
+
+    async def _undo_source() -> None:
+        for item_id, previous in applied:
+            await from_client.update_item_stock(item_id, previous)
+
     try:
-        await from_client.update_item_stock(source_item["id"], new_from_stock)
-        source_deducted = True
+        remaining = req.quantity
+        for item in source_items:
+            if remaining <= 0:
+                break
+            have = _item_stock(item)
+            take = min(have, remaining)
+            if take <= 0:
+                continue
+            await from_client.update_item_stock(item["id"], have - take)
+            applied.append((item["id"], have))
+            remaining -= take
     except Exception as e:
+        try:
+            await _undo_source()
+        except Exception as rb_err:
+            e = Exception(f"{e} (partial source rollback failed: {rb_err})")
         # Source deduction failed — nothing changed
         try:
             await db.execute(
@@ -2545,15 +2568,15 @@ async def transfer_stock(
             print(f"[transfer] Failed to log transfer history: {log_err}")
         raise HTTPException(status_code=500, detail=f"Transfer failed (source deduction): {str(e)}")
 
-    # Step 2: Add to destination
+    # Step 2: Add to destination (all of it onto its fullest copy)
     try:
-        await to_client.update_item_stock(dest_item["id"], new_to_stock)
+        await to_client.update_item_stock(dest_item["id"], _item_stock(dest_item) + req.quantity)
     except Exception as e:
         # Source was deducted but destination failed — partial transfer / stock loss
         # Attempt to roll back the source deduction
         rollback_msg = ""
         try:
-            await from_client.update_item_stock(source_item["id"], current_stock)
+            await _undo_source()
             rollback_msg = " (source rollback succeeded)"
         except Exception as rb_err:
             rollback_msg = f" (source rollback also failed: {rb_err})"
