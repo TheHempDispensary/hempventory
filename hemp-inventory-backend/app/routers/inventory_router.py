@@ -3985,27 +3985,42 @@ async def smart_par(
 
     # ----- 2. Gather sales data (check cache first) -----
     now = time.time()
-    if (
-        _smart_par_cache["data"]
-        and (now - _smart_par_cache["updated_at"]) < _SMART_PAR_TTL
-        and "first_sale_ts" in _smart_par_cache["data"]
-    ):
-        sales_by_product = _smart_par_cache["data"]["sales_by_product"]
-        first_sale_ts = _smart_par_cache["data"]["first_sale_ts"]
-        earliest_ts = _smart_par_cache["data"]["earliest_ts"]
-        latest_ts = _smart_par_cache["data"]["latest_ts"]
+    cached = _smart_par_cache["data"]
+    if cached and "first_sale_ts" not in cached:
+        cached = None
+    fresh = cached is not None and (now - _smart_par_cache["updated_at"]) < _SMART_PAR_TTL
+
+    if not fresh:
+        # 2a. Clover POS orders (all locations). Clover occasionally times out
+        # or rate-limits the (large) order pull; when that happens, keep
+        # serving the last good sales data rather than failing the request.
+        locations = await _get_locations(db)
+        orders_by_loc: list[list[dict]] = []
+        try:
+            for loc in locations:
+                client = CloverClient(loc[2], loc[3])
+                orders_by_loc.append(await _fetch_all_clover_orders(client))
+        except (httpx.HTTPError, asyncio.TimeoutError) as e:
+            if cached is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Clover didn't respond while loading sales history ({e}). Tap Refresh to try again.",
+                )
+            print(f"[smart-par] Clover order fetch failed ({e}); using cached sales data")
+            orders_by_loc = None
+
+    if fresh or orders_by_loc is None:
+        sales_by_product = cached["sales_by_product"]
+        first_sale_ts = cached["first_sale_ts"]
+        earliest_ts = cached["earliest_ts"]
+        latest_ts = cached["latest_ts"]
     else:
         sales_by_product: dict[str, int] = {}  # normalised name -> total units
         first_sale_ts: dict[str, float] = {}  # normalised name -> first sale ts
         earliest_ts = float("inf")
         latest_ts = 0.0
 
-        # 2a. Clover POS orders (all locations)
-        locations = await _get_locations(db)
-        for loc in locations:
-            merchant_id, api_token = loc[2], loc[3]
-            client = CloverClient(merchant_id, api_token)
-            orders = await _fetch_all_clover_orders(client)
+        for orders in orders_by_loc:
             for order in orders:
                 # Skip deleted orders and full refunds/voids so they don't count as sales
                 if order.get("deletedTime") or order.get("isRefund"):
