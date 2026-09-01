@@ -71,17 +71,36 @@ const GENERIC_TOKENS = new Set([
 const tokenize = (name: string): Set<string> =>
   new Set(name.toLowerCase().replace(/[^a-z0-9]+/g, " ").split(" ").filter(Boolean));
 
+// The kind of product a name describes. A pre-roll and a jar of flower share
+// strain words but are made from different bulk, so the form has to agree
+// before names are compared. Order matters: "PRE ROLLED JOINT ... FLOWER" is a
+// pre-roll, so pre-roll is tested before flower.
+const FORMS: { form: string; test: RegExp }[] = [
+  { form: "preroll", test: /pre[\s-]?roll|\bjoint\b|\bbaby\s*j\b|\bblunt\b|\bdog\s*walker\b/ },
+  { form: "vapor", test: /\bvape\b|\bcart\b|\bcartridge\b|\bdisposable\b|\bpod\b/ },
+  { form: "concentrate", test: /\bdab\b|\bwax\b|\brosin\b|\bresin\b|\bshatter\b|\bbadder\b|\bconcentrate\b|\bhash\b|\bkief\b|\bmoon\s*rock/ },
+  { form: "edible", test: /\bgumm|\bedible|\bchocolate|\bcookie|\bbrownie|\bcoffee|\bdrink|\bbeverage|\bsyrup|\bhoney|\bcaramel|\bchew|\bmint/ },
+  { form: "flower", test: /\bflower\b|\bsmalls\b|\bshake\b|\bbud\b|\bpopcorn\b/ },
+];
+
+const productForm = (name: string): string | null =>
+  FORMS.find(({ test }) => test.test(name.toLowerCase()))?.form ?? null;
+
 /**
  * Bulk names describe their source product ("Bulk - Skywalker OG Indica THC
- * Flower Grams"), so a bulk item belongs to a packaged product when every one
- * of its words also appears in the product name. At least one of those words
- * has to be distinguishing (a strain/flavour), otherwise a generic "Bulk THC
- * Flower" would claim every flower product.
+ * Flower Grams"), so a bulk item belongs to a packaged product when it is the
+ * same form of product and every one of its words also appears in the product
+ * name. At least one of those words has to be distinguishing (a strain or
+ * flavour), otherwise a generic "Bulk THC Flower" would claim every product.
  */
-const bulkMatchesProduct = (bulkTokens: Set<string>, productTokens: Set<string>): boolean => {
-  const specific = [...bulkTokens].filter((t) => !GENERIC_TOKENS.has(t) && !/^\d+$/.test(t));
-  if (specific.length === 0) return false;
-  return [...bulkTokens].every((t) => GENERIC_TOKENS.has(t) || /^\d+$/.test(t) || productTokens.has(t));
+const bulkMatchesProduct = (bulk: string, product: string): boolean => {
+  const form = productForm(bulk);
+  if (!form || form !== productForm(product)) return false;
+  const bulkTokens = tokenize(bulk);
+  const productTokens = tokenize(product);
+  const ignorable = (t: string) => GENERIC_TOKENS.has(t) || /^\d+$/.test(t);
+  if ([...bulkTokens].every(ignorable)) return false;
+  return [...bulkTokens].every((t) => ignorable(t) || productTokens.has(t));
 };
 
 type SortField = "name" | "in_stock" | "units_per_month" | "needed" | "already_planned" | "to_produce" | "bulk";
@@ -338,10 +357,9 @@ export default function Production() {
     for (const p of plan) {
       const key = normName(p.name);
       if (map.has(key)) continue;
-      const productTokens = tokenize(p.name);
       // Most words in common wins, so a specific bulk beats a broader one.
       const best = tokenised
-        .filter(({ tokens }) => bulkMatchesProduct(tokens, productTokens))
+        .filter(({ item }) => bulkMatchesProduct(item.name, p.name))
         .sort((a, b) => b.tokens.size - a.tokens.size)[0];
       if (!best) continue;
       map.set(key, { name: best.item.name, stock: best.item.stock, perUnit: 0, makes: 0, inferred: true });
