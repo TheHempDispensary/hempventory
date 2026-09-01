@@ -189,7 +189,7 @@ export default function Production() {
       const res = await getProductionPlan(m);
       setPlan(res.data.items);
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Failed to load production plan");
+      setError(errText(e));
     } finally { setLoading(false); }
   };
 

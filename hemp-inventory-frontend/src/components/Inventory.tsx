@@ -4199,7 +4199,36 @@ export default function Inventory() {
                     </button>
                     {expandedTransferGroup === group.transfer_group_id && (
                       <div className="border-t border-gray-200 bg-gray-50">
-                        <table className="w-full text-sm">
+                        <ul className="sm:hidden divide-y divide-gray-100">
+                          {group.items.map((item, idx) => (
+                            <li key={idx} className={`px-4 py-3 space-y-1 ${item.status === "failed" ? "bg-red-50/50" : item.status === "partial" ? "bg-amber-50/50" : ""}`}>
+                              <div className="flex items-start justify-between gap-3">
+                                <p className="text-sm text-gray-900 break-words min-w-0">{item.item_name}</p>
+                                <span className="text-sm font-semibold text-gray-700 flex-shrink-0">&times; {item.quantity}</span>
+                              </div>
+                              <p className="text-xs text-gray-500 font-mono break-all">{item.sku}</p>
+                              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500">
+                                {item.from_stock_before != null && (
+                                  <span>{group.from_location}: {item.from_stock_before}{item.from_stock_after != null && <> &rarr; {item.from_stock_after}</>}</span>
+                                )}
+                                {item.to_stock_before != null && (
+                                  <span>{group.to_location}: {item.to_stock_before}{item.to_stock_after != null && <> &rarr; {item.to_stock_after}</>}</span>
+                                )}
+                                {item.status === "success" ? (
+                                  <span className="inline-flex items-center gap-1 text-green-700"><CheckCircle2 className="w-3 h-3" /> Success</span>
+                                ) : item.status === "partial" ? (
+                                  <span className="inline-flex items-center gap-1 text-amber-700"><AlertCircle className="w-3 h-3" /> Partial</span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 text-red-700"><AlertCircle className="w-3 h-3" /> Failed</span>
+                                )}
+                              </div>
+                              {item.error_message && item.status !== "success" && (
+                                <p className="text-xs text-red-600 break-words">{item.error_message}</p>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
+                        <table className="hidden sm:table w-full text-sm">
                           <thead>
                             <tr className="text-xs text-gray-500 uppercase">
                               <th className="text-left px-4 py-2">Item</th>
@@ -4213,7 +4242,7 @@ export default function Inventory() {
                           <tbody>
                             {group.items.map((item, idx) => (
                               <tr key={idx} className={`border-t border-gray-100 ${item.status === "failed" ? "bg-red-50/50" : item.status === "partial" ? "bg-amber-50/50" : ""}`}>
-                                <td className="px-4 py-2 text-gray-900 max-w-[200px] truncate" title={item.item_name}>{item.item_name}</td>
+                                <td className="px-4 py-2 text-gray-900 break-words">{item.item_name}</td>
                                 <td className="px-4 py-2 text-gray-500 font-mono text-xs">{item.sku}</td>
                                 <td className="px-4 py-2 text-right text-gray-700">{item.quantity}</td>
                                 <td className="px-4 py-2 text-right text-gray-500 text-xs">
