@@ -66,7 +66,7 @@ async def test_auto_set_par_uses_ecommerce_sales_for_hq(db, monkeypatch):
     monkeypatch.setattr(inv, "_fetch_all_clover_orders", fake_orders)
     monkeypatch.setattr(inv, "CloverClient", FakeClient)
 
-    res = await inv.auto_set_par(inv.AutoSetParRequest(months=1), user={}, db=db)
+    res = await inv._run_auto_set_par(1, db)
     assert res["total_set"] == 1
 
     par = await (await db.execute(

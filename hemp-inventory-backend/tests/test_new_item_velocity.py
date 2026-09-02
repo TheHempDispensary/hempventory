@@ -166,7 +166,7 @@ async def test_auto_set_par_new_item_velocity(db, monkeypatch):
     monkeypatch.setattr(inv, "_fetch_all_clover_orders", fake_orders)
     monkeypatch.setattr(inv, "CloverClient", FakeClient)
 
-    await inv.auto_set_par(inv.AutoSetParRequest(months=1), user={}, db=db)
+    await inv._run_auto_set_par(1, db)
     par = await (await db.execute(
         "SELECT par_level FROM par_levels WHERE sku = ? AND location_id = ?",
         ("NEW1", loc_id),

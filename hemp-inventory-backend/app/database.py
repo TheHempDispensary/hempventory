@@ -9,11 +9,21 @@ DB_PATH = os.environ.get("DB_PATH", "/data/app.db")
 BUSY_TIMEOUT_MS = 30000
 
 
-async def get_db():
+async def connect_db():
+    """Open a connection with WAL mode and busy timeout.
+
+    Used by work that outlives a request (background jobs), which cannot hold
+    the request-scoped connection get_db closes on the way out.
+    """
     db = await aiosqlite.connect(DB_PATH)
     db.row_factory = aiosqlite.Row
     await db.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
     await db.execute("PRAGMA journal_mode = WAL")
+    return db
+
+
+async def get_db():
+    db = await connect_db()
     try:
         yield db
     finally:

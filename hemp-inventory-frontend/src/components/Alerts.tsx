@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { getParAlerts, checkAndNotify, getAlertHistory, autoSetPar } from "../lib/api";
+import { useEffect, useRef, useState } from "react";
+import { getParAlerts, checkAndNotify, getAlertHistory, autoSetPar, getAutoSetParStatus } from "../lib/api";
 import { AlertTriangle, Bell, RefreshCw, Clock, Send, Calculator } from "lucide-react";
 
 interface Alert {
@@ -36,19 +36,47 @@ export default function Alerts() {
   const [settingPar, setSettingPar] = useState(false);
   const [parResult, setParResult] = useState<string | null>(null);
 
+  const mounted = useRef(true);
+
+  // The recompute pulls every order from every Clover location, which takes a
+  // couple of minutes — far longer than a request can stay open — so the run
+  // happens server-side and the page follows it by polling.
+  const followParRun = async () => {
+    setSettingPar(true);
+    while (mounted.current) {
+      await new Promise((r) => setTimeout(r, 5000));
+      if (!mounted.current) return;
+      let status;
+      try {
+        status = (await getAutoSetParStatus()).data;
+      } catch (err) {
+        console.error(err);
+        continue;
+      }
+      if (status.status === "running") continue;
+      setSettingPar(false);
+      if (status.status === "error") {
+        setParResult(`Error setting PAR levels: ${status.error || "please try again"}`);
+      } else {
+        setParResult(status.message || "PAR levels set.");
+        await loadData();
+      }
+      return;
+    }
+  };
+
   const handleAutoSetPar = async () => {
     setSettingPar(true);
     setParResult(null);
     try {
-      const res = await autoSetPar(parMonths);
-      setParResult(res.data.message || "PAR levels set.");
-      await loadData();
+      await autoSetPar(parMonths);
     } catch (err) {
       setParResult("Error setting PAR levels. Please try again.");
       console.error(err);
-    } finally {
       setSettingPar(false);
+      return;
     }
+    followParRun();
   };
 
   const loadData = async () => {
@@ -92,7 +120,18 @@ export default function Alerts() {
   };
 
   useEffect(() => {
+    mounted.current = true;
     loadData();
+    // A run started before this page was opened keeps the button busy until
+    // it finishes.
+    getAutoSetParStatus()
+      .then(({ data }) => {
+        if (data.status === "running" && mounted.current) followParRun();
+      })
+      .catch(() => {});
+    return () => {
+      mounted.current = false;
+    };
   }, []);
 
   if (loading) {
@@ -131,7 +170,7 @@ export default function Alerts() {
             className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 text-sm transition-colors"
           >
             <Calculator className={`w-4 h-4 ${settingPar ? "animate-pulse" : ""}`} />
-            {settingPar ? "Setting PAR..." : "Auto-set PAR from sales"}
+            {settingPar ? "Setting PAR... (a few minutes)" : "Auto-set PAR from sales"}
           </button>
           <button
             onClick={handleCheckAndNotify}
