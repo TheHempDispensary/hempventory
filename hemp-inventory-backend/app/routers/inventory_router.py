@@ -25,7 +25,7 @@ from app.catalog import (
     resolve_categories,
     strain_types_by_phrase,
 )
-from app.database import get_db
+from app.database import connect_db, get_db
 from app.clover_client import CloverClient
 from app.routers.ecommerce_router import invalidate_product_cache
 
@@ -4172,12 +4172,31 @@ class AutoSetParRequest(BaseModel):
     months: float = 1.0  # supply window each PAR level should cover
 
 
-@router.post("/auto-set-par")
-async def auto_set_par(
-    req: AutoSetParRequest,
-    user: dict = Depends(get_current_user),
-    db: aiosqlite.Connection = Depends(get_db),
-):
+# The run pulls every paid order from every Clover location, which takes well
+# over a minute — longer than the proxy will hold a request open. So the
+# endpoint starts the run in the background and the UI polls this state.
+_auto_par_job: dict = {
+    "running": False,
+    "started_at": 0.0,
+    "finished_at": 0.0,
+    "months": None,
+    "result": None,
+    "error": None,
+}
+
+
+async def _hq_ecommerce_sales(db: aiosqlite.Connection) -> list[tuple]:
+    """Website order lines (product name, qty, placed at) for HQ demand."""
+    cursor = await db.execute(
+        """SELECT oi.product_name, oi.quantity, eo.created_at
+           FROM ecommerce_order_items oi
+           JOIN ecommerce_orders eo ON oi.order_id = eo.id
+           WHERE eo.status NOT IN ('cancelled', 'refunded')"""
+    )
+    return list(await cursor.fetchall())
+
+
+async def _run_auto_set_par(months: float, db: aiosqlite.Connection) -> dict:
     """Set every item's PAR level, per location, from that location's own sales velocity.
 
     For each Clover location we tally its paid, non-refunded POS sales by product
@@ -4192,18 +4211,23 @@ async def auto_set_par(
     from datetime import datetime
     from app.routers.ecommerce_router import HQ_MERCHANT_ID
 
-    months = max(0.25, min(req.months, 24))
+    months = max(0.25, min(months, 24))
 
     locations = await _get_locations(db)
     if not locations:
         raise HTTPException(status_code=500, detail="No locations configured")
 
-    par_rows: list[tuple[str, int, float]] = []  # (sku, location_id, par_level)
-    per_location_summary: list[dict] = []
+    # HQ is the e-commerce/warehouse location: its real per-product demand
+    # lives in the website order tables. Clover records online sales as
+    # generic "item 1" lines with no product name, so without this every HQ
+    # item would get PAR 0. Read them up front — the per-location Clover pulls
+    # below run concurrently and must not share the connection.
+    ecommerce_sales = await _hq_ecommerce_sales(db)
 
-    for loc in locations:
+    async def compute_location(loc) -> tuple[list[tuple[str, int, float]], dict]:
         loc_id, loc_name, merchant_id, api_token = loc[0], loc[1], loc[2], loc[3]
         client = CloverClient(merchant_id, api_token)
+        loc_par_rows: list[tuple[str, int, float]] = []
 
         # 1. Tally this location's own sales by normalised product name.
         sales_by_name: dict[str, int] = {}
@@ -4236,19 +4260,9 @@ async def auto_set_par(
                 if order_ts > 0:
                     first_sale_ts[norm] = min(first_sale_ts.get(norm, float("inf")), order_ts)
 
-        # HQ is the e-commerce/warehouse location: its real per-product demand
-        # lives in the website order tables. Clover records online sales as
-        # generic "item 1" lines with no product name, so without this every HQ
-        # item would get PAR 0. Fold the e-commerce sales in (same source Smart
-        # PAR uses) so HQ PAR reflects actual online sales.
+        # Fold the website's own sales into HQ (same source Smart PAR uses).
         if str(merchant_id) == str(HQ_MERCHANT_ID):
-            ec_cursor = await db.execute(
-                """SELECT oi.product_name, oi.quantity, eo.created_at
-                   FROM ecommerce_order_items oi
-                   JOIN ecommerce_orders eo ON oi.order_id = eo.id
-                   WHERE eo.status NOT IN ('cancelled', 'refunded')"""
-            )
-            for p_name, qty, created_at in await ec_cursor.fetchall():
+            for p_name, qty, created_at in ecommerce_sales:
                 if not p_name:
                     continue
                 norm = _normalise_sales_name(" ".join(str(p_name).split()))
@@ -4294,27 +4308,30 @@ async def auto_set_par(
             )
             units_per_month = (units_sold / product_days) * 30.44
             par_level = round(units_per_month * months)
-            par_rows.append((display_sku, loc_id, float(par_level)))
+            loc_par_rows.append((display_sku, loc_id, float(par_level)))
             loc_items += 1
             if par_level > 0:
                 loc_with_par += 1
 
-        per_location_summary.append({
+        return loc_par_rows, {
             "location": loc_name,
             "items": loc_items,
             "with_par": loc_with_par,
             "days_of_data": round(days_of_data, 1),
-        })
+        }
+
+    computed = await asyncio.gather(*(compute_location(loc) for loc in locations))
+    par_rows = [row for loc_rows, _ in computed for row in loc_rows]
+    per_location_summary = [summary for _, summary in computed]
 
     # 3. Persist. Upsert so re-running refreshes existing PAR levels.
-    for sku, loc_id, par_level in par_rows:
-        await db.execute(
-            """INSERT INTO par_levels (sku, location_id, par_level, updated_at)
-               VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-               ON CONFLICT(sku, location_id)
-               DO UPDATE SET par_level = ?, updated_at = CURRENT_TIMESTAMP""",
-            (sku, loc_id, par_level, par_level),
-        )
+    await db.executemany(
+        """INSERT INTO par_levels (sku, location_id, par_level, updated_at)
+           VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT(sku, location_id)
+           DO UPDATE SET par_level = excluded.par_level, updated_at = CURRENT_TIMESTAMP""",
+        par_rows,
+    )
     await db.commit()
 
     return {
@@ -4322,6 +4339,72 @@ async def auto_set_par(
         "months": months,
         "total_set": len(par_rows),
         "by_location": per_location_summary,
+    }
+
+
+async def _auto_par_worker(months: float):
+    """Run the PAR recompute on its own connection, tracking it for /auto-set-par/status."""
+    db = await connect_db()
+    try:
+        result = await _run_auto_set_par(months, db)
+        _auto_par_job["result"] = result
+        _auto_par_job["error"] = None
+    except Exception as e:
+        _auto_par_job["result"] = None
+        _auto_par_job["error"] = str(e) or type(e).__name__
+        print(f"[auto-set-par] run failed: {e}")
+    finally:
+        await db.close()
+        _auto_par_job["running"] = False
+        _auto_par_job["finished_at"] = time.time()
+
+
+@router.post("/auto-set-par")
+async def auto_set_par(
+    req: AutoSetParRequest,
+    user: dict = Depends(get_current_user),
+):
+    """Start a PAR recompute from sales velocity and return immediately.
+
+    Poll /auto-set-par/status for the outcome.
+    """
+    if _auto_par_job["running"]:
+        return {"status": "running", "started_at": _auto_par_job["started_at"], "months": _auto_par_job["months"]}
+
+    months = max(0.25, min(req.months, 24))
+    _auto_par_job.update(
+        running=True,
+        started_at=time.time(),
+        finished_at=0.0,
+        months=months,
+        result=None,
+        error=None,
+    )
+    asyncio.create_task(_auto_par_worker(months))
+    return {"status": "started", "months": months, "started_at": _auto_par_job["started_at"]}
+
+
+@router.get("/auto-set-par/status")
+async def auto_set_par_status(user: dict = Depends(get_current_user)):
+    """Progress of the most recent PAR recompute."""
+    job = _auto_par_job
+    if job["running"]:
+        status = "running"
+    elif job["error"]:
+        status = "error"
+    elif job["result"]:
+        status = "done"
+    else:
+        status = "idle"
+    return {
+        "status": status,
+        "months": job["months"],
+        "started_at": job["started_at"],
+        "finished_at": job["finished_at"],
+        "error": job["error"],
+        "message": (job["result"] or {}).get("message"),
+        "total_set": (job["result"] or {}).get("total_set"),
+        "by_location": (job["result"] or {}).get("by_location"),
     }
 
 

@@ -176,6 +176,9 @@ export const setBulkParLevels = (
 export const autoSetPar = (months: number = 1) =>
   api.post("/api/inventory/auto-set-par", { months });
 
+export const getAutoSetParStatus = () =>
+  api.get("/api/inventory/auto-set-par/status");
+
 export const getParAlerts = () => api.get("/api/par/alerts");
 
 // Alerts

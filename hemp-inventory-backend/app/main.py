@@ -203,8 +203,8 @@ async def _scheduled_auto_par():
     try:
         db = await _connect_db()
         try:
-            from app.routers.inventory_router import auto_set_par, AutoSetParRequest
-            result = await auto_set_par(AutoSetParRequest(months=1.0), user={}, db=db)
+            from app.routers.inventory_router import _run_auto_set_par
+            result = await _run_auto_set_par(1.0, db)
             print(f"[auto-sync] PAR auto-set: {result.get('total_set', 0)} item/location pairs from 1-month velocity")
         finally:
             await db.close()
