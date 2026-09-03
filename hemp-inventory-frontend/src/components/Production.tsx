@@ -336,8 +336,9 @@ export default function Production() {
     return map;
   }, [inventory]);
 
-  // Bulk on hand for each planned product: a saved packaged->bulk recipe when
-  // there is one, otherwise the best name match among the bulk products.
+  // Bulk on hand for each planned product and each product on the board: a
+  // saved packaged->bulk recipe when there is one, otherwise the best name
+  // match among the bulk products.
   const bulkByProduct = useMemo(() => {
     const stockByBulk = new Map(bulkItems.map((b) => [normName(b.name), b.stock]));
     const map = new Map<string, BulkStock>();
@@ -354,18 +355,19 @@ export default function Production() {
       });
     }
     const tokenised = bulkItems.map((b) => ({ item: b, tokens: tokenize(b.name) }));
-    for (const p of plan) {
-      const key = normName(p.name);
+    const names = [...plan.map((p) => p.name), ...batches.map((b) => b.product_name)];
+    for (const name of names) {
+      const key = normName(name);
       if (map.has(key)) continue;
       // Most words in common wins, so a specific bulk beats a broader one.
       const best = tokenised
-        .filter(({ item }) => bulkMatchesProduct(item.name, p.name))
+        .filter(({ item }) => bulkMatchesProduct(item.name, name))
         .sort((a, b) => b.tokens.size - a.tokens.size)[0];
       if (!best) continue;
       map.set(key, { name: best.item.name, stock: best.item.stock, perUnit: 0, makes: 0, inferred: true });
     }
     return map;
-  }, [bulkItems, bulkRecipes, plan]);
+  }, [bulkItems, bulkRecipes, plan, batches]);
 
   const toggleSort = (field: SortField) => {
     if (field === sortField) {
@@ -665,6 +667,7 @@ export default function Production() {
                   <div className="space-y-2 min-h-[8px]">
                     {colBatches.map((b, idx) => {
                       const stock = b.sku ? stockBySku.get(b.sku) : undefined;
+                      const bulk = bulkByProduct.get(normName(b.product_name));
                       return (
                       <div
                         key={b.id}
@@ -727,6 +730,14 @@ export default function Production() {
                                   {" "}({stock.byLocation.map(([loc, qty]) => `${loc}: ${qty}`).join(" · ")})
                                 </span>
                               )}
+                            </div>
+                          )}
+                          {bulk && (
+                            <div>
+                              Bulk on hand: {bulk.stock}
+                              <span className="text-gray-400">
+                                {" "}({bulk.name}{bulk.makes > 0 ? ` · makes ${bulk.makes}` : ""}{bulk.inferred ? " · matched by name" : ""})
+                              </span>
                             </div>
                           )}
                           <div>
