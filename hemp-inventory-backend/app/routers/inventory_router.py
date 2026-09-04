@@ -110,6 +110,7 @@ class ItemUpdate(BaseModel):
     name: Optional[str] = None
     price: Optional[int] = None
     sku: Optional[str] = None
+    current_name: Optional[str] = None  # name of the row being edited (disambiguates shared SKUs)
     stock_updates: Optional[list[StockUpdate]] = None
     # Extended Clover fields
     price_type: Optional[str] = None  # FIXED, VARIABLE, PER_UNIT
@@ -154,6 +155,25 @@ def _hq_locations_for_bulk(locations: list, name: str) -> list:
     if not is_bulk_name(name):
         return locations
     return [loc for loc in locations if _is_hq(loc[1])]
+
+
+def _same_product_name(a: str, b: str) -> bool:
+    return _strip_batch_suffix(" ".join((a or "").split())).upper() == _strip_batch_suffix(
+        " ".join((b or "").split())
+    ).upper()
+
+
+def _narrow_to_named(matching: list[dict], name: Optional[str]) -> list[dict]:
+    """Keep only the Clover items whose name matches the row being edited.
+
+    One SKU can be shared by differently-named items (they show as separate
+    rows in the inventory view), so a SKU-only match would write the edit to
+    every one of them. Falls back to the full match when no name matches.
+    """
+    if not name:
+        return matching
+    named = [i for i in matching if _same_product_name(i.get("name", ""), name)]
+    return named or matching
 
 
 async def _get_par_levels(db: aiosqlite.Connection) -> dict:
@@ -347,27 +367,34 @@ async def _do_sync(db: aiosqlite.Connection) -> dict:
         (row[0], row[1]): row[2] for row in snapshot_rows
     }
 
-    changes = []
-    snapshot_upserts = []
+    # Snapshots are keyed by (sku, location). Differently-named items that
+    # share a SKU are separate rows here, so total them per key or the rows
+    # would overwrite each other and every sync would log phantom changes.
+    totals: dict[tuple[str, str], list] = {}
     for ni in items_list:
         sku = ni.get("sku", "")
         name = ni.get("name", "")
         for loc_name, loc_data in ni.get("locations", {}).items():
-            new_stock = loc_data.get("stock", 0)
-            old_stock = old_snapshot.get((sku, loc_name))
-            # Record change if we have a previous snapshot and stock differs
-            if old_stock is not None and new_stock != old_stock:
-                changes.append((
-                    sku,
-                    name,
-                    loc_name,
-                    old_stock,
-                    new_stock,
-                    new_stock - old_stock,
-                    "sync",
-                ))
-            # Always upsert the current stock into snapshot
-            snapshot_upserts.append((sku, loc_name, new_stock, name))
+            entry = totals.setdefault((sku, loc_name), [0, name])
+            entry[0] += loc_data.get("stock", 0) or 0
+
+    changes = []
+    snapshot_upserts = []
+    for (sku, loc_name), (new_stock, name) in totals.items():
+        old_stock = old_snapshot.get((sku, loc_name))
+        # Record change if we have a previous snapshot and stock differs
+        if old_stock is not None and new_stock != old_stock:
+            changes.append((
+                sku,
+                name,
+                loc_name,
+                old_stock,
+                new_stock,
+                new_stock - old_stock,
+                "sync",
+            ))
+        # Always upsert the current stock into snapshot
+        snapshot_upserts.append((sku, loc_name, new_stock, name))
 
     if changes:
         await db.executemany(
@@ -1363,6 +1390,7 @@ async def bulk_stock_update(
         if not matching:
             results.append({"sku": upd.sku, "location": loc_name, "status": "not_found"})
             continue
+        matching = _narrow_to_named(matching, upd.item_name)
 
         # A single logical product can map to several Clover items at one
         # location (e.g. blank-SKU bulk items created per production batch).
@@ -1626,6 +1654,7 @@ async def update_item(
             if not matching:
                 results.append({"location": loc_name, "status": "not_found"})
                 continue
+            matching = _narrow_to_named(matching, item.current_name)
 
             # Remember the item name for cross-location fallback matching
             if not item_name_fallback and matching:

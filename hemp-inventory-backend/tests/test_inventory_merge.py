@@ -102,3 +102,55 @@ async def test_do_sync_merges_case_only_name_difference(db, monkeypatch):
     row = rows[0]
     assert row["locations"]["East"]["stock"] == 16
     assert row["locations"]["HQ"]["stock"] == 9
+
+
+async def test_do_sync_shared_sku_rows_do_not_log_phantom_changes(db, monkeypatch):
+    """Two differently-named items sharing a SKU must not flip the (sku, location)
+    snapshot back and forth and log a change on every sync."""
+    await db.execute("INSERT INTO locations (name, merchant_id, api_token) VALUES (?, ?, ?)", ("East", "EAST", "t"))
+    await db.commit()
+
+    catalogs = {
+        "EAST": [
+            {"id": "a", "sku": "2025754319197", "name": "THC WAX THREE GRAMS INDICA KING LOUIS",
+             "itemStock": {"quantity": 0}},
+            {"id": "b", "sku": "2025754319197", "name": "THC WAX 3G KING LOUIS INDICA",
+             "itemStock": {"quantity": 3}},
+        ],
+    }
+
+    class FakeClient:
+        def __init__(self, merchant_id, api_token, *a, **k):
+            self.merchant_id = merchant_id
+
+        async def get_item_groups(self):
+            return {"elements": []}
+
+        async def get_items(self, expand=""):
+            return {"elements": catalogs[self.merchant_id]}
+
+    monkeypatch.setattr(inv, "CloverClient", FakeClient)
+
+    await inv._do_sync(db)
+    await inv._do_sync(db)
+    await inv._do_sync(db)
+
+    cur = await db.execute("SELECT COUNT(*) FROM inventory_changes WHERE sku = ?", ("2025754319197",))
+    assert (await cur.fetchone())[0] == 0
+    cur = await db.execute(
+        "SELECT stock FROM inventory_snapshots WHERE sku = ? AND location_name = ?", ("2025754319197", "East")
+    )
+    assert (await cur.fetchone())[0] == 3
+
+
+def test_narrow_to_named_targets_only_the_edited_row():
+    items = [
+        {"id": "a", "name": "THC WAX THREE GRAMS INDICA KING LOUIS"},
+        {"id": "b", "name": "THC WAX 3G KING LOUIS INDICA"},
+        {"id": "c", "name": "THC WAX THREE GRAMS INDICA KING LOUIS BATCH 0912"},
+    ]
+    picked = inv._narrow_to_named(items, "THC Wax Three Grams Indica King Louis")
+    assert [i["id"] for i in picked] == ["a", "c"]
+    # unknown name falls back to everything rather than matching nothing
+    assert inv._narrow_to_named(items, "SOMETHING ELSE") == items
+    assert inv._narrow_to_named(items, None) == items

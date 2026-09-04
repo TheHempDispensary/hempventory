@@ -16,7 +16,7 @@ from urllib.parse import quote as url_quote
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-from app.catalog import resolve_categories
+from app.catalog import is_bulk_name, resolve_categories
 from app.database import get_db, DB_PATH
 from app.clover_client import CloverClient
 from app.routers.loyalty_router import _do_signup, _sync_balance_to_clover_quietly
@@ -581,6 +581,9 @@ async def _fetch_and_cache_products() -> dict:
                 continue
 
             name = item.get("name", "")
+            # Bulk production items live at HQ for internal use and are never sold online.
+            if is_bulk_name(name):
+                continue
             sku = item.get("sku", "") or item.get("id", "")
             price = item.get("price", 0)
             item_categories = resolve_categories(

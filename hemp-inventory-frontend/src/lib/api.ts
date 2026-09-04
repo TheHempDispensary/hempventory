@@ -156,6 +156,7 @@ export const updateItem = (
     name?: string;
     price?: number;
     sku?: string;
+    current_name?: string;
     stock_updates?: { location_id: number; quantity: number }[];
   }
 ) => api.put(`/api/inventory/items/${sku}`, data);
