@@ -843,7 +843,7 @@ export default function Inventory() {
         return;
       }
 
-      const res = await updateItem(editItem.sku, updateData);
+      const res = await updateItem(editItem.sku, { ...updateData, current_name: editItem.name });
       const results = res.data.results || [];
       const errors = results.filter((r: { status: string }) => r.status === "error");
 
