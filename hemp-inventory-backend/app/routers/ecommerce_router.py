@@ -338,9 +338,26 @@ def _save_disk_cache(result: dict) -> None:
 _fetch_event: Optional[asyncio.Event] = None  # Signals when an in-flight fetch completes
 
 
+def _location_stock_lookup(stock_map: dict[str, int], sku: str, name: str) -> int:
+    """Stock for an HQ item at another location. When a SKU is shared by
+    differently-named items, only the same-named row counts."""
+    normalized_name = " ".join(name.split())
+    if sku:
+        by_name = stock_map.get(f"{sku}\x00{normalized_name.upper()}")
+        if by_name is not None:
+            return by_name
+        if stock_map.get(f"{sku}\x00") is None:
+            return stock_map.get(sku, 0) or stock_map.get(normalized_name, 0)
+        return 0
+    return stock_map.get(normalized_name, 0)
+
+
 async def _fetch_location_stock(client: httpx.AsyncClient, merchant_id: str, api_token: str, label: str) -> dict[str, int]:
-    """Fetch stock quantities from a Clover location. Returns {sku_or_name: quantity}."""
+    """Fetch stock quantities from a Clover location. Returns {sku_or_name: quantity},
+    plus per-name entries keyed "{sku}\\x00{NAME}" and a "{sku}\\x00" marker for SKUs
+    shared by more than one distinct item name."""
     stock_map: dict[str, int] = {}
+    names_by_sku: dict[str, set[str]] = {}
     try:
         base = f"{CLOVER_BASE_URL}/merchants/{merchant_id}"
         headers = {"Authorization": f"Bearer {api_token}"}
@@ -362,10 +379,17 @@ async def _fetch_location_stock(client: httpx.AsyncClient, merchant_id: str, api
                 stock_info = item.get("itemStock", {})
                 qty = stock_info.get("quantity", 0) if stock_info else 0
                 stock_map[key] = stock_map.get(key, 0) + qty
+                if sku:
+                    name_key = f"{sku}\x00{name.upper()}"
+                    stock_map[name_key] = stock_map.get(name_key, 0) + qty
+                    names_by_sku.setdefault(sku, set()).add(name.upper())
             if len(elements) < 1000:
                 break
             offset += 1000
-        print(f"[cache] {label} stock: {len(stock_map)} items")
+        for shared_sku, names in names_by_sku.items():
+            if len(names) > 1:
+                stock_map[f"{shared_sku}\x00"] = 1
+        print(f"[cache] {label} stock: {len(names_by_sku)} items")
     except Exception as e:
         print(f"[cache] Failed to fetch {label} stock: {e}")
     return stock_map
@@ -597,15 +621,8 @@ async def _fetch_and_cache_products() -> dict:
             online_name = item.get("onlineName", "") or name
 
             # Look up stock at West and East by SKU first, then by name
-            lookup_key = sku if sku else name
-            w_stock = west_stock.get(lookup_key, 0)
-            e_stock = east_stock.get(lookup_key, 0)
-            if w_stock == 0 and sku:
-                normalized_name = " ".join(name.split())
-                w_stock = west_stock.get(normalized_name, 0)
-            if e_stock == 0 and sku:
-                normalized_name = " ".join(name.split())
-                e_stock = east_stock.get(normalized_name, 0)
+            w_stock = _location_stock_lookup(west_stock, sku, name)
+            e_stock = _location_stock_lookup(east_stock, sku, name)
 
             for cat in item_categories:
                 categories_set.add(cat)
@@ -664,16 +681,18 @@ async def _fetch_and_cache_products() -> dict:
                 "lab_results": coa_by_sku.get(sku) or coa_by_sku.get(item.get("id", ""), []),
             })
 
-        # Deduplicate products by SKU: Clover can return multiple items with the
-        # same SKU (e.g. from item-group recreation). Prefer the entry with the
+        # Deduplicate products by SKU + name: Clover can return multiple items with the
+        # same SKU (e.g. from item-group recreation). Differently-named items that
+        # merely share a barcode stay separate. Prefer the entry with the
         # highest HQ stock (modified_time as tiebreaker) for metadata (price,
         # name, categories, etc.) and merge stock counts so nothing is lost.
-        seen_skus: dict[str, int] = {}  # sku -> index in products list
+        seen_skus: dict[tuple[str, str], int] = {}  # (sku, NAME) -> index in products list
         deduped: list[dict] = []
         for p in products:
             sku = p.get("sku", "")
-            if sku and sku in seen_skus:
-                idx = seen_skus[sku]
+            dedupe_key = (sku, " ".join((p.get("name") or "").split()).upper())
+            if sku and dedupe_key in seen_skus:
+                idx = seen_skus[dedupe_key]
                 existing = deduped[idx]
                 # Decide which entry is the "primary" (better metadata source):
                 # prefer higher HQ stock, then more recent modified_time.
@@ -700,7 +719,7 @@ async def _fetch_and_cache_products() -> dict:
                     primary["description"] = secondary["description"]
                 deduped[idx] = primary
             else:
-                seen_skus[sku] = len(deduped)
+                seen_skus[dedupe_key] = len(deduped)
                 deduped.append(p)
         products = deduped
 
@@ -3079,10 +3098,12 @@ async def create_order(
 
 async def _resolve_location_items(merchant_id: str, api_token: str) -> dict:
     """Fetch all items from a Clover location and build lookup maps.
-    Returns {"by_id": {clover_id: item}, "by_sku": {sku: item}, "by_name": {normalized_name: item}}"""
+    Returns {"by_id": {clover_id: item}, "by_sku": {sku: item}, "by_name": {normalized_name: item},
+    "shared_skus": {sku shared by differently-named items}}"""
     by_id: dict[str, dict] = {}
     by_sku: dict[str, dict] = {}
     by_name: dict[str, dict] = {}
+    names_by_sku: dict[str, set[str]] = {}
     base = f"{CLOVER_BASE_URL}/merchants/{merchant_id}"
     headers = {"Authorization": f"Bearer {api_token}"}
     try:
@@ -3103,6 +3124,7 @@ async def _resolve_location_items(merchant_id: str, api_token: str) -> dict:
                     by_id[item_id] = item
                     if sku:
                         by_sku[sku] = item
+                        names_by_sku.setdefault(sku, set()).add(name.upper())
                     if name:
                         by_name[name.upper()] = item
                 if len(elements) < 1000:
@@ -3110,21 +3132,23 @@ async def _resolve_location_items(merchant_id: str, api_token: str) -> dict:
                 offset += 1000
     except Exception as e:
         print(f"[resolve] Failed to fetch location items: {e}")
-    return {"by_id": by_id, "by_sku": by_sku, "by_name": by_name}
+    shared_skus = {s for s, names in names_by_sku.items() if len(names) > 1}
+    return {"by_id": by_id, "by_sku": by_sku, "by_name": by_name, "shared_skus": shared_skus}
 
 
 def _find_item_at_location(lookup: dict, product_id: str, sku: str, name: str) -> Optional[dict]:
     """Find an item at a location using multiple lookup strategies.
-    Tries: direct ID match, SKU match, then normalized name match."""
+    Tries: direct ID match, SKU match, then normalized name match. A SKU shared
+    by differently-named items is resolved by name only."""
     item = lookup["by_id"].get(product_id)
     if item:
         return item
-    if sku:
+    normalized = " ".join(name.split()).upper() if name else ""
+    if sku and sku not in lookup.get("shared_skus", set()):
         item = lookup["by_sku"].get(sku)
         if item:
             return item
-    if name:
-        normalized = " ".join(name.split()).upper()
+    if normalized:
         item = lookup["by_name"].get(normalized)
         if item:
             return item
