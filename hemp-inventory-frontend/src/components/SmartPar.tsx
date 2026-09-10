@@ -40,7 +40,7 @@ type SortField = "name" | "category" | "price" | "total_stock" | "units_sold" | 
 type SortDir = "asc" | "desc";
 type GroupSortField = "group" | "item_count" | "sold_amount" | "stock_amount" | "order_amount";
 
-const MONTH_OPTIONS = [1, 3, 4, 6, 12];
+const SUPPLY_MONTHS = 1;
 
 export default function SmartPar() {
   const [products, setProducts] = useState<ParProduct[]>([]);
@@ -48,7 +48,6 @@ export default function SmartPar() {
   const [view, setView] = useState<"groups" | "items">("items");
   const [meta, setMeta] = useState<ParMeta | null>(null);
   const [loading, setLoading] = useState(false);
-  const [months, setMonths] = useState(3);
   const [search, setSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("All");
   const [sortField, setSortField] = useState<SortField>("order_qty");
@@ -57,11 +56,11 @@ export default function SmartPar() {
   const [groupSortDir, setGroupSortDir] = useState<SortDir>("desc");
   const [error, setError] = useState("");
 
-  const fetchData = async (m: number) => {
+  const fetchData = async () => {
     setLoading(true);
     setError("");
     try {
-      const res = await getSmartPar(m);
+      const res = await getSmartPar(SUPPLY_MONTHS);
       setProducts(res.data.products);
       setGroups(res.data.groups || []);
       setMeta(res.data.meta);
@@ -74,8 +73,8 @@ export default function SmartPar() {
   };
 
   useEffect(() => {
-    fetchData(months);
-  }, [months]);
+    fetchData();
+  }, []);
 
   const categories = useMemo(() => {
     const cats = new Set<string>();
@@ -203,7 +202,7 @@ export default function SmartPar() {
         g.order_unit,
       ]);
     } else {
-      headers = ["Product", "SKU", "Category", "Price", "Current Stock", "Units Sold", "Units/Month", `PAR (${months}mo)`, "Order Qty"];
+      headers = ["Product", "SKU", "Category", "Price", "Current Stock", "Units Sold", "Units/Month", "PAR (1mo)", "Order Qty"];
       rows = sorted.map((p) => [
         `"${p.name}"`,
         p.sku,
@@ -221,7 +220,7 @@ export default function SmartPar() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `smart-par-${view}-${months}mo-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `smart-par-${view}-1mo-${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -241,7 +240,7 @@ export default function SmartPar() {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={() => fetchData(months)}
+            onClick={() => fetchData()}
             disabled={loading}
             className="flex items-center gap-2 px-3 py-2 text-sm bg-white border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50"
           >
@@ -279,32 +278,6 @@ export default function SmartPar() {
           <List className="w-4 h-4" />
           By Item
         </button>
-      </div>
-
-      {/* Time Period Selector */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-        <div className="flex flex-col sm:flex-row sm:items-center gap-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Supply Window</label>
-            <p className="text-xs text-gray-400">How many months of inventory to keep on hand</p>
-          </div>
-          <div className="flex gap-2">
-            {MONTH_OPTIONS.map((m) => (
-              <button
-                key={m}
-                onClick={() => setMonths(m)}
-                disabled={loading}
-                className={`px-4 py-2 rounded-lg text-sm font-medium border transition-colors ${
-                  months === m
-                    ? "bg-green-600 text-white border-green-600"
-                    : "bg-white text-gray-700 border-gray-300 hover:bg-gray-50"
-                } disabled:opacity-50`}
-              >
-                {m} {m === 1 ? "Month" : "Months"}
-              </button>
-            ))}
-          </div>
-        </div>
       </div>
 
       {/* Meta Info */}
@@ -503,7 +476,7 @@ export default function SmartPar() {
                     className="px-4 py-3 font-medium text-green-700 bg-green-50 cursor-pointer hover:text-green-900 text-right whitespace-nowrap"
                     onClick={() => toggleSort("par_level")}
                   >
-                    PAR ({months}mo) <SortIcon field="par_level" />
+                    PAR (1mo) <SortIcon field="par_level" />
                   </th>
                   <th
                     className="px-4 py-3 font-medium text-amber-700 bg-amber-50 cursor-pointer hover:text-amber-900 text-right whitespace-nowrap"
