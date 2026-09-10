@@ -32,11 +32,34 @@ function getStorageKey(key: string): string {
   return `${mode}_${key}`;
 }
 
+const PAGES = new Set([
+  "dashboard", "inventory", "alerts", "locations", "settings", "loyalty", "timeclock",
+  "sales", "orders", "discounts", "scraper", "conversations", "smart-par", "production", "lab-results",
+]);
+
+function pageFromPath(): string {
+  const slug = window.location.pathname.replace(/^\/+|\/+$/g, "");
+  return PAGES.has(slug) ? slug : "inventory";
+}
+
 function App() {
   const appMode = getAppMode();
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [userRole, setUserRole] = useState<"admin" | "employee" | null>(null);
-  const [currentPage, setCurrentPage] = useState("inventory");
+  const [currentPage, setCurrentPageState] = useState(pageFromPath);
+
+  const setCurrentPage = (page: string) => {
+    if (window.location.pathname !== `/${page}`) {
+      window.history.pushState(null, "", `/${page}`);
+    }
+    setCurrentPageState(page);
+  };
+
+  useEffect(() => {
+    const onPop = () => setCurrentPageState(pageFromPath());
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
   const [showAdminLogin, setShowAdminLogin] = useState(appMode === "inventory");
   const [employeePage, setEmployeePage] = useState<"timeclock" | "account">("timeclock");
 
@@ -59,7 +82,7 @@ function App() {
     localStorage.setItem(getStorageKey("token"), token);
     localStorage.setItem(getStorageKey("userRole"), "admin");
     localStorage.setItem("userRole", "admin");
-    setCurrentPage("inventory");
+    setCurrentPage(pageFromPath());
   };
 
   const handleEmployeeLogin = () => {
