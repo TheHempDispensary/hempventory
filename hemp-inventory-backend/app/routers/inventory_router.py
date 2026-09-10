@@ -29,6 +29,7 @@ from app.catalog import (
 from app.database import connect_db, get_db
 from app.clover_client import CloverClient
 from app.routers.ecommerce_router import invalidate_product_cache
+from app.smart_par_bulk import apply_bulk_netting, collect_bulk_pool
 
 router = APIRouter(prefix="/api/inventory", tags=["inventory"])
 
@@ -3901,6 +3902,11 @@ def _build_order_groups(results: list[dict]) -> list[dict]:
                 "packages_in_stock": 0,
                 "packages_par": 0,
                 "packages_order_qty": 0,
+                "packages_from_bulk": 0,
+                "packages_on_order": 0,
+                "bulk_sources": [],
+                "_bulk_seen": set(),
+                "notes": [],
                 "grams_sold": 0.0,
                 "grams_in_stock": 0.0,
                 "grams_order": 0.0,
@@ -3917,6 +3923,18 @@ def _build_order_groups(results: list[dict]) -> list[dict]:
         g["packages_in_stock"] += r["total_stock"]
         g["packages_par"] += r["par_level"]
         g["packages_order_qty"] += r["order_qty"]
+        g["packages_from_bulk"] += r.get("bulk_covers", 0)
+        g["packages_on_order"] += r.get("on_order_qty", 0) or 0
+        bulk_name = r.get("bulk_name")
+        if bulk_name and bulk_name not in g["_bulk_seen"]:
+            g["_bulk_seen"].add(bulk_name)
+            g["bulk_sources"].append({
+                "name": bulk_name,
+                "stock": r.get("bulk_stock", 0),
+                "unit": r.get("bulk_unit") or "units",
+            })
+        if r.get("note"):
+            g["notes"].append(f"{r['name']}: {r['note']}")
 
         if basis == "weight":
             g["basis"] = "weight"
@@ -3970,10 +3988,80 @@ def _build_order_groups(results: list[dict]) -> list[dict]:
             "packages_in_stock": g["packages_in_stock"],
             "packages_par": g["packages_par"],
             "packages_order_qty": g["packages_order_qty"],
+            "packages_from_bulk": g["packages_from_bulk"],
+            "packages_on_order": g["packages_on_order"],
+            "bulk_sources": g["bulk_sources"],
+            "notes": g["notes"],
         })
 
     out.sort(key=lambda x: (x["kind"], -x["order_amount"]))
     return out
+
+
+async def _apply_smart_par_notes(results: list[dict], db: aiosqlite.Connection) -> None:
+    """Attach saved notes / on-order quantities and net on-order out of order_qty."""
+    cursor = await db.execute(
+        "SELECT product_key, note, on_order_qty, on_order_date FROM smart_par_notes"
+    )
+    notes = {row[0]: row for row in await cursor.fetchall()}
+    for r in results:
+        r["note"] = ""
+        r["on_order_qty"] = 0
+        r["on_order_date"] = None
+        row = notes.get(_normalise_name(r["name"]))
+        if not row:
+            continue
+        r["note"] = row[1] or ""
+        r["on_order_qty"] = int(row[2] or 0)
+        r["on_order_date"] = row[3]
+        if r["on_order_qty"] > 0:
+            r["order_qty"] = max(r["order_qty"] - r["on_order_qty"], 0)
+
+
+class SmartParNoteUpdate(BaseModel):
+    name: str
+    note: str = ""
+    on_order_qty: int = 0
+    on_order_date: str | None = None
+
+
+@router.put("/smart-par/notes")
+async def upsert_smart_par_note(
+    body: SmartParNoteUpdate,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Save a note and/or already-on-order quantity for a product (keyed by name).
+
+    Clearing note and on-order removes the row."""
+    key = _normalise_name(body.name)
+    if not key:
+        raise HTTPException(status_code=400, detail="name is required")
+    note = body.note.strip()
+    qty = max(int(body.on_order_qty or 0), 0)
+    if not note and qty <= 0:
+        await db.execute("DELETE FROM smart_par_notes WHERE product_key = ?", (key,))
+        await db.commit()
+        return {"name": body.name, "note": "", "on_order_qty": 0, "on_order_date": None}
+    await db.execute(
+        """INSERT INTO smart_par_notes
+             (product_key, product_name, note, on_order_qty, on_order_date, updated_by, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT(product_key) DO UPDATE SET
+             product_name = excluded.product_name,
+             note = excluded.note,
+             on_order_qty = excluded.on_order_qty,
+             on_order_date = excluded.on_order_date,
+             updated_by = excluded.updated_by,
+             updated_at = CURRENT_TIMESTAMP""",
+        (key, body.name, note, qty, body.on_order_date if qty > 0 else None,
+         str(user.get("username") or user.get("sub") or "")),
+    )
+    await db.commit()
+    return {
+        "name": body.name, "note": note, "on_order_qty": qty,
+        "on_order_date": body.on_order_date if qty > 0 else None,
+    }
 
 
 @router.get("/smart-par")
@@ -4135,10 +4223,16 @@ async def smart_par(
 
     results: list[dict] = []
 
+    bulk_pool = collect_bulk_pool(items_list)
+
     for item in items_list:
         # Exclude LeafLife products (SKU prefix "LF-") — they ship from the
         # partner and shouldn't drive our reorder recommendations.
         if (item.get("sku") or "").upper().startswith("LF-"):
+            continue
+        # Bulk is raw material, not a retail line: it is netted out of the
+        # packaged products made from it instead of being ordered itself.
+        if is_bulk_name(item["name"]):
             continue
         norm = _normalise_sales_name(item["name"])
         units_sold = sales_by_product.get(norm, 0)
@@ -4182,6 +4276,15 @@ async def smart_par(
             "group": group_label,
             "group_kind": group_kind,
         })
+
+    recipe_cursor = await db.execute(
+        "SELECT packaged_key, bulk_name, bulk_per_unit FROM bulk_recipes"
+    )
+    recipes = {
+        row[0]: (row[1], row[2] or 0.0) for row in await recipe_cursor.fetchall()
+    }
+    apply_bulk_netting(results, bulk_pool, recipes)
+    await _apply_smart_par_notes(results, db)
 
     groups = _build_order_groups(results)
 

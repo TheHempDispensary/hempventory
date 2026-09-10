@@ -1,0 +1,175 @@
+"""Match packaged products to the HQ bulk they are made from and net that bulk
+out of Smart PAR reorder quantities.
+
+Mirrors the name-matching used by the Production board (frontend
+`bulkMatchesProduct`) so both pages agree on which bulk feeds which product.
+"""
+import re
+
+from app.catalog import is_bulk_name
+
+# Words present in nearly every product/bulk name; they can't identify a bulk.
+_GENERIC_TOKENS = frozenset({
+    "bulk", "thc", "cbd", "cbg", "cbn", "delta", "flower", "smalls", "shake", "bigs",
+    "gram", "grams", "g", "oz", "mg", "ct", "count", "pack", "pk", "piece", "pieces",
+    "pre", "roll", "rolled", "joint", "gummy", "gummies", "the", "and", "of", "with",
+    "for", "a", "in", "by", "per", "each", "hybrid", "sativa", "indica", "variety",
+})
+
+# Order matters: "PRE ROLLED JOINT ... FLOWER" is a pre-roll, not flower.
+_FORMS = (
+    ("preroll", re.compile(r"pre[\s-]?roll|\bjoint\b|\bbaby\s*j\b|\bblunt\b|\bdog\s*walker\b")),
+    ("vapor", re.compile(r"\bvape\b|\bcart\b|\bcartridge\b|\bdisposable\b|\bpod\b")),
+    ("concentrate", re.compile(
+        r"\bdab\b|\bwax\b|\brosin\b|\bresin\b|\bshatter\b|\bbadder\b|\bconcentrate\b|\bhash\b|\bkief\b|\bmoon\s*rock"
+    )),
+    ("edible", re.compile(
+        r"\bgumm|\bedible|\bchocolate|\bcookie|\bbrownie|\bcoffee|\bdrink|\bbeverage|\bsyrup|\bhoney|\bcaramel|\bchew|\bmint"
+    )),
+    ("flower", re.compile(r"\bflower\b|\bsmalls\b|\bshake\b|\bbud\b|\bpopcorn\b")),
+)
+
+_GRAMS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:G|GRAMS?)\b")
+_WORD_GRAMS = (("HALF GRAM", 0.5), ("ONE GRAM", 1.0), ("TWO GRAM", 2.0), ("THREE GRAM", 3.0), ("FOUR GRAM", 4.0))
+
+
+def tokenize(name: str) -> set[str]:
+    return set(re.sub(r"[^a-z0-9]+", " ", name.lower()).split())
+
+
+def product_form(name: str) -> str | None:
+    low = name.lower()
+    for form, rx in _FORMS:
+        if rx.search(low):
+            return form
+    return None
+
+
+def _ignorable(tok: str) -> bool:
+    return tok in _GENERIC_TOKENS or tok.isdigit()
+
+
+def bulk_matches_product(bulk: str, product: str) -> bool:
+    """A bulk feeds a product when both are the same form and every
+    distinguishing word of the bulk name appears in the product name."""
+    form = product_form(bulk)
+    if not form or form != product_form(product):
+        return False
+    bulk_tokens = tokenize(bulk)
+    if all(_ignorable(t) for t in bulk_tokens):
+        return False
+    product_tokens = tokenize(product)
+    return all(_ignorable(t) or t in product_tokens for t in bulk_tokens)
+
+
+def bulk_is_weight(bulk_name: str) -> bool:
+    """Bulk flower/concentrate is tracked in grams; vapes, pre-rolls and
+    edibles are counted by the piece even when the name carries a size
+    ("Bulk - THC Disposable Vape Two Grams ...")."""
+    if product_form(bulk_name) not in ("flower", "concentrate"):
+        return False
+    return bool(re.search(r"\bGRAMS?\b|\bOZ\b|\bPOUND", bulk_name.upper()))
+
+
+def grams_per_package(product_name: str) -> float:
+    """Grams in one retail package, parsed from the product name (0 if none)."""
+    up = product_name.upper()
+    m = _GRAMS_RE.search(up)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            return 0.0
+    for word, val in _WORD_GRAMS:
+        if word in up:
+            return val
+    return 0.0
+
+
+def collect_bulk_pool(items: list[dict]) -> dict[str, float]:
+    """HQ stock of every bulk item, summed across duplicate Clover records."""
+    pool: dict[str, float] = {}
+    for it in items:
+        name = " ".join((it.get("name") or "").split())
+        if not is_bulk_name(name):
+            continue
+        stock = sum(
+            (loc.get("stock", 0) or 0) for loc in (it.get("locations") or {}).values()
+        )
+        pool[name] = pool.get(name, 0.0) + stock
+    return pool
+
+
+def _per_unit(product_name: str, bulk_name: str, recipe_per_unit: float | None) -> float:
+    if recipe_per_unit and recipe_per_unit > 0:
+        return recipe_per_unit
+    if bulk_is_weight(bulk_name):
+        return grams_per_package(product_name)
+    return 1.0
+
+
+def apply_bulk_netting(
+    results: list[dict],
+    bulk_pool: dict[str, float],
+    recipes: dict[str, tuple[str, float]],
+) -> None:
+    """Annotate each Smart PAR row with its bulk source and net the bulk out of
+    `order_qty`.
+
+    `recipes` maps a normalised packaged name -> (bulk_name, bulk_per_unit) from
+    saved production recipes; other rows fall back to name matching. Products
+    sharing one bulk draw from it largest-shortfall first so the same grams are
+    never counted twice. Sets on each row:
+
+        bulk_name, bulk_stock, bulk_unit ("g"|"units"), bulk_per_unit,
+        bulk_covers  (packages this row can make from bulk, <= gross order),
+        gross_order_qty (pre-netting), order_qty (netted)
+    """
+    tokenised = sorted(
+        ((name, tokenize(name)) for name in bulk_pool),
+        key=lambda x: -len(x[1]),
+    )
+    remaining = dict(bulk_pool)
+    assigned: list[tuple[dict, str, float]] = []
+
+    for r in results:
+        r["gross_order_qty"] = r["order_qty"]
+        r["bulk_name"] = None
+        r["bulk_stock"] = 0
+        r["bulk_unit"] = None
+        r["bulk_per_unit"] = 0
+        r["bulk_covers"] = 0
+
+        key = " ".join(r["name"].lower().split())
+        recipe = recipes.get(key)
+        bulk_name: str | None = None
+        recipe_per_unit: float | None = None
+        if recipe and recipe[0] in bulk_pool:
+            bulk_name, recipe_per_unit = recipe
+        else:
+            for name, _tokens in tokenised:
+                if bulk_matches_product(name, r["name"]):
+                    bulk_name = name
+                    break
+        if not bulk_name:
+            continue
+        per_unit = _per_unit(r["name"], bulk_name, recipe_per_unit)
+        r["bulk_name"] = bulk_name
+        r["bulk_stock"] = bulk_pool[bulk_name]
+        r["bulk_unit"] = "g" if bulk_is_weight(bulk_name) else "units"
+        r["bulk_per_unit"] = per_unit
+        if per_unit > 0:
+            assigned.append((r, bulk_name, per_unit))
+
+    # Largest shortfall first so the bulk goes where it is needed most.
+    assigned.sort(key=lambda t: -t[0]["gross_order_qty"])
+    for r, bulk_name, per_unit in assigned:
+        avail = remaining.get(bulk_name, 0.0)
+        if avail <= 0 or r["gross_order_qty"] <= 0:
+            continue
+        covers = min(r["gross_order_qty"], int(avail // per_unit))
+        if covers <= 0:
+            continue
+        r["bulk_covers"] = covers
+        r["order_qty"] = r["gross_order_qty"] - covers
+        remaining[bulk_name] = avail - covers * per_unit

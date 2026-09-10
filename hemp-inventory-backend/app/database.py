@@ -906,6 +906,20 @@ async def init_db():
             )
         """)
 
+        # Smart PAR: per-product buyer notes and quantities already on order,
+        # keyed by normalised product name like bulk_recipes.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS smart_par_notes (
+                product_key TEXT PRIMARY KEY,
+                product_name TEXT NOT NULL,
+                note TEXT NOT NULL DEFAULT '',
+                on_order_qty INTEGER NOT NULL DEFAULT 0,
+                on_order_date TEXT,
+                updated_by TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Seed FIRST10 if promo_codes table is empty
         cursor = await db.execute("SELECT COUNT(*) FROM promo_codes")
         count = (await cursor.fetchone())[0]
