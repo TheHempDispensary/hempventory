@@ -55,9 +55,15 @@ export default function Layout({ children, currentPage, onNavigate, onLogout }: 
             const Icon = item.icon;
             const isActive = currentPage === item.id;
             return (
-              <button
+              <a
                 key={item.id}
-                onClick={() => { onNavigate(item.id); setSidebarOpen(false); }}
+                href={`/${item.id}`}
+                onClick={(e) => {
+                  if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+                  e.preventDefault();
+                  onNavigate(item.id);
+                  setSidebarOpen(false);
+                }}
                 className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
                   isActive
                     ? "bg-green-50 text-green-700"
@@ -66,7 +72,7 @@ export default function Layout({ children, currentPage, onNavigate, onLogout }: 
               >
                 <Icon className={`w-5 h-5 ${isActive ? "text-green-600" : "text-gray-400"}`} />
                 {item.label}
-              </button>
+              </a>
             );
           })}
         </nav>
