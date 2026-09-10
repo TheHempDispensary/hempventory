@@ -6,6 +6,7 @@ import asyncio
 import aiosqlite
 import base64
 import csv
+import hashlib
 from collections import deque
 import os
 import json
@@ -3977,7 +3978,7 @@ def _build_order_groups(results: list[dict]) -> list[dict]:
 
 @router.get("/smart-par")
 async def smart_par(
-    months: int = 3,
+    months: int = 1,
     user: dict = Depends(get_current_user),
     db: aiosqlite.Connection = Depends(get_db),
 ):
@@ -4675,7 +4676,9 @@ _LEAFLIFE_TABS = [
 _LL_COL_INVENTORY = 1
 _LL_COL_TIER = 2
 _LL_COL_STRAIN = 3
+_LL_COL_THCA = 4
 _LL_COL_IHS = 8
+_LL_COL_COA = 9
 
 _LEAFLIFE_SYNC_STATUS: dict = {
     "last_run": None,
@@ -4761,6 +4764,10 @@ def _build_leaflife_desired(tab_rows: dict) -> dict:
                 continue
             tier = (row[_LL_COL_TIER] or "").strip()
             product_type = _leaflife_strain_type(row[_LL_COL_IHS])
+            coa_url = (row[_LL_COL_COA] or "").strip()
+            if not coa_url.startswith(("http://", "https://")):
+                coa_url = ""
+            thca_pct = (row[_LL_COL_THCA] or "").strip()
             strain_upper = strain.upper()
             # Keep flower SKUs byte-identical to the legacy importer (letters,
             # spaces, hyphens, '#') while stripping non-ASCII (e.g. '×') that
@@ -4793,8 +4800,50 @@ def _build_leaflife_desired(tab_rows: dict) -> dict:
                     "stock": stock,
                     "category": category,
                     "product_type": product_type,
+                    "coa_url": coa_url,
+                    "thca_pct": thca_pct,
                 }
     return desired
+
+
+async def _upsert_leaflife_coa(
+    db: aiosqlite.Connection, sku: str, name: str, coa_url: str, thca_pct: str
+):
+    """Link the partner's COA PDF to a LeafLife SKU.
+
+    Stored as a 'manual' COA (external URL) so the ACS clear-and-replace sync
+    leaves it alone and the storefront renders it like any other uploaded COA.
+    The accession is derived from the URL, so re-syncs are idempotent and a
+    changed PDF on the sheet swaps the link to the new document.
+    """
+    prefix = "LEAFLIFE-"
+    if not coa_url:
+        await db.execute(
+            "DELETE FROM coa_sku_links WHERE sku = ? AND sample_accession LIKE ?",
+            (sku, prefix + "%"),
+        )
+        return
+    accession = prefix + hashlib.sha1(coa_url.encode()).hexdigest()[:12].upper()
+    description = f"THCa {thca_pct}" if thca_pct else ""
+    await db.execute(
+        """INSERT OR IGNORE INTO coa_results
+            (sample_accession, order_number, batch_no, business_name,
+             product_name, product_type, consumption_type, description,
+             test_purpose, sample_status, order_date, test_start_date,
+             coa_approved_date, postal_code, extracted_from,
+             coa_approved_filepath, source, synced_at)
+           VALUES (?, '', '', 'LeafLife', ?, 'Hemp', '', ?, '', 'Complete', '', '',
+                   '', '', '', ?, 'manual', CURRENT_TIMESTAMP)""",
+        (accession, name, description, coa_url),
+    )
+    await db.execute(
+        "DELETE FROM coa_sku_links WHERE sku = ? AND sample_accession LIKE ? AND sample_accession != ?",
+        (sku, prefix + "%", accession),
+    )
+    await db.execute(
+        "INSERT OR IGNORE INTO coa_sku_links (sku, sample_accession) VALUES (?, ?)",
+        (sku, accession),
+    )
 
 
 async def _upsert_leaflife_attrs(
@@ -4908,6 +4957,9 @@ async def run_leaflife_sync(db: aiosqlite.Connection) -> dict:
                 await _upsert_leaflife_attrs(
                     db, want["sku"], want["name"], want["product_type"]
                 )
+                await _upsert_leaflife_coa(
+                    db, want["sku"], want["name"], want["coa_url"], want["thca_pct"]
+                )
             else:
                 item_data: dict = {
                     "name": want["name"],
@@ -4934,6 +4986,9 @@ async def run_leaflife_sync(db: aiosqlite.Connection) -> dict:
                 await _upsert_leaflife_attrs(
                     db, want["sku"], want["name"], want["product_type"]
                 )
+                await _upsert_leaflife_coa(
+                    db, want["sku"], want["name"], want["coa_url"], want["thca_pct"]
+                )
                 created += 1
             await asyncio.sleep(0.2)
         except Exception as e:
@@ -4954,6 +5009,10 @@ async def run_leaflife_sync(db: aiosqlite.Connection) -> dict:
                 await db.execute("DELETE FROM par_levels WHERE UPPER(sku) = ?", (sku_up,))
                 await db.execute(
                     "DELETE FROM inventory_snapshots WHERE UPPER(sku) = ?", (sku_up,)
+                )
+                await db.execute(
+                    "DELETE FROM coa_sku_links WHERE UPPER(sku) = ? AND sample_accession LIKE 'LEAFLIFE-%'",
+                    (sku_up,),
                 )
             except Exception as e:
                 errors.append(f"delete {sku_up}: {e}")
