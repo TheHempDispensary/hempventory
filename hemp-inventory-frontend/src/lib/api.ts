@@ -74,6 +74,16 @@ export const syncLeafLife = () =>
   }>("/api/inventory/leaflife-sync");
 export const getSmartPar = (months: number) =>
   api.get("/api/inventory/smart-par", { params: { months } });
+export const saveSmartParNote = (body: {
+  name: string;
+  note: string;
+  on_order_qty: number;
+  on_order_date: string | null;
+}) =>
+  api.put<{ name: string; note: string; on_order_qty: number; on_order_date: string | null }>(
+    "/api/inventory/smart-par/notes",
+    body,
+  );
 
 export const createItem = (data: {
   name: string;

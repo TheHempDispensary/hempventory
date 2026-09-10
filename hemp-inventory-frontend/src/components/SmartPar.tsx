@@ -1,7 +1,7 @@
 import { useEffect, useState, useMemo } from "react";
-import { getSmartPar } from "../lib/api";
+import { getSmartPar, saveSmartParNote } from "../lib/api";
 import { matchesSearch } from "../lib/utils";
-import { RefreshCw, Search, ChevronUp, ChevronDown, Download, Calculator, Layers, List } from "lucide-react";
+import { RefreshCw, Search, ChevronUp, ChevronDown, Download, Calculator, Layers, List, Pencil } from "lucide-react";
 
 interface ParProduct {
   name: string;
@@ -14,8 +14,23 @@ interface ParProduct {
   units_per_month: number;
   par_level: number;
   order_qty: number;
+  gross_order_qty: number;
+  bulk_name: string | null;
+  bulk_stock: number;
+  bulk_unit: string;
+  bulk_per_unit: number;
+  bulk_covers: number;
+  note: string;
+  on_order_qty: number;
+  on_order_date: string | null;
   group: string | null;
   group_kind: string | null;
+}
+
+interface BulkSource {
+  name: string;
+  stock: number;
+  unit: string;
 }
 
 interface ParGroup {
@@ -27,6 +42,17 @@ interface ParGroup {
   sold_amount: number;
   stock_amount: number;
   packages_order_qty: number;
+  packages_from_bulk: number;
+  packages_on_order: number;
+  bulk_sources: BulkSource[];
+  notes: string[];
+}
+
+interface NoteDraft {
+  name: string;
+  note: string;
+  on_order_qty: string;
+  on_order_date: string;
 }
 
 interface ParMeta {
@@ -36,7 +62,17 @@ interface ParMeta {
   total_units_sold: number;
 }
 
-type SortField = "name" | "category" | "price" | "total_stock" | "units_sold" | "units_per_month" | "par_level" | "order_qty";
+type SortField =
+  | "name"
+  | "category"
+  | "price"
+  | "total_stock"
+  | "bulk_stock"
+  | "units_sold"
+  | "units_per_month"
+  | "par_level"
+  | "on_order_qty"
+  | "order_qty";
 type SortDir = "asc" | "desc";
 type GroupSortField = "group" | "item_count" | "sold_amount" | "stock_amount" | "order_amount";
 
@@ -55,9 +91,12 @@ export default function SmartPar() {
   const [groupSortField, setGroupSortField] = useState<GroupSortField>("order_amount");
   const [groupSortDir, setGroupSortDir] = useState<SortDir>("desc");
   const [error, setError] = useState("");
+  const [draft, setDraft] = useState<NoteDraft | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
 
-  const fetchData = async () => {
-    setLoading(true);
+  const fetchData = async (silent = false) => {
+    if (!silent) setLoading(true);
     setError("");
     try {
       const res = await getSmartPar(SUPPLY_MONTHS);
@@ -68,7 +107,52 @@ export default function SmartPar() {
       const msg = err instanceof Error ? err.message : "Failed to load Smart PAR data";
       setError(msg);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
+    }
+  };
+
+  const openEditor = (p: ParProduct) => {
+    setSaveError("");
+    setDraft({
+      name: p.name,
+      note: p.note || "",
+      on_order_qty: p.on_order_qty ? String(p.on_order_qty) : "",
+      on_order_date: p.on_order_date || "",
+    });
+  };
+
+  const saveDraft = async () => {
+    if (!draft) return;
+    const qty = Math.max(parseInt(draft.on_order_qty, 10) || 0, 0);
+    setSaving(true);
+    setSaveError("");
+    try {
+      const res = await saveSmartParNote({
+        name: draft.name,
+        note: draft.note.trim(),
+        on_order_qty: qty,
+        on_order_date: qty > 0 && draft.on_order_date ? draft.on_order_date : null,
+      });
+      const saved = res.data;
+      setProducts((prev) =>
+        prev.map((p) =>
+          p.name === draft.name
+            ? {
+                ...p,
+                note: saved.note,
+                on_order_qty: saved.on_order_qty,
+                on_order_date: saved.on_order_date,
+                order_qty: Math.max(p.gross_order_qty - p.bulk_covers - saved.on_order_qty, 0),
+              }
+            : p,
+        ),
+      );
+      setDraft(null);
+      fetchData(true);
+    } catch (err: unknown) {
+      setSaveError(err instanceof Error ? err.message : "Failed to save");
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -109,6 +193,12 @@ export default function SmartPar() {
           break;
         case "total_stock":
           cmp = a.total_stock - b.total_stock;
+          break;
+        case "bulk_stock":
+          cmp = (a.bulk_stock || 0) - (b.bulk_stock || 0);
+          break;
+        case "on_order_qty":
+          cmp = (a.on_order_qty || 0) - (b.on_order_qty || 0);
           break;
         case "units_sold":
           cmp = a.units_sold - b.units_sold;
@@ -191,18 +281,25 @@ export default function SmartPar() {
     let headers: string[];
     let rows: (string | number)[][];
     if (view === "groups") {
-      headers = ["Order Group", "Type", "Items", "Sold", "In Stock", "To Order", "Unit"];
+      headers = ["Order Group", "Type", "Items", "Sold", "In Stock", "Bulk on Hand", "Pkgs From Bulk", "Pkgs On Order", "To Order", "Unit", "Notes"];
       rows = filteredGroups.map((g) => [
         `"${g.group}"`,
         g.kind,
         g.item_count,
         g.sold_amount,
         g.stock_amount,
+        `"${(g.bulk_sources || []).map((b) => `${b.name}: ${b.stock} ${b.unit}`).join("; ")}"`,
+        g.packages_from_bulk || 0,
+        g.packages_on_order || 0,
         g.order_amount,
         g.order_unit,
+        `"${(g.notes || []).join(" | ").replace(/"/g, "'")}"`,
       ]);
     } else {
-      headers = ["Product", "SKU", "Category", "Price", "Current Stock", "Units Sold", "Units/Month", "PAR (1mo)", "Order Qty"];
+      headers = [
+        "Product", "SKU", "Category", "Price", "Current Stock", "Units Sold", "Units/Month", "PAR (1mo)",
+        "Shortfall", "Bulk Source", "Bulk on Hand", "Bulk Unit", "From Bulk", "On Order", "On Order Date", "To Order", "Notes",
+      ];
       rows = sorted.map((p) => [
         `"${p.name}"`,
         p.sku,
@@ -212,7 +309,15 @@ export default function SmartPar() {
         p.units_sold,
         p.units_per_month,
         p.par_level,
+        p.gross_order_qty ?? p.order_qty,
+        `"${p.bulk_name || ""}"`,
+        p.bulk_name ? p.bulk_stock : "",
+        p.bulk_name ? p.bulk_unit : "",
+        p.bulk_covers || 0,
+        p.on_order_qty || 0,
+        p.on_order_date || "",
         p.order_qty,
+        `"${(p.note || "").replace(/"/g, "'")}"`,
       ]);
     }
     const csv = [headers.join(","), ...rows.map((r) => r.join(","))].join("\n");
@@ -235,7 +340,7 @@ export default function SmartPar() {
             Smart PAR Calculator
           </h1>
           <p className="text-sm text-gray-500 mt-1">
-            Recommended reorder quantities based on actual sales velocity
+            To Order = 1-month PAR &minus; packaged stock &minus; what HQ bulk can package &minus; already on order
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -382,6 +487,12 @@ export default function SmartPar() {
                   >
                     In Stock <GroupSortIcon field="stock_amount" />
                   </th>
+                  <th className="px-4 py-3 font-medium text-blue-700 bg-blue-50 text-right whitespace-nowrap">
+                    Bulk on Hand
+                  </th>
+                  <th className="px-4 py-3 font-medium text-gray-600 text-right whitespace-nowrap">
+                    On Order
+                  </th>
                   <th
                     onClick={() => toggleGroupSort("order_amount")}
                     className="px-4 py-3 font-medium text-amber-700 bg-amber-50 text-right cursor-pointer hover:text-amber-900 whitespace-nowrap select-none"
@@ -396,10 +507,38 @@ export default function SmartPar() {
                     <td className="px-4 py-3">
                       <div className="font-medium text-gray-900">{g.group}</div>
                       <div className="text-xs text-gray-400">{g.kind}</div>
+                      {(g.notes || []).length > 0 && (
+                        <ul className="mt-1 text-xs text-gray-600 space-y-0.5 max-w-md">
+                          {g.notes.map((n, i) => (
+                            <li key={i} className="truncate" title={n}>
+                              {n}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-right text-gray-500">{g.item_count}</td>
                     <td className="px-4 py-3 text-right text-gray-600">{fmtAmount(g.sold_amount, g.order_unit)}</td>
                     <td className="px-4 py-3 text-right text-gray-600">{fmtAmount(g.stock_amount, g.order_unit)}</td>
+                    <td className="px-4 py-3 text-right bg-blue-50/50">
+                      {(g.bulk_sources || []).length > 0 ? (
+                        <div>
+                          {g.bulk_sources.map((b) => (
+                            <div key={b.name} className="font-medium text-blue-700 whitespace-nowrap" title={b.name}>
+                              {fmtAmount(b.stock, b.unit)}
+                            </div>
+                          ))}
+                          {g.packages_from_bulk > 0 && (
+                            <div className="text-xs text-blue-500">covers {g.packages_from_bulk} pkgs</div>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-gray-300">&mdash;</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-right text-gray-600">
+                      {g.packages_on_order > 0 ? `${g.packages_on_order} pkgs` : <span className="text-gray-300">&mdash;</span>}
+                    </td>
                     <td className="px-4 py-3 text-right bg-amber-50/50">
                       {g.order_amount > 0 ? (
                         <span className="font-semibold text-amber-700">{fmtAmount(g.order_amount, g.order_unit)}</span>
@@ -479,11 +618,24 @@ export default function SmartPar() {
                     PAR (1mo) <SortIcon field="par_level" />
                   </th>
                   <th
+                    className="px-4 py-3 font-medium text-blue-700 bg-blue-50 cursor-pointer hover:text-blue-900 text-right whitespace-nowrap"
+                    onClick={() => toggleSort("bulk_stock")}
+                  >
+                    Bulk on Hand <SortIcon field="bulk_stock" />
+                  </th>
+                  <th
+                    className="px-4 py-3 font-medium text-gray-600 cursor-pointer hover:text-gray-900 text-right whitespace-nowrap"
+                    onClick={() => toggleSort("on_order_qty")}
+                  >
+                    On Order <SortIcon field="on_order_qty" />
+                  </th>
+                  <th
                     className="px-4 py-3 font-medium text-amber-700 bg-amber-50 cursor-pointer hover:text-amber-900 text-right whitespace-nowrap"
                     onClick={() => toggleSort("order_qty")}
                   >
-                    Order Qty <SortIcon field="order_qty" />
+                    To Order <SortIcon field="order_qty" />
                   </th>
+                  <th className="px-4 py-3 font-medium text-gray-600 whitespace-nowrap">Notes</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
@@ -533,12 +685,53 @@ export default function SmartPar() {
                     <td className="px-4 py-3 text-right bg-green-50/50 font-semibold text-green-700">
                       {p.par_level}
                     </td>
+                    <td className="px-4 py-3 text-right bg-blue-50/50">
+                      {p.bulk_name ? (
+                        <div title={p.bulk_name}>
+                          <span className="font-medium text-blue-700">{fmtAmount(p.bulk_stock, p.bulk_unit)}</span>
+                          {p.bulk_covers > 0 && (
+                            <div className="text-xs text-blue-500 whitespace-nowrap">covers {p.bulk_covers}</div>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-gray-300">—</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      {p.on_order_qty > 0 ? (
+                        <div>
+                          <span className="font-medium text-gray-900">{p.on_order_qty}</span>
+                          {p.on_order_date && (
+                            <div className="text-xs text-gray-400 whitespace-nowrap">{p.on_order_date}</div>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-gray-300">—</span>
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-right bg-amber-50/50">
                       {p.order_qty > 0 ? (
                         <span className="font-semibold text-amber-700">{p.order_qty}</span>
                       ) : (
                         <span className="text-gray-300">—</span>
                       )}
+                      {p.gross_order_qty > p.order_qty && (
+                        <div className="text-xs text-gray-400 whitespace-nowrap">short {p.gross_order_qty}</div>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 max-w-xs">
+                      <button
+                        onClick={() => openEditor(p)}
+                        className="group flex items-start gap-1.5 text-left w-full"
+                        title="Edit note / on-order"
+                      >
+                        <Pencil className="w-3.5 h-3.5 mt-0.5 shrink-0 text-gray-300 group-hover:text-gray-600" />
+                        {p.note ? (
+                          <span className="text-gray-700 whitespace-pre-line break-words">{p.note}</span>
+                        ) : (
+                          <span className="text-gray-300 group-hover:text-gray-500">Add note</span>
+                        )}
+                      </button>
                     </td>
                   </tr>
                 ))}
@@ -552,6 +745,76 @@ export default function SmartPar() {
       {!loading && !error && view === "items" && sorted.length === 0 && products.length > 0 && (
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-8 text-center">
           <p className="text-gray-500">No products match your search or filter.</p>
+        </div>
+      )}
+
+      {/* Note / on-order editor */}
+      {draft && (
+        <div
+          className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4"
+          onClick={() => !saving && setDraft(null)}
+        >
+          <div
+            className="bg-white rounded-xl shadow-xl w-full max-w-md p-5 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div>
+              <h2 className="font-semibold text-gray-900">Order note</h2>
+              <p className="text-sm text-gray-500 break-words">{draft.name}</p>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <label className="text-sm">
+                <span className="block text-xs text-gray-500 mb-1">Already on order (qty)</span>
+                <input
+                  type="number"
+                  min={0}
+                  value={draft.on_order_qty}
+                  onChange={(e) => setDraft({ ...draft, on_order_qty: e.target.value })}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                  placeholder="0"
+                />
+              </label>
+              <label className="text-sm">
+                <span className="block text-xs text-gray-500 mb-1">Ordered on</span>
+                <input
+                  type="date"
+                  value={draft.on_order_date}
+                  onChange={(e) => setDraft({ ...draft, on_order_date: e.target.value })}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                />
+              </label>
+            </div>
+            <label className="text-sm block">
+              <span className="block text-xs text-gray-500 mb-1">Notes</span>
+              <textarea
+                value={draft.note}
+                onChange={(e) => setDraft({ ...draft, note: e.target.value })}
+                rows={3}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                placeholder="e.g. ordered 9/3 from Farm X, waiting on COA"
+              />
+            </label>
+            <p className="text-xs text-gray-400">
+              On-order qty is subtracted from To Order until you clear it when the shipment is received.
+            </p>
+            {saveError && <p className="text-sm text-red-600">{saveError}</p>}
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setDraft(null)}
+                disabled={saving}
+                className="px-3 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={saveDraft}
+                disabled={saving}
+                className="px-3 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
+              >
+                {saving ? "Saving…" : "Save"}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
