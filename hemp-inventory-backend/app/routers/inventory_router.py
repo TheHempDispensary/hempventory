@@ -3608,8 +3608,11 @@ async def _fetch_all_clover_orders(client: CloverClient) -> list[dict]:
                 filters=["payType!=NULL"],
             )
         except Exception as e:
+            # A partial pull must never be mistaken for the full history: it
+            # would silently halve every velocity. Let the caller decide
+            # (serve cached sales / abort) instead.
             print(f"Error fetching Clover orders at offset {offset}: {e}")
-            break
+            raise
         elements = data.get("elements", [])
         all_orders.extend(elements)
         if len(elements) < limit:
@@ -3639,6 +3642,145 @@ def _normalise_sales_name(name: str) -> str:
     return " ".join(
         w for w in name.lower().split() if w not in _STRAIN_TYPE_WORDS
     )
+
+
+def _line_item_qty(li: dict) -> int:
+    return max(round((li.get("unitQty") or 1000) / 1000), 1)
+
+
+class _SalesTally:
+    """Units sold per product, keyed by Clover item ID with a name fallback.
+
+    Clover line items carry the ID of the catalog item they were rung up
+    as, which survives renames ("LEMON CHERRY GELATO SMALLS FLOWER" ->
+    "THC Flower Smalls Lemon Cherry Gelato") and batch suffixes. Lines whose
+    item ID is unknown (deleted items, custom items, website orders) fall
+    back to the normalised-name match. ``by_name`` tallies every line by
+    name regardless, for bestseller lists.
+    """
+
+    def __init__(self, known_item_ids: set[str] | None = None):
+        self.known_item_ids = known_item_ids or set()
+        self.by_item_id: dict[str, int] = {}
+        self.first_by_item_id: dict[str, float] = {}
+        self.by_name: dict[str, int] = {}
+        self.first_by_name: dict[str, float] = {}
+        self.unmatched_by_name: dict[str, int] = {}
+        self.first_unmatched_by_name: dict[str, float] = {}
+        self.earliest_ts = float("inf")
+        self.latest_ts = 0.0
+
+    def _mark_ts(self, ts: float) -> None:
+        if ts > 0:
+            self.earliest_ts = min(self.earliest_ts, ts)
+            self.latest_ts = max(self.latest_ts, ts)
+
+    def add(self, name: str, qty: int, ts: float, item_id: str | None = None) -> None:
+        norm = _normalise_sales_name(" ".join((name or "").split()))
+        if not norm and not item_id:
+            return
+        self._mark_ts(ts)
+        if norm:
+            self.by_name[norm] = self.by_name.get(norm, 0) + qty
+            if ts > 0:
+                self.first_by_name[norm] = min(self.first_by_name.get(norm, float("inf")), ts)
+        if item_id and item_id in self.known_item_ids:
+            self.by_item_id[item_id] = self.by_item_id.get(item_id, 0) + qty
+            if ts > 0:
+                self.first_by_item_id[item_id] = min(
+                    self.first_by_item_id.get(item_id, float("inf")), ts
+                )
+        elif norm:
+            self.unmatched_by_name[norm] = self.unmatched_by_name.get(norm, 0) + qty
+            if ts > 0:
+                self.first_unmatched_by_name[norm] = min(
+                    self.first_unmatched_by_name.get(norm, float("inf")), ts
+                )
+
+    def add_clover_orders(self, orders: list[dict]) -> None:
+        for order in orders:
+            # Skip deleted orders and full refunds/voids so they don't count as sales
+            if order.get("deletedTime") or order.get("isRefund"):
+                continue
+            if order.get("total", 0) < 0:
+                continue
+            order_ts = order.get("createdTime", 0) / 1000  # ms -> s
+            for li in (order.get("lineItems") or {}).get("elements", []):
+                # Skip refunded/returned line items to match Clover's "Sold" count
+                if li.get("refunded") or li.get("isRefund"):
+                    continue
+                item_id = (li.get("item") or {}).get("id") or None
+                self.add(li.get("name") or "", _line_item_qty(li), order_ts, item_id)
+
+    def add_ecommerce_rows(self, rows: list[tuple]) -> None:
+        """Website order lines: (product_name, quantity, created_at)."""
+        from datetime import datetime
+
+        for p_name, qty, created_at in rows:
+            if not p_name:
+                continue
+            ts = 0.0
+            if created_at:
+                try:
+                    ts = datetime.fromisoformat(
+                        str(created_at).replace("Z", "+00:00")
+                    ).timestamp()
+                except (ValueError, TypeError):
+                    pass
+            self.add(str(p_name), qty or 1, ts)
+
+    def product_sales(self, name: str, item_ids) -> tuple[int, float | None]:
+        """(units sold, first sale ts) for a product and its Clover item IDs."""
+        units = 0
+        first = float("inf")
+        for item_id in item_ids:
+            if not item_id:
+                continue
+            units += self.by_item_id.get(item_id, 0)
+            first = min(first, self.first_by_item_id.get(item_id, float("inf")))
+        norm = _normalise_sales_name(name)
+        units += self.unmatched_by_name.get(norm, 0)
+        first = min(first, self.first_unmatched_by_name.get(norm, float("inf")))
+        return units, (None if first == float("inf") else first)
+
+    def to_cache(self) -> dict:
+        return {
+            "sales_by_product": self.by_name,
+            "first_sale_ts": self.first_by_name,
+            "sales_by_item_id": self.by_item_id,
+            "first_sale_by_item_id": self.first_by_item_id,
+            "sales_unmatched_by_name": self.unmatched_by_name,
+            "first_unmatched_by_name": self.first_unmatched_by_name,
+            "earliest_ts": self.earliest_ts,
+            "latest_ts": self.latest_ts,
+        }
+
+    @classmethod
+    def from_cache(cls, data: dict) -> "_SalesTally":
+        t = cls()
+        t.by_name = data["sales_by_product"]
+        t.first_by_name = data["first_sale_ts"]
+        t.by_item_id = data["sales_by_item_id"]
+        t.first_by_item_id = data["first_sale_by_item_id"]
+        t.unmatched_by_name = data["sales_unmatched_by_name"]
+        t.first_unmatched_by_name = data["first_unmatched_by_name"]
+        t.earliest_ts = data["earliest_ts"]
+        t.latest_ts = data["latest_ts"]
+        return t
+
+
+def _item_clover_ids(item: dict) -> list[str]:
+    return [
+        loc.get("clover_item_id")
+        for loc in (item.get("locations") or {}).values()
+        if loc.get("clover_item_id")
+    ]
+
+
+def _days_of_data(earliest_ts: float, latest_ts: float) -> float:
+    if earliest_ts >= latest_ts or earliest_ts == float("inf"):
+        return 1.0
+    return max((latest_ts - earliest_ts) / 86400, 1.0)
 
 
 def _order_group_cannabinoid(up: str) -> str:
@@ -4104,7 +4246,7 @@ async def smart_par(
     # ----- 2. Gather sales data (check cache first) -----
     now = time.time()
     cached = _smart_par_cache["data"]
-    if cached and "first_sale_ts" not in cached:
+    if cached and "sales_by_item_id" not in cached:
         cached = None
     fresh = cached is not None and (now - _smart_par_cache["updated_at"]) < _SMART_PAR_TTL
 
@@ -4128,83 +4270,23 @@ async def smart_par(
             orders_by_loc = None
 
     if fresh or orders_by_loc is None:
-        sales_by_product = cached["sales_by_product"]
-        first_sale_ts = cached["first_sale_ts"]
-        earliest_ts = cached["earliest_ts"]
-        latest_ts = cached["latest_ts"]
+        tally = _SalesTally.from_cache(cached)
     else:
-        sales_by_product: dict[str, int] = {}  # normalised name -> total units
-        first_sale_ts: dict[str, float] = {}  # normalised name -> first sale ts
-        earliest_ts = float("inf")
-        latest_ts = 0.0
-
+        known_ids = {cid for item in items_list for cid in _item_clover_ids(item)}
+        tally = _SalesTally(known_ids)
         for orders in orders_by_loc:
-            for order in orders:
-                # Skip deleted orders and full refunds/voids so they don't count as sales
-                if order.get("deletedTime") or order.get("isRefund"):
-                    continue
-                if order.get("total", 0) < 0:
-                    continue
-                order_ts = order.get("createdTime", 0) / 1000  # ms -> s
-                if order_ts > 0:
-                    earliest_ts = min(earliest_ts, order_ts)
-                    latest_ts = max(latest_ts, order_ts)
-                line_items = (order.get("lineItems") or {}).get("elements", [])
-                for li in line_items:
-                    # Skip refunded/returned line items to match Clover's "Sold" count
-                    if li.get("refunded") or li.get("isRefund"):
-                        continue
-                    li_name = " ".join((li.get("name") or "").split())
-                    if not li_name:
-                        continue
-                    raw_qty = li.get("unitQty", 1000)
-                    qty = max(round(raw_qty / 1000), 1)
-                    norm = _normalise_sales_name(li_name)
-                    sales_by_product[norm] = sales_by_product.get(norm, 0) + qty
-                    if order_ts > 0:
-                        first_sale_ts[norm] = min(
-                            first_sale_ts.get(norm, float("inf")), order_ts
-                        )
+            tally.add_clover_orders(orders)
 
         # 2b. Ecommerce orders (website)
-        cursor = await db.execute(
-            """SELECT oi.product_name, oi.quantity, eo.created_at
-               FROM ecommerce_order_items oi
-               JOIN ecommerce_orders eo ON oi.order_id = eo.id
-               WHERE eo.status NOT IN ('cancelled', 'refunded')"""
-        )
-        rows = await cursor.fetchall()
-        for row in rows:
-            p_name, qty, created_at = row[0], row[1], row[2]
-            if not p_name:
-                continue
-            norm = _normalise_sales_name(p_name)
-            sales_by_product[norm] = sales_by_product.get(norm, 0) + (qty or 1)
-            # Parse created_at for date range
-            if created_at:
-                try:
-                    from datetime import datetime
-                    dt = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
-                    ts = dt.timestamp()
-                    earliest_ts = min(earliest_ts, ts)
-                    latest_ts = max(latest_ts, ts)
-                    first_sale_ts[norm] = min(first_sale_ts.get(norm, float("inf")), ts)
-                except Exception:
-                    pass
+        tally.add_ecommerce_rows(await _hq_ecommerce_sales(db))
 
-        _smart_par_cache["data"] = {
-            "sales_by_product": sales_by_product,
-            "first_sale_ts": first_sale_ts,
-            "earliest_ts": earliest_ts,
-            "latest_ts": latest_ts,
-        }
+        _smart_par_cache["data"] = tally.to_cache()
         _smart_par_cache["updated_at"] = now
 
+    latest_ts = tally.latest_ts
+
     # ----- 3. Compute velocity & PAR -----
-    if earliest_ts >= latest_ts or earliest_ts == float("inf"):
-        days_of_data = 1
-    else:
-        days_of_data = max((latest_ts - earliest_ts) / 86400, 1)
+    days_of_data = _days_of_data(tally.earliest_ts, latest_ts)
 
     # Strain type (Sativa/Indica/Hybrid) per product, used to group flower.
     strain_by_sku: dict[str, str] = {}
@@ -4234,11 +4316,8 @@ async def smart_par(
         # packaged products made from it instead of being ordered itself.
         if is_bulk_name(item["name"]):
             continue
-        norm = _normalise_sales_name(item["name"])
-        units_sold = sales_by_product.get(norm, 0)
-        product_days = _product_days_of_data(
-            first_sale_ts.get(norm), latest_ts, days_of_data
-        )
+        units_sold, first_ts = tally.product_sales(item["name"], _item_clover_ids(item))
+        product_days = _product_days_of_data(first_ts, latest_ts, days_of_data)
         units_per_day = units_sold / product_days
         units_per_month = units_per_day * 30.44  # avg days/month
         par_level = round(units_per_month * months)
@@ -4332,16 +4411,16 @@ async def _hq_ecommerce_sales(db: aiosqlite.Connection) -> list[tuple]:
 async def _run_auto_set_par(months: float, db: aiosqlite.Connection) -> dict:
     """Set every item's PAR level, per location, from that location's own sales velocity.
 
-    For each Clover location we tally its paid, non-refunded POS sales by product
-    name, derive units/day over the location's own order history, and store
-    PAR = round(units_per_month * months) for each item at that location. Re-running
+    For each Clover location we tally its paid, non-refunded POS sales by Clover
+    item ID (falling back to product name), derive units/day over the location's
+    own order history, and store PAR = round(units_per_month * months) for each
+    item at that location. Re-running
     recomputes from the latest sales, so as an item sells faster its PAR (and the
     reorder/production need it drives) rises automatically.
 
     LeafLife (LF-) items are skipped — they ship from the partner and don't sit on
     our shelves.
     """
-    from datetime import datetime
     from app.routers.ecommerce_router import HQ_MERCHANT_ID
 
     months = max(0.25, min(months, 24))
@@ -4362,67 +4441,30 @@ async def _run_auto_set_par(months: float, db: aiosqlite.Connection) -> dict:
         client = CloverClient(merchant_id, api_token)
         loc_par_rows: list[tuple[str, int, float]] = []
 
-        # 1. Tally this location's own sales by normalised product name.
-        sales_by_name: dict[str, int] = {}
-        first_sale_ts: dict[str, float] = {}
-        earliest_ts = float("inf")
-        latest_ts = 0.0
-        try:
-            orders = await _fetch_all_clover_orders(client)
-        except Exception as e:
-            print(f"[auto-set-par] order fetch failed for {loc_name}: {e}")
-            orders = []
-        for order in orders:
-            if order.get("deletedTime") or order.get("isRefund"):
-                continue
-            if order.get("total", 0) < 0:
-                continue
-            order_ts = order.get("createdTime", 0) / 1000
-            if order_ts > 0:
-                earliest_ts = min(earliest_ts, order_ts)
-                latest_ts = max(latest_ts, order_ts)
-            for li in (order.get("lineItems") or {}).get("elements", []):
-                if li.get("refunded") or li.get("isRefund"):
-                    continue
-                li_name = " ".join((li.get("name") or "").split())
-                if not li_name:
-                    continue
-                qty = max(round(li.get("unitQty", 1000) / 1000), 1)
-                norm = _normalise_sales_name(li_name)
-                sales_by_name[norm] = sales_by_name.get(norm, 0) + qty
-                if order_ts > 0:
-                    first_sale_ts[norm] = min(first_sale_ts.get(norm, float("inf")), order_ts)
-
-        # Fold the website's own sales into HQ (same source Smart PAR uses).
-        if str(merchant_id) == str(HQ_MERCHANT_ID):
-            for p_name, qty, created_at in ecommerce_sales:
-                if not p_name:
-                    continue
-                norm = _normalise_sales_name(" ".join(str(p_name).split()))
-                sales_by_name[norm] = sales_by_name.get(norm, 0) + (qty or 1)
-                if created_at:
-                    try:
-                        dt = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
-                        ts = dt.timestamp()
-                        earliest_ts = min(earliest_ts, ts)
-                        latest_ts = max(latest_ts, ts)
-                        first_sale_ts[norm] = min(first_sale_ts.get(norm, float("inf")), ts)
-                    except (ValueError, TypeError):
-                        pass
-
-        if earliest_ts >= latest_ts or earliest_ts == float("inf"):
-            days_of_data = 1.0
-        else:
-            days_of_data = max((latest_ts - earliest_ts) / 86400, 1.0)
-
-        # 2. Compute PAR for each item currently at this location.
+        # 1. This location's catalog, then its own sales tallied by item ID.
+        # A failed pull aborts the run: writing PAR from empty or partial
+        # sales would zero out every level at the location.
         try:
             data = await client.get_items(expand="itemStock")
             items = data.get("elements", [])
+            orders = await _fetch_all_clover_orders(client)
         except Exception as e:
-            print(f"[auto-set-par] item fetch failed for {loc_name}: {e}")
-            items = []
+            print(f"[auto-set-par] Clover fetch failed for {loc_name}: {e}")
+            raise RuntimeError(
+                f"Clover didn't respond for {loc_name} ({e}). No PAR levels were changed."
+            ) from e
 
+        tally = _SalesTally({item.get("id") for item in items if item.get("id")})
+        tally.add_clover_orders(orders)
+
+        # Fold the website's own sales into HQ (same source Smart PAR uses).
+        if str(merchant_id) == str(HQ_MERCHANT_ID):
+            tally.add_ecommerce_rows(ecommerce_sales)
+
+        latest_ts = tally.latest_ts
+        days_of_data = _days_of_data(tally.earliest_ts, latest_ts)
+
+        # 2. Compute PAR for each item currently at this location.
         loc_items = 0
         loc_with_par = 0
         for item in items:
@@ -4434,11 +4476,8 @@ async def _run_auto_set_par(months: float, db: aiosqlite.Connection) -> dict:
             if not display_sku:
                 continue
             name = " ".join((item.get("name") or "").split())
-            norm = _normalise_sales_name(name)
-            units_sold = sales_by_name.get(norm, 0)
-            product_days = _product_days_of_data(
-                first_sale_ts.get(norm), latest_ts, days_of_data
-            )
+            units_sold, first_ts = tally.product_sales(name, [clover_id])
+            product_days = _product_days_of_data(first_ts, latest_ts, days_of_data)
             units_per_month = (units_sold / product_days) * 30.44
             par_level = round(units_per_month * months)
             loc_par_rows.append((display_sku, loc_id, float(par_level)))
