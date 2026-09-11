@@ -33,7 +33,11 @@ async def db():
 def test_bulk_matches_same_form_and_strain():
     bulk = "Bulk - Blue Dream Sativa THC Flower Grams"
     assert bulk_matches_product(bulk, "THC FLOWER BLUE DREAM SATIVA 3.5 GRAMS")
-    assert bulk_matches_product(bulk, "THC FLOWER SMALLS BLUE DREAM 2 GRAMS")
+    assert bulk_matches_product(bulk, "THC FLOWER BLUE DREAM SATIVA 1 GRAM")
+    # Smalls / ground are their own bulk; regular flower bulk doesn't make them.
+    assert not bulk_matches_product(bulk, "THC FLOWER SMALLS BLUE DREAM 2 GRAMS")
+    assert bulk_matches_product("Bulk - Blue Dream THC Smalls Flower Grams", "THC FLOWER SMALLS BLUE DREAM 2 GRAMS")
+    assert not bulk_matches_product("Bulk - Blue Dream THC Smalls Flower Grams", "THC FLOWER BLUE DREAM SATIVA 3.5 GRAMS")
     # Pre-rolls are a different form even though the strain matches.
     assert not bulk_matches_product(bulk, "THC PRE ROLLED JOINT SATIVA BLUE DREAM")
     # Other strains don't match.
@@ -65,18 +69,18 @@ def _row(name, order_qty):
 def test_netting_shares_bulk_without_double_counting():
     rows = [
         _row("THC FLOWER BLUE DREAM SATIVA 3.5 GRAMS", 100),  # needs 350g
-        _row("THC FLOWER SMALLS BLUE DREAM 2 GRAMS", 50),      # needs 100g
+        _row("THC FLOWER BLUE DREAM SATIVA 1 GRAM", 50),       # needs 50g
         _row("THC FLOWER GREEN CRACK SATIVA 3.5 GRAMS", 20),
     ]
-    pool = {"Bulk - Blue Dream Sativa THC Flower Grams": 400}
+    pool = {"Bulk - Blue Dream Sativa THC Flower Grams": 375}
     apply_bulk_netting(rows, pool, recipes={})
 
-    eighth, smalls, gc = rows
-    # 400g: 100 x 3.5g eighths first (350g), then 25 x 2g smalls from the 50g left.
+    eighth, gram, gc = rows
+    # 375g: 100 x 3.5g eighths first (350g), then 25 x 1g from the 25g left.
     assert eighth["bulk_covers"] == 100 and eighth["order_qty"] == 0
-    assert smalls["bulk_covers"] == 25 and smalls["order_qty"] == 25
-    assert eighth["bulk_stock"] == 400 and eighth["bulk_unit"] == "g"
-    assert smalls["gross_order_qty"] == 50
+    assert gram["bulk_covers"] == 25 and gram["order_qty"] == 25
+    assert eighth["bulk_stock"] == 375 and eighth["bulk_unit"] == "g"
+    assert gram["gross_order_qty"] == 50
     assert gc["bulk_name"] is None and gc["order_qty"] == 20
 
 

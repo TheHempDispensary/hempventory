@@ -16,6 +16,7 @@ from app.auth import get_current_user
 from app.database import get_db
 from app.clover_client import CloverClient
 from app.routers.inventory_router import smart_par, _do_sync, _normalise_sales_name
+from app.smart_par_bulk import bulk_per_unit_for
 
 router = APIRouter(prefix="/api/production", tags=["production"])
 
@@ -126,9 +127,10 @@ async def _deduct_from_bulk(bulk_name: str, amount: float) -> dict:
 
 
 async def _apply_bulk_deduction(db, packaged_name: str, packaged_sku: str, units: float) -> Optional[dict]:
-    """If the packaged product has a bulk recipe, deduct units x per-unit from bulk.
-
-    Returns the deduction result (or None when no recipe is linked).
+    """Deduct units x per-unit from the bulk product linked to this packaged
+    item (its `bulk_recipes` row). Linking is deliberately manual so bulk is
+    never pulled from a wrong jar; an unlinked product returns a not-ok result
+    so the operator is told nothing was deducted.
     """
     if units <= 0:
         return None
@@ -140,12 +142,15 @@ async def _apply_bulk_deduction(db, packaged_name: str, packaged_sku: str, units
         (key,),
     )
     recipe = await cursor.fetchone()
-    if not recipe:
-        return None
+    if not recipe or not recipe["bulk_name"]:
+        return {
+            "ok": False, "unlinked": True,
+            "reason": f"'{packaged_name}' is not linked to a bulk product - open the batch and pick one",
+        }
     bulk_name = recipe["bulk_name"]
-    per_unit = recipe["bulk_per_unit"] or 0
-    if not bulk_name or per_unit <= 0:
-        return None
+    per_unit = bulk_per_unit_for(packaged_name, bulk_name, recipe["bulk_per_unit"] or 0)
+    if per_unit <= 0:
+        return {"ok": False, "reason": f"no per-unit amount set for {bulk_name}"}
     return await _deduct_from_bulk(bulk_name, units * per_unit)
 
 

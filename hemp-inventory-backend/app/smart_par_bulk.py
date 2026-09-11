@@ -29,6 +29,9 @@ _FORMS = (
     ("flower", re.compile(r"\bflower\b|\bsmalls\b|\bshake\b|\bbud\b|\bpopcorn\b")),
 )
 
+# Flower grades: bulk smalls only make smalls, ground only makes ground, etc.
+_GRADES = ("smalls", "ground", "shake", "popcorn", "bigs")
+
 _GRAMS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:G|GRAMS?)\b")
 _WORD_GRAMS = (("HALF GRAM", 0.5), ("ONE GRAM", 1.0), ("TWO GRAM", 2.0), ("THREE GRAM", 3.0), ("FOUR GRAM", 4.0))
 
@@ -49,6 +52,10 @@ def _ignorable(tok: str) -> bool:
     return tok in _GENERIC_TOKENS or tok.isdigit()
 
 
+def _grade(tokens: set[str]) -> frozenset[str]:
+    return frozenset(g for g in _GRADES if g in tokens)
+
+
 def bulk_matches_product(bulk: str, product: str) -> bool:
     """A bulk feeds a product when both are the same form and every
     distinguishing word of the bulk name appears in the product name."""
@@ -59,6 +66,8 @@ def bulk_matches_product(bulk: str, product: str) -> bool:
     if all(_ignorable(t) for t in bulk_tokens):
         return False
     product_tokens = tokenize(product)
+    if _grade(bulk_tokens) != _grade(product_tokens):
+        return False
     return all(_ignorable(t) or t in product_tokens for t in bulk_tokens)
 
 
@@ -100,12 +109,19 @@ def collect_bulk_pool(items: list[dict]) -> dict[str, float]:
     return pool
 
 
-def _per_unit(product_name: str, bulk_name: str, recipe_per_unit: float | None) -> float:
+def bulk_per_unit_for(product_name: str, bulk_name: str, recipe_per_unit: float | None) -> float:
+    """Bulk consumed per finished unit. For bulk tracked in grams the weight in
+    the packaged name is authoritative (a "3.5 GRAMS" jar always uses 3.5g);
+    the saved recipe value is only used when the name carries no weight, and
+    count-based bulk (pre-rolls, vapes, gummies) defaults to one piece."""
+    weight = bulk_is_weight(bulk_name)
+    if weight:
+        grams = grams_per_package(product_name)
+        if grams > 0:
+            return grams
     if recipe_per_unit and recipe_per_unit > 0:
         return recipe_per_unit
-    if bulk_is_weight(bulk_name):
-        return grams_per_package(product_name)
-    return 1.0
+    return 0.0 if weight else 1.0
 
 
 def apply_bulk_netting(
@@ -153,7 +169,7 @@ def apply_bulk_netting(
                     break
         if not bulk_name:
             continue
-        per_unit = _per_unit(r["name"], bulk_name, recipe_per_unit)
+        per_unit = bulk_per_unit_for(r["name"], bulk_name, recipe_per_unit)
         r["bulk_name"] = bulk_name
         r["bulk_stock"] = bulk_pool[bulk_name]
         r["bulk_unit"] = "g" if bulk_is_weight(bulk_name) else "units"

@@ -86,6 +86,37 @@ const FORMS: { form: string; test: RegExp }[] = [
 const productForm = (name: string): string | null =>
   FORMS.find(({ test }) => test.test(name.toLowerCase()))?.form ?? null;
 
+// Flower grades: bulk smalls only make smalls, ground only makes ground, etc.
+const GRADES = ["smalls", "ground", "shake", "popcorn", "bigs"];
+const grade = (tokens: Set<string>) => GRADES.filter((g) => tokens.has(g)).join(",");
+
+// Bulk flower/concentrate is tracked in grams; vapes, pre-rolls and edibles by the piece.
+const bulkIsWeight = (bulk: string) => {
+  const f = productForm(bulk);
+  return (f === "flower" || f === "concentrate") && /\bGRAMS?\b|\bOZ\b|\bPOUND/i.test(bulk);
+};
+
+const WORD_GRAMS: [string, number][] = [["HALF GRAM", 0.5], ["ONE GRAM", 1], ["TWO GRAM", 2], ["THREE GRAM", 3], ["FOUR GRAM", 4]];
+const gramsPerPackage = (product: string): number => {
+  const up = product.toUpperCase();
+  const m = up.match(/(\d+(?:\.\d+)?)\s*(?:G|GRAMS?)\b/);
+  if (m) return Number(m[1]) || 0;
+  return WORD_GRAMS.find(([w]) => up.includes(w))?.[1] ?? 0;
+};
+
+// Bulk one finished unit consumes. Mirrors the backend `bulk_per_unit_for`: the
+// weight in the product name wins for gram-tracked bulk, the saved recipe value
+// is used when the name has no weight, and piece-counted bulk defaults to 1.
+const bulkPerUnitFor = (product: string, bulk: string, recipePerUnit: number): number => {
+  const weight = bulkIsWeight(bulk);
+  if (weight) {
+    const g = gramsPerPackage(product);
+    if (g > 0) return g;
+  }
+  if (recipePerUnit > 0) return recipePerUnit;
+  return weight ? 0 : 1;
+};
+
 /**
  * Bulk names describe their source product ("Bulk - Skywalker OG Indica THC
  * Flower Grams"), so a bulk item belongs to a packaged product when it is the
@@ -100,8 +131,11 @@ const bulkMatchesProduct = (bulk: string, product: string): boolean => {
   const productTokens = tokenize(product);
   const ignorable = (t: string) => GENERIC_TOKENS.has(t) || /^\d+$/.test(t);
   if ([...bulkTokens].every(ignorable)) return false;
+  if (grade(bulkTokens) !== grade(productTokens)) return false;
   return [...bulkTokens].every((t) => ignorable(t) || productTokens.has(t));
 };
+
+type DoneWindow = "7" | "30" | "all";
 
 type SortField = "name" | "in_stock" | "units_per_month" | "needed" | "already_planned" | "to_produce" | "bulk";
 
@@ -128,6 +162,16 @@ export default function Production() {
 
   const [bulkItems, setBulkItems] = useState<BulkItem[]>([]);
   const [bulkRecipes, setBulkRecipes] = useState<BulkRecipe[]>([]);
+
+  // Finished cards pile up forever; default the Done column to this week so
+  // the latest work is on top and nothing looks like it disappeared.
+  const [doneWindow, setDoneWindow] = useState<DoneWindow>("7");
+  const doneCutoff = useMemo(() => {
+    if (doneWindow === "all") return "";
+    const d = new Date();
+    d.setDate(d.getDate() - Number(doneWindow));
+    return d.toISOString().slice(0, 19).replace("T", " ");
+  }, [doneWindow]);
 
   const [sortField, setSortField] = useState<SortField>("to_produce");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
@@ -314,7 +358,13 @@ export default function Production() {
     }
   };
 
-  const removeBatch = async (id: number) => {
+  const removeBatch = async (b: ProductionBatch) => {
+    const what = `"${b.product_name}" (${b.produced_qty || b.planned_qty} ${b.status === "done" ? "made" : "planned"})`;
+    const note = b.status === "done"
+      ? "\n\nThis only removes the card. HQ stock and bulk already adjusted stay as they are."
+      : "";
+    if (!window.confirm(`Delete batch ${what}?${note}`)) return;
+    const id = b.id;
     await deleteProductionBatch(id);
     setBatches((prev) => prev.filter((b) => b.id !== id));
     await loadPlan(SUPPLY_MONTHS);
@@ -344,7 +394,7 @@ export default function Production() {
     for (const r of bulkRecipes) {
       const stock = stockByBulk.get(normName(r.bulk_name));
       if (stock === undefined) continue;
-      const perUnit = r.bulk_per_unit || 0;
+      const perUnit = bulkPerUnitFor(r.packaged_name, r.bulk_name, r.bulk_per_unit || 0);
       map.set(normName(r.packaged_name), {
         name: r.bulk_name,
         stock,
@@ -363,7 +413,14 @@ export default function Production() {
         .filter(({ item }) => bulkMatchesProduct(item.name, name))
         .sort((a, b) => b.tokens.size - a.tokens.size)[0];
       if (!best) continue;
-      map.set(key, { name: best.item.name, stock: best.item.stock, perUnit: 0, makes: 0, inferred: true });
+      const perUnit = bulkPerUnitFor(name, best.item.name, 0);
+      map.set(key, {
+        name: best.item.name,
+        stock: best.item.stock,
+        perUnit,
+        makes: perUnit > 0 ? Math.floor(best.item.stock / perUnit) : 0,
+        inferred: true,
+      });
     }
     return map;
   }, [bulkItems, bulkRecipes, plan, batches]);
@@ -629,7 +686,10 @@ export default function Production() {
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
             {STATUS_COLUMNS.map((col) => {
               const Icon = col.icon;
-              const colBatches = batches.filter((b) => b.status === col.id);
+              const allInCol = batches.filter((b) => b.status === col.id);
+              const colBatches = col.id === "done" && doneWindow !== "all"
+                ? allInCol.filter((b) => (b.completed_at || b.updated_at || "") >= doneCutoff)
+                : allInCol;
               return (
                 <div
                   key={col.id}
@@ -640,7 +700,20 @@ export default function Production() {
                   <div className="flex items-center gap-2 mb-3 px-1">
                     <Icon className={`w-4 h-4 ${col.color}`} />
                     <span className="font-semibold text-sm text-gray-700">{col.label}</span>
-                    <span className="ml-auto text-xs text-gray-400">{colBatches.length}</span>
+                    {col.id === "done" ? (
+                      <select
+                        value={doneWindow}
+                        onChange={(e) => setDoneWindow(e.target.value as DoneWindow)}
+                        className="ml-auto text-xs text-gray-500 bg-transparent border border-gray-200 rounded px-1 py-0.5"
+                        title="Which finished batches to show"
+                      >
+                        <option value="7">Last 7 days ({colBatches.length})</option>
+                        <option value="30">Last 30 days</option>
+                        <option value="all">All ({allInCol.length})</option>
+                      </select>
+                    ) : (
+                      <span className="ml-auto text-xs text-gray-400">{colBatches.length}</span>
+                    )}
                   </div>
                   <div className="space-y-2 min-h-[8px]">
                     {colBatches.map((b, idx) => {
@@ -692,7 +765,7 @@ export default function Production() {
                             <button onClick={() => setEditing(b)} title="Edit / rename / add note" className="text-gray-300 hover:text-green-600">
                               <Pencil className="w-3.5 h-3.5" />
                             </button>
-                            <button onClick={() => removeBatch(b.id)} title="Delete batch" className="text-gray-300 hover:text-red-500">
+                            <button onClick={() => removeBatch(b)} title="Delete batch" className="text-gray-300 hover:text-red-500">
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
                           </div>
@@ -864,6 +937,20 @@ function BatchModal({ batch, products, onClose, onSaved }: {
     return m ? m[0] : "";
   }, [form.size]);
 
+  // Bulk that looks like this product by name, offered as a suggestion only —
+  // the operator has to pick it so bulk is never pulled from the wrong jar.
+  const suggestedBulk = useMemo(() => {
+    const c = bulkItems.filter((b) => bulkMatchesProduct(b.name, form.product_name));
+    if (!c.length) return "";
+    return c.reduce((a, b) => (tokenize(b.name).size > tokenize(a.name).size ? b : a)).name;
+  }, [bulkItems, form.product_name]);
+  // For gram bulk the weight in the product name is what one unit uses; the
+  // typed value only matters for piece bulk or names without a weight.
+  const nameGrams = bulkName && bulkIsWeight(bulkName) ? gramsPerPackage(form.product_name) : 0;
+  const effectivePerUnit = bulkName
+    ? bulkPerUnitFor(form.product_name, bulkName, Number(bulkPerUnit || defaultPerUnit) || 0)
+    : 0;
+
   const set = <K extends keyof ProductionBatch>(k: K, v: ProductionBatch[K]) =>
     setForm((f) => ({ ...f, [k]: v }));
 
@@ -901,7 +988,7 @@ function BatchModal({ batch, products, onClose, onSaved }: {
     // Persist the packaged->bulk link before finishing so the deduction on
     // "Done" uses the latest values. A bulk product with no per-unit amount
     // can't be deducted, so require it rather than silently dropping the link.
-    const perUnit = Number(bulkPerUnit || defaultPerUnit);
+    const perUnit = nameGrams > 0 ? nameGrams : Number(bulkPerUnit || defaultPerUnit);
     if (bulkName && !(perUnit > 0)) {
       setErr('Enter how much bulk each unit uses (e.g. 3.5 for a 3.5g jar, 10 for a 10-count) to link this to its bulk product.');
       setSaving(false);
@@ -1052,7 +1139,8 @@ function BatchModal({ batch, products, onClose, onSaved }: {
             <label className={label}>Made from bulk product</label>
             <p className="text-xs text-gray-500 -mt-1">
               Link this packaged item to the bulk it's made from. When marked <strong>Done</strong>,
-              (units × amount per unit) is deducted from the bulk product.
+              (produced units × amount per unit) is deducted from the bulk product. Nothing is
+              deducted for an unlinked item.
             </p>
             <div className="grid grid-cols-3 gap-2">
               <select
@@ -1070,15 +1158,30 @@ function BatchModal({ batch, products, onClose, onSaved }: {
                 className={input}
                 value={bulkPerUnit}
                 onChange={(e) => setBulkPerUnit(e.target.value)}
-                placeholder={defaultPerUnit || "per unit"}
-                title="Amount of bulk used per finished unit (grams or pieces)"
+                placeholder={(nameGrams > 0 ? String(nameGrams) : defaultPerUnit) || "per unit"}
+                disabled={nameGrams > 0}
+                title={nameGrams > 0
+                  ? `Per unit comes from the product name (${nameGrams}g)`
+                  : "Amount of bulk used per finished unit (grams or pieces) — per ONE unit, not the whole batch"}
               />
             </div>
-            {bulkName && (Number(bulkPerUnit || defaultPerUnit) > 0) && (
+            {bulkName && effectivePerUnit > 0 && (
               <p className="text-xs text-amber-700">
-                Will pull {(Number(form.produced_qty) || Number(form.planned_qty) || 0) * Number(bulkPerUnit || defaultPerUnit)}
+                Will pull {(Number(form.produced_qty) || Number(form.planned_qty) || 0) * effectivePerUnit}
                 {" "}from <strong>{bulkName}</strong> on Done
-                {" "}({Number(form.produced_qty) || Number(form.planned_qty) || 0} units × {Number(bulkPerUnit || defaultPerUnit)}).
+                {" "}({Number(form.produced_qty) || Number(form.planned_qty) || 0} units × {effectivePerUnit}
+                {nameGrams > 0 ? "g, from the product name" : " per unit"}).
+              </p>
+            )}
+            {!bulkName && (
+              <p className="text-xs text-red-600">
+                Not linked — no bulk will be deducted on Done.
+                {suggestedBulk && (
+                  <>
+                    {" "}Looks like <strong>{suggestedBulk}</strong>?{" "}
+                    <button type="button" className="underline" onClick={() => setBulkName(suggestedBulk)}>Use it</button>
+                  </>
+                )}
               </p>
             )}
           </div>
