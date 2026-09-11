@@ -903,16 +903,18 @@ function BatchModal({ batch, products, onClose, onSaved }: {
     return m ? m[0] : "";
   }, [form.size]);
 
-  // What Done will actually deduct: the linked bulk, or the bulk inferred from
-  // the product name when nothing is linked, at the per-unit the backend uses.
-  const inferredBulk = useMemo(() => {
+  // Bulk that looks like this product by name, offered as a suggestion only —
+  // the operator has to pick it so bulk is never pulled from the wrong jar.
+  const suggestedBulk = useMemo(() => {
     const c = bulkItems.filter((b) => bulkMatchesProduct(b.name, form.product_name));
     if (!c.length) return "";
     return c.reduce((a, b) => (tokenize(b.name).size > tokenize(a.name).size ? b : a)).name;
   }, [bulkItems, form.product_name]);
-  const effectiveBulk = bulkName || inferredBulk;
-  const effectivePerUnit = effectiveBulk
-    ? bulkPerUnitFor(form.product_name, effectiveBulk, Number(bulkPerUnit || defaultPerUnit) || 0)
+  // For gram bulk the weight in the product name is what one unit uses; the
+  // typed value only matters for piece bulk or names without a weight.
+  const nameGrams = bulkName && bulkIsWeight(bulkName) ? gramsPerPackage(form.product_name) : 0;
+  const effectivePerUnit = bulkName
+    ? bulkPerUnitFor(form.product_name, bulkName, Number(bulkPerUnit || defaultPerUnit) || 0)
     : 0;
 
   const set = <K extends keyof ProductionBatch>(k: K, v: ProductionBatch[K]) =>
@@ -952,7 +954,7 @@ function BatchModal({ batch, products, onClose, onSaved }: {
     // Persist the packaged->bulk link before finishing so the deduction on
     // "Done" uses the latest values. A bulk product with no per-unit amount
     // can't be deducted, so require it rather than silently dropping the link.
-    const perUnit = Number(bulkPerUnit || defaultPerUnit);
+    const perUnit = nameGrams > 0 ? nameGrams : Number(bulkPerUnit || defaultPerUnit);
     if (bulkName && !(perUnit > 0)) {
       setErr('Enter how much bulk each unit uses (e.g. 3.5 for a 3.5g jar, 10 for a 10-count) to link this to its bulk product.');
       setSaving(false);
@@ -1102,9 +1104,9 @@ function BatchModal({ batch, products, onClose, onSaved }: {
           <div className="bg-amber-50 border border-amber-100 rounded-lg p-3 space-y-2">
             <label className={label}>Made from bulk product</label>
             <p className="text-xs text-gray-500 -mt-1">
-              When marked <strong>Done</strong>, bulk is deducted automatically — matched by name
-              (strain + smalls/ground/flower) and using the weight in the product name for
-              gram bulk. Pick a bulk here only to override the automatic match.
+              Link this packaged item to the bulk it's made from. When marked <strong>Done</strong>,
+              (produced units × amount per unit) is deducted from the bulk product. Nothing is
+              deducted for an unlinked item.
             </p>
             <div className="grid grid-cols-3 gap-2">
               <select
@@ -1122,20 +1124,30 @@ function BatchModal({ batch, products, onClose, onSaved }: {
                 className={input}
                 value={bulkPerUnit}
                 onChange={(e) => setBulkPerUnit(e.target.value)}
-                placeholder={defaultPerUnit || "per unit"}
-                title="Amount of bulk used per finished unit (grams or pieces)"
+                placeholder={(nameGrams > 0 ? String(nameGrams) : defaultPerUnit) || "per unit"}
+                disabled={nameGrams > 0}
+                title={nameGrams > 0
+                  ? `Per unit comes from the product name (${nameGrams}g)`
+                  : "Amount of bulk used per finished unit (grams or pieces) — per ONE unit, not the whole batch"}
               />
             </div>
-            {effectiveBulk && effectivePerUnit > 0 ? (
+            {bulkName && effectivePerUnit > 0 && (
               <p className="text-xs text-amber-700">
                 Will pull {(Number(form.produced_qty) || Number(form.planned_qty) || 0) * effectivePerUnit}
-                {" "}from <strong>{effectiveBulk}</strong> on Done
+                {" "}from <strong>{bulkName}</strong> on Done
                 {" "}({Number(form.produced_qty) || Number(form.planned_qty) || 0} units × {effectivePerUnit}
-                {bulkName ? "" : ", auto-matched"}).
+                {nameGrams > 0 ? "g, from the product name" : " per unit"}).
               </p>
-            ) : (
+            )}
+            {!bulkName && (
               <p className="text-xs text-red-600">
-                No bulk product matches this item by name — pick one above or nothing will be deducted on Done.
+                Not linked — no bulk will be deducted on Done.
+                {suggestedBulk && (
+                  <>
+                    {" "}Looks like <strong>{suggestedBulk}</strong>?{" "}
+                    <button type="button" className="underline" onClick={() => setBulkName(suggestedBulk)}>Use it</button>
+                  </>
+                )}
               </p>
             )}
           </div>

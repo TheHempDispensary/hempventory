@@ -71,14 +71,6 @@ def bulk_matches_product(bulk: str, product: str) -> bool:
     return all(_ignorable(t) or t in product_tokens for t in bulk_tokens)
 
 
-def infer_bulk_name(packaged_name: str, bulk_names: list[str]) -> str | None:
-    """Best bulk for a packaged item by name; the most specific match wins."""
-    candidates = [b for b in bulk_names if bulk_matches_product(b, packaged_name)]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda b: len(tokenize(b)))
-
-
 def bulk_is_weight(bulk_name: str) -> bool:
     """Bulk flower/concentrate is tracked in grams; vapes, pre-rolls and
     edibles are counted by the piece even when the name carries a size
