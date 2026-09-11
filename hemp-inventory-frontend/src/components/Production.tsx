@@ -283,6 +283,43 @@ export default function Production() {
     await loadPlan(SUPPLY_MONTHS); // refresh already_planned
   };
 
+  // Today's Smart PAR need per product, so a card added last week can be
+  // compared against what's needed now (planned_qty is frozen on creation).
+  const planBySku = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const p of plan) {
+      if (p.sku) m.set(p.sku, p.to_produce);
+      m.set(normName(p.name), p.to_produce);
+    }
+    return m;
+  }, [plan]);
+  const currentNeed = (b: ProductionBatch): number | undefined =>
+    (b.sku ? planBySku.get(b.sku) : undefined) ?? planBySku.get(normName(b.product_name));
+  const daysOnBoard = (b: ProductionBatch): number => {
+    const t = new Date(b.created_at.replace(" ", "T") + (b.created_at.endsWith("Z") ? "" : "Z")).getTime();
+    return Number.isFinite(t) ? Math.floor((Date.now() - t) / 86_400_000) : 0;
+  };
+  const isStale = (b: ProductionBatch) => {
+    if (b.status === "done" || b.produced_qty) return false;
+    const need = currentNeed(b);
+    return need !== undefined && need > 0 && need !== b.planned_qty;
+  };
+
+  const refreshQty = async (b: ProductionBatch) => {
+    const need = currentNeed(b);
+    if (need === undefined) return;
+    const res = await updateProductionBatch(b.id, { planned_qty: need });
+    setBatches((prev) => prev.map((x) => (x.id === b.id ? res.data : x)));
+  };
+
+  const refreshAllQty = async () => {
+    const stale = batches.filter(isStale);
+    if (!stale.length) return;
+    if (!window.confirm(`Update ${stale.length} planned card${stale.length === 1 ? "" : "s"} to today's Smart PAR quantity?`)) return;
+    for (const b of stale) await refreshQty(b);
+    flash(`Updated ${stale.length} card${stale.length === 1 ? "" : "s"} to today's Smart PAR need.`);
+  };
+
   const openBatchForPlanItem = (item: ProductionPlanItem) => {
     setEditing({
       id: 0, sku: item.sku, product_name: item.name, size: null,
@@ -712,7 +749,19 @@ export default function Production() {
                         <option value="all">All ({allInCol.length})</option>
                       </select>
                     ) : (
-                      <span className="ml-auto text-xs text-gray-400">{colBatches.length}</span>
+                      <span className="ml-auto flex items-center gap-2 text-xs text-gray-400">
+                        {col.id === "planned" && batches.some(isStale) && (
+                          <button
+                            type="button"
+                            onClick={refreshAllQty}
+                            title="Set every out-of-date planned card to today's Smart PAR need"
+                            className="text-amber-700 hover:underline"
+                          >
+                            Update {batches.filter(isStale).length} to today
+                          </button>
+                        )}
+                        {colBatches.length}
+                      </span>
                     )}
                   </div>
                   <div className="space-y-2 min-h-[8px]">
@@ -794,6 +843,13 @@ export default function Production() {
                           <div>
                             Qty: {b.status === "done" || b.produced_qty ? `${b.produced_qty || b.planned_qty} made` : `${b.planned_qty} planned`}
                           </div>
+                          {isStale(b) && (
+                            <div className="text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-1">
+                              Smart PAR now says <b>{currentNeed(b)}</b>
+                              {daysOnBoard(b) > 0 && ` (on board ${daysOnBoard(b)}d)`}{" "}
+                              <button type="button" className="underline" onClick={() => refreshQty(b)}>Update</button>
+                            </div>
+                          )}
                           {b.batch_no && <div>Batch #{b.batch_no}</div>}
                           {b.expiration_date && <div>Exp: {b.expiration_date}</div>}
                           {b.made_by && <div>By: {b.made_by}</div>}
