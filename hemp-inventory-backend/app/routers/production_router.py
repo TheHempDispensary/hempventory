@@ -384,7 +384,7 @@ async def seed_flags(
 
 @router.get("/plan")
 async def production_plan(
-    months: int = 3,
+    months: int = 1,
     user: dict = Depends(get_current_user),
     db: aiosqlite.Connection = Depends(get_db),
 ):

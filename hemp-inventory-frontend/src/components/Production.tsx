@@ -12,7 +12,7 @@ import {
 } from "../lib/api";
 import { etToday, formatDateOnly, matchesSearch } from "../lib/utils";
 
-const MONTH_OPTIONS = [1, 3, 4, 6, 12];
+const SUPPLY_MONTHS = 1;
 
 const STATUS_COLUMNS: { id: ProductionBatch["status"]; label: string; icon: typeof ClipboardList; color: string }[] = [
   { id: "planned", label: "Planned", icon: ClipboardList, color: "text-gray-500" },
@@ -111,7 +111,6 @@ const shortLocation = (name: string) =>
 
 export default function Production() {
   const [tab, setTab] = useState<Tab>("plan");
-  const [months, setMonths] = useState(3);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -218,7 +217,7 @@ export default function Production() {
     } catch { /* non-fatal */ }
   };
 
-  useEffect(() => { loadPlan(months); }, [months]);
+  useEffect(() => { loadPlan(SUPPLY_MONTHS); }, []);
   useEffect(() => { loadBatches(); loadInventory(); loadBulk(); }, []);
 
   const flash = (msg: string) => {
@@ -237,7 +236,7 @@ export default function Production() {
     };
     const res = await createProductionBatch(payload);
     setBatches((prev) => [res.data, ...prev]);
-    await loadPlan(months); // refresh already_planned
+    await loadPlan(SUPPLY_MONTHS); // refresh already_planned
   };
 
   const openBatchForPlanItem = (item: ProductionPlanItem) => {
@@ -279,7 +278,7 @@ export default function Production() {
       }
       setBatches((prev) => [...created, ...prev]);
       flash(`Added ${created.length} batch${created.length === 1 ? "" : "es"} to the board.`);
-      await loadPlan(months);
+      await loadPlan(SUPPLY_MONTHS);
     } catch (e: unknown) {
       flash(e instanceof Error ? e.message : "Couldn't create batches.");
     } finally { setBulkAdding(false); }
@@ -299,7 +298,7 @@ export default function Production() {
     } else if (bulkMsg) {
       flash(`"${b.product_name}" marked Done.${bulkMsg}`);
     }
-    loadPlan(months);
+    loadPlan(SUPPLY_MONTHS);
   };
 
   const pushToInventory = async (b: ProductionBatch) => {
@@ -308,7 +307,7 @@ export default function Production() {
       setBatches((prev) => prev.map((x) => (x.id === b.id ? res.data : x)));
       const inv = res.data.inventory_result;
       if (inv?.ok) flash(`Added ${inv.added} of "${b.product_name}" to HQ stock (${inv.previous} → ${inv.new}).${bulkFlash(res.data.bulk_result)}`);
-      loadPlan(months);
+      loadPlan(SUPPLY_MONTHS);
     } catch (e: unknown) {
       const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
       flash(msg || "Could not add to HQ stock.");
@@ -318,7 +317,7 @@ export default function Production() {
   const removeBatch = async (id: number) => {
     await deleteProductionBatch(id);
     setBatches((prev) => prev.filter((b) => b.id !== id));
-    await loadPlan(months);
+    await loadPlan(SUPPLY_MONTHS);
   };
 
   // Live stock per catalog SKU, so a board card can show what's already on the
@@ -416,11 +415,11 @@ export default function Production() {
             Production
           </h1>
           <p className="text-sm text-gray-500 mt-1">
-            Auto-planned from Smart PAR &mdash; make what you're short on, and track each batch to done
+            Auto-planned from 1-month Smart PAR &mdash; make what you're short on, and track each batch to done
           </p>
         </div>
         <button
-          onClick={() => { loadPlan(months); loadBatches(); }}
+          onClick={() => { loadPlan(SUPPLY_MONTHS); loadBatches(); }}
           disabled={loading}
           className="flex items-center gap-2 px-3 py-2 text-sm bg-white border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50"
         >
@@ -457,27 +456,6 @@ export default function Production() {
       {/* ── PLAN ─────────────────────────────────────────────────── */}
       {tab === "plan" && (
         <div className="space-y-4">
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 flex flex-col sm:flex-row sm:items-center gap-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Supply Window</label>
-              <p className="text-xs text-gray-400">How many months to keep on hand</p>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {MONTH_OPTIONS.map((m) => (
-                <button
-                  key={m}
-                  onClick={() => setMonths(m)}
-                  disabled={loading}
-                  className={`px-4 py-2 rounded-lg text-sm font-medium border transition-colors ${
-                    months === m ? "bg-green-600 text-white border-green-600" : "bg-white text-gray-700 border-gray-300 hover:bg-gray-50"
-                  } disabled:opacity-50`}
-                >
-                  {m} {m === 1 ? "Month" : "Months"}
-                </button>
-              ))}
-            </div>
-          </div>
-
           {(
             <>
               <div className="relative">
@@ -801,7 +779,7 @@ export default function Production() {
             } else if (bulkMsg) {
               flash(`"${saved.product_name}" marked Done.${bulkMsg}`);
             }
-            loadPlan(months);
+            loadPlan(SUPPLY_MONTHS);
           }}
         />
       )}
