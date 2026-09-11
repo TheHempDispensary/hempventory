@@ -135,6 +135,8 @@ const bulkMatchesProduct = (bulk: string, product: string): boolean => {
   return [...bulkTokens].every((t) => ignorable(t) || productTokens.has(t));
 };
 
+type DoneWindow = "7" | "30" | "all";
+
 type SortField = "name" | "in_stock" | "units_per_month" | "needed" | "already_planned" | "to_produce" | "bulk";
 
 // "Hemp Dispensary East Location" -> "East"
@@ -160,6 +162,16 @@ export default function Production() {
 
   const [bulkItems, setBulkItems] = useState<BulkItem[]>([]);
   const [bulkRecipes, setBulkRecipes] = useState<BulkRecipe[]>([]);
+
+  // Finished cards pile up forever; default the Done column to this week so
+  // the latest work is on top and nothing looks like it disappeared.
+  const [doneWindow, setDoneWindow] = useState<DoneWindow>("7");
+  const doneCutoff = useMemo(() => {
+    if (doneWindow === "all") return "";
+    const d = new Date();
+    d.setDate(d.getDate() - Number(doneWindow));
+    return d.toISOString().slice(0, 19).replace("T", " ");
+  }, [doneWindow]);
 
   const [sortField, setSortField] = useState<SortField>("to_produce");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
@@ -346,7 +358,13 @@ export default function Production() {
     }
   };
 
-  const removeBatch = async (id: number) => {
+  const removeBatch = async (b: ProductionBatch) => {
+    const what = `"${b.product_name}" (${b.produced_qty || b.planned_qty} ${b.status === "done" ? "made" : "planned"})`;
+    const note = b.status === "done"
+      ? "\n\nThis only removes the card. HQ stock and bulk already adjusted stay as they are."
+      : "";
+    if (!window.confirm(`Delete batch ${what}?${note}`)) return;
+    const id = b.id;
     await deleteProductionBatch(id);
     setBatches((prev) => prev.filter((b) => b.id !== id));
     await loadPlan(SUPPLY_MONTHS);
@@ -668,7 +686,10 @@ export default function Production() {
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
             {STATUS_COLUMNS.map((col) => {
               const Icon = col.icon;
-              const colBatches = batches.filter((b) => b.status === col.id);
+              const allInCol = batches.filter((b) => b.status === col.id);
+              const colBatches = col.id === "done" && doneWindow !== "all"
+                ? allInCol.filter((b) => (b.completed_at || b.updated_at || "") >= doneCutoff)
+                : allInCol;
               return (
                 <div
                   key={col.id}
@@ -679,7 +700,20 @@ export default function Production() {
                   <div className="flex items-center gap-2 mb-3 px-1">
                     <Icon className={`w-4 h-4 ${col.color}`} />
                     <span className="font-semibold text-sm text-gray-700">{col.label}</span>
-                    <span className="ml-auto text-xs text-gray-400">{colBatches.length}</span>
+                    {col.id === "done" ? (
+                      <select
+                        value={doneWindow}
+                        onChange={(e) => setDoneWindow(e.target.value as DoneWindow)}
+                        className="ml-auto text-xs text-gray-500 bg-transparent border border-gray-200 rounded px-1 py-0.5"
+                        title="Which finished batches to show"
+                      >
+                        <option value="7">Last 7 days ({colBatches.length})</option>
+                        <option value="30">Last 30 days</option>
+                        <option value="all">All ({allInCol.length})</option>
+                      </select>
+                    ) : (
+                      <span className="ml-auto text-xs text-gray-400">{colBatches.length}</span>
+                    )}
                   </div>
                   <div className="space-y-2 min-h-[8px]">
                     {colBatches.map((b, idx) => {
@@ -731,7 +765,7 @@ export default function Production() {
                             <button onClick={() => setEditing(b)} title="Edit / rename / add note" className="text-gray-300 hover:text-green-600">
                               <Pencil className="w-3.5 h-3.5" />
                             </button>
-                            <button onClick={() => removeBatch(b.id)} title="Delete batch" className="text-gray-300 hover:text-red-500">
+                            <button onClick={() => removeBatch(b)} title="Delete batch" className="text-gray-300 hover:text-red-500">
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
                           </div>
