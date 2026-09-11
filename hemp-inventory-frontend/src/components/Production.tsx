@@ -86,6 +86,37 @@ const FORMS: { form: string; test: RegExp }[] = [
 const productForm = (name: string): string | null =>
   FORMS.find(({ test }) => test.test(name.toLowerCase()))?.form ?? null;
 
+// Flower grades: bulk smalls only make smalls, ground only makes ground, etc.
+const GRADES = ["smalls", "ground", "shake", "popcorn", "bigs"];
+const grade = (tokens: Set<string>) => GRADES.filter((g) => tokens.has(g)).join(",");
+
+// Bulk flower/concentrate is tracked in grams; vapes, pre-rolls and edibles by the piece.
+const bulkIsWeight = (bulk: string) => {
+  const f = productForm(bulk);
+  return (f === "flower" || f === "concentrate") && /\bGRAMS?\b|\bOZ\b|\bPOUND/i.test(bulk);
+};
+
+const WORD_GRAMS: [string, number][] = [["HALF GRAM", 0.5], ["ONE GRAM", 1], ["TWO GRAM", 2], ["THREE GRAM", 3], ["FOUR GRAM", 4]];
+const gramsPerPackage = (product: string): number => {
+  const up = product.toUpperCase();
+  const m = up.match(/(\d+(?:\.\d+)?)\s*(?:G|GRAMS?)\b/);
+  if (m) return Number(m[1]) || 0;
+  return WORD_GRAMS.find(([w]) => up.includes(w))?.[1] ?? 0;
+};
+
+// Bulk one finished unit consumes. Mirrors the backend `bulk_per_unit_for`: the
+// weight in the product name wins for gram-tracked bulk, the saved recipe value
+// is used when the name has no weight, and piece-counted bulk defaults to 1.
+const bulkPerUnitFor = (product: string, bulk: string, recipePerUnit: number): number => {
+  const weight = bulkIsWeight(bulk);
+  if (weight) {
+    const g = gramsPerPackage(product);
+    if (g > 0) return g;
+  }
+  if (recipePerUnit > 0) return recipePerUnit;
+  return weight ? 0 : 1;
+};
+
 /**
  * Bulk names describe their source product ("Bulk - Skywalker OG Indica THC
  * Flower Grams"), so a bulk item belongs to a packaged product when it is the
@@ -100,6 +131,7 @@ const bulkMatchesProduct = (bulk: string, product: string): boolean => {
   const productTokens = tokenize(product);
   const ignorable = (t: string) => GENERIC_TOKENS.has(t) || /^\d+$/.test(t);
   if ([...bulkTokens].every(ignorable)) return false;
+  if (grade(bulkTokens) !== grade(productTokens)) return false;
   return [...bulkTokens].every((t) => ignorable(t) || productTokens.has(t));
 };
 
@@ -344,7 +376,7 @@ export default function Production() {
     for (const r of bulkRecipes) {
       const stock = stockByBulk.get(normName(r.bulk_name));
       if (stock === undefined) continue;
-      const perUnit = r.bulk_per_unit || 0;
+      const perUnit = bulkPerUnitFor(r.packaged_name, r.bulk_name, r.bulk_per_unit || 0);
       map.set(normName(r.packaged_name), {
         name: r.bulk_name,
         stock,
@@ -363,7 +395,14 @@ export default function Production() {
         .filter(({ item }) => bulkMatchesProduct(item.name, name))
         .sort((a, b) => b.tokens.size - a.tokens.size)[0];
       if (!best) continue;
-      map.set(key, { name: best.item.name, stock: best.item.stock, perUnit: 0, makes: 0, inferred: true });
+      const perUnit = bulkPerUnitFor(name, best.item.name, 0);
+      map.set(key, {
+        name: best.item.name,
+        stock: best.item.stock,
+        perUnit,
+        makes: perUnit > 0 ? Math.floor(best.item.stock / perUnit) : 0,
+        inferred: true,
+      });
     }
     return map;
   }, [bulkItems, bulkRecipes, plan, batches]);
@@ -864,6 +903,18 @@ function BatchModal({ batch, products, onClose, onSaved }: {
     return m ? m[0] : "";
   }, [form.size]);
 
+  // What Done will actually deduct: the linked bulk, or the bulk inferred from
+  // the product name when nothing is linked, at the per-unit the backend uses.
+  const inferredBulk = useMemo(() => {
+    const c = bulkItems.filter((b) => bulkMatchesProduct(b.name, form.product_name));
+    if (!c.length) return "";
+    return c.reduce((a, b) => (tokenize(b.name).size > tokenize(a.name).size ? b : a)).name;
+  }, [bulkItems, form.product_name]);
+  const effectiveBulk = bulkName || inferredBulk;
+  const effectivePerUnit = effectiveBulk
+    ? bulkPerUnitFor(form.product_name, effectiveBulk, Number(bulkPerUnit || defaultPerUnit) || 0)
+    : 0;
+
   const set = <K extends keyof ProductionBatch>(k: K, v: ProductionBatch[K]) =>
     setForm((f) => ({ ...f, [k]: v }));
 
@@ -1051,8 +1102,9 @@ function BatchModal({ batch, products, onClose, onSaved }: {
           <div className="bg-amber-50 border border-amber-100 rounded-lg p-3 space-y-2">
             <label className={label}>Made from bulk product</label>
             <p className="text-xs text-gray-500 -mt-1">
-              Link this packaged item to the bulk it's made from. When marked <strong>Done</strong>,
-              (units × amount per unit) is deducted from the bulk product.
+              When marked <strong>Done</strong>, bulk is deducted automatically — matched by name
+              (strain + smalls/ground/flower) and using the weight in the product name for
+              gram bulk. Pick a bulk here only to override the automatic match.
             </p>
             <div className="grid grid-cols-3 gap-2">
               <select
@@ -1074,11 +1126,16 @@ function BatchModal({ batch, products, onClose, onSaved }: {
                 title="Amount of bulk used per finished unit (grams or pieces)"
               />
             </div>
-            {bulkName && (Number(bulkPerUnit || defaultPerUnit) > 0) && (
+            {effectiveBulk && effectivePerUnit > 0 ? (
               <p className="text-xs text-amber-700">
-                Will pull {(Number(form.produced_qty) || Number(form.planned_qty) || 0) * Number(bulkPerUnit || defaultPerUnit)}
-                {" "}from <strong>{bulkName}</strong> on Done
-                {" "}({Number(form.produced_qty) || Number(form.planned_qty) || 0} units × {Number(bulkPerUnit || defaultPerUnit)}).
+                Will pull {(Number(form.produced_qty) || Number(form.planned_qty) || 0) * effectivePerUnit}
+                {" "}from <strong>{effectiveBulk}</strong> on Done
+                {" "}({Number(form.produced_qty) || Number(form.planned_qty) || 0} units × {effectivePerUnit}
+                {bulkName ? "" : ", auto-matched"}).
+              </p>
+            ) : (
+              <p className="text-xs text-red-600">
+                No bulk product matches this item by name — pick one above or nothing will be deducted on Done.
               </p>
             )}
           </div>

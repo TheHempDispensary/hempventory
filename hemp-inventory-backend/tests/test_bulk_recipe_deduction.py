@@ -143,3 +143,40 @@ async def test_deduct_bulk_once_no_recipe_leaves_flag_unset(monkeypatch, db):
     assert res is None
     cur = await db.execute("SELECT bulk_deducted FROM production_batches WHERE id = ?", (row["id"],))
     assert (await cur.fetchone())["bulk_deducted"] == 0
+
+
+async def test_apply_bulk_deduction_infers_bulk_by_name_without_recipe(monkeypatch, db):
+    """Kim/Brandon: batches for products nobody linked never drew down bulk."""
+    fake = _patch_clover(monkeypatch, [
+        {"id": "sm", "name": "Bulk - Skywalker OG THC Smalls Flower Grams", "itemStock": {"quantity": 1000}},
+        {"id": "gr", "name": "Bulk - Skywalker OG THC Ground Flower Grams", "itemStock": {"quantity": 1000}},
+        {"id": "fl", "name": "Bulk - Skywalker OG Indica THC Flower Grams", "itemStock": {"quantity": 1000}},
+    ])
+    # 40 x 7g ground -> 280g from the *ground* bulk only.
+    res = await pr._apply_bulk_deduction(db, "THC GROUND FLOWER SKYWALKER OG Indica 7 GRAMS", "", 40)
+    assert res is not None and res["ok"] and res["inferred"]
+    assert res["bulk_name"] == "Bulk - Skywalker OG THC Ground Flower Grams"
+    assert fake.stock_sets == {"gr": 720}
+    # 4 x 2g smalls -> smalls bulk, not regular flower.
+    res = await pr._apply_bulk_deduction(db, "THC FLOWER SMALLS SKYWALKER OG Indica 2 GRAMS", "", 4)
+    assert res["bulk_name"] == "Bulk - Skywalker OG THC Smalls Flower Grams" and res["new"] == 992
+    # 27 x 1g regular flower -> regular bulk.
+    res = await pr._apply_bulk_deduction(db, "THC FLOWER SKYWALKER OG Indica 1 GRAM", "", 27)
+    assert res["bulk_name"] == "Bulk - Skywalker OG Indica THC Flower Grams" and res["new"] == 973
+
+
+async def test_recipe_total_grams_mistaken_for_per_unit_is_ignored(monkeypatch, db):
+    """Recipes saved with a batch total (504 for a 28g bag) must not zero the bulk;
+    the weight in the product name is what a unit uses."""
+    fake = _patch_clover(monkeypatch, [
+        {"id": "b", "name": "Bulk - Skywalker OG THC Smalls Flower Grams", "itemStock": {"quantity": 1000}},
+    ])
+    await db.execute(
+        "INSERT INTO bulk_recipes (packaged_key, packaged_name, bulk_name, bulk_per_unit) VALUES (?,?,?,?)",
+        (pr._normalise_sales_name("THC FLOWER SMALLS SKYWALKER OG Indica 28 GRAMS"),
+         "THC FLOWER SMALLS SKYWALKER OG Indica 28 GRAMS",
+         "Bulk - Skywalker OG THC Smalls Flower Grams", 504),
+    )
+    await db.commit()
+    res = await pr._apply_bulk_deduction(db, "THC FLOWER SMALLS SKYWALKER OG Indica 28 GRAMS", "", 2)
+    assert res["ok"] and res["deducted"] == 56 and fake.stock_sets["b"] == 944

@@ -16,6 +16,7 @@ from app.auth import get_current_user
 from app.database import get_db
 from app.clover_client import CloverClient
 from app.routers.inventory_router import smart_par, _do_sync, _normalise_sales_name
+from app.smart_par_bulk import bulk_per_unit_for, infer_bulk_name, is_bulk_name
 
 router = APIRouter(prefix="/api/production", tags=["production"])
 
@@ -85,8 +86,16 @@ async def _add_to_hq_inventory(sku: str, qty: float, name: str = "") -> dict:
     return {"ok": True, "item_id": match["id"], "previous": current, "new": new_q, "added": qty}
 
 
-async def _deduct_from_bulk(bulk_name: str, amount: float) -> dict:
-    """Subtract `amount` from a bulk product's HQ stock. Returns a result dict.
+async def _deduct_from_bulk(
+    bulk_name: Optional[str], amount: float, *, packaged_name: str = "",
+    recipe_per_unit: float = 0.0, units: float = 0.0,
+) -> dict:
+    """Subtract bulk from HQ stock for a finished batch. Returns a result dict.
+
+    When `bulk_name` is None the bulk is inferred from the packaged name among
+    HQ's "Bulk - ..." items, and the amount is `units` x the per-unit derived
+    from the packaged name (see `bulk_per_unit_for`). When `amount` is 0 it is
+    likewise recomputed as units x per-unit.
 
     Bulk items are matched by normalised name and may exist as duplicate Clover
     records (see PR #215); we reduce the *combined* total and consolidate onto a
@@ -96,18 +105,29 @@ async def _deduct_from_bulk(bulk_name: str, amount: float) -> dict:
     from app.routers.ecommerce_router import (
         HQ_MERCHANT_ID, HQ_API_TOKEN, invalidate_product_cache,
     )
-    if not bulk_name:
-        return {"ok": False, "reason": "no bulk product linked"}
-    if amount <= 0:
-        return {"ok": False, "reason": "amount must be greater than 0"}
     if not HQ_MERCHANT_ID or not HQ_API_TOKEN:
         return {"ok": False, "reason": "HQ Clover credentials not configured"}
 
     client = CloverClient(HQ_MERCHANT_ID, HQ_API_TOKEN)
     data = await client.get_items(expand="itemStock")
+    elements = data.get("elements", [])
+
+    inferred = False
+    if not bulk_name:
+        names = sorted({" ".join((it.get("name") or "").split()) for it in elements})
+        bulk_name = infer_bulk_name(packaged_name, [n for n in names if is_bulk_name(n)])
+        inferred = True
+        if not bulk_name:
+            return {"ok": False, "unmatched": True,
+                    "reason": f"no bulk product matches '{packaged_name}'"}
+    if amount <= 0 and units > 0:
+        amount = units * bulk_per_unit_for(packaged_name, bulk_name, recipe_per_unit)
+    if amount <= 0:
+        return {"ok": False, "reason": "amount must be greater than 0", "bulk_name": bulk_name}
+
     target = _normalise_sales_name(bulk_name)
     matches = [
-        it for it in data.get("elements", [])
+        it for it in elements
         if _normalise_sales_name(it.get("name") or "") == target
     ]
     if not matches:
@@ -121,14 +141,16 @@ async def _deduct_from_bulk(bulk_name: str, amount: float) -> dict:
     invalidate_product_cache()
     return {
         "ok": True, "bulk_name": bulk_name, "previous": total,
-        "new": new_total, "deducted": total - new_total,
+        "new": new_total, "deducted": total - new_total, "inferred": inferred,
     }
 
 
 async def _apply_bulk_deduction(db, packaged_name: str, packaged_sku: str, units: float) -> Optional[dict]:
-    """If the packaged product has a bulk recipe, deduct units x per-unit from bulk.
+    """Deduct a finished batch's bulk: units x per-unit from the linked bulk
+    product, using the saved recipe when there is one and otherwise the best
+    name match among HQ's bulk items.
 
-    Returns the deduction result (or None when no recipe is linked).
+    Returns the deduction result (or None when there is nothing to deduct).
     """
     if units <= 0:
         return None
@@ -140,13 +162,14 @@ async def _apply_bulk_deduction(db, packaged_name: str, packaged_sku: str, units
         (key,),
     )
     recipe = await cursor.fetchone()
-    if not recipe:
+    bulk_name = (recipe["bulk_name"] or None) if recipe else None
+    per_unit = (recipe["bulk_per_unit"] or 0) if recipe else 0
+    result = await _deduct_from_bulk(
+        bulk_name, 0, packaged_name=packaged_name, recipe_per_unit=per_unit, units=units,
+    )
+    if result.get("unmatched"):
         return None
-    bulk_name = recipe["bulk_name"]
-    per_unit = recipe["bulk_per_unit"] or 0
-    if not bulk_name or per_unit <= 0:
-        return None
-    return await _deduct_from_bulk(bulk_name, units * per_unit)
+    return result
 
 
 async def _deduct_bulk_once(db, batch_id: int, row, qty: float) -> Optional[dict]:
