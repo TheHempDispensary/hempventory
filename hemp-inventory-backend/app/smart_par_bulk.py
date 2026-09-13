@@ -134,11 +134,12 @@ def apply_bulk_netting(
 
     `recipes` maps a normalised packaged name -> (bulk_name, bulk_per_unit) from
     saved production recipes; other rows fall back to name matching. Products
-    sharing one bulk draw from it largest-shortfall first so the same grams are
-    never counted twice. Sets on each row:
+    sharing one bulk split it in proportion to the bulk each needs, so the same
+    grams are never counted twice. Sets on each row:
 
         bulk_name, bulk_stock, bulk_unit ("g"|"units"), bulk_per_unit,
-        bulk_covers  (packages this row can make from bulk, <= gross order),
+        bulk_shared_by (number of packaged products drawing on this bulk),
+        bulk_covers  (packages this row can make from its share, <= gross order),
         gross_order_qty (pre-netting), order_qty (netted)
     """
     tokenised = sorted(
@@ -155,6 +156,7 @@ def apply_bulk_netting(
         r["bulk_unit"] = None
         r["bulk_per_unit"] = 0
         r["bulk_covers"] = 0
+        r["bulk_shared_by"] = 0
 
         key = " ".join(r["name"].lower().split())
         recipe = recipes.get(key)
@@ -177,15 +179,31 @@ def apply_bulk_netting(
         if per_unit > 0:
             assigned.append((r, bulk_name, per_unit))
 
-    # Largest shortfall first so the bulk goes where it is needed most.
-    assigned.sort(key=lambda t: -t[0]["gross_order_qty"])
+    by_bulk: dict[str, list[tuple[dict, float]]] = {}
     for r, bulk_name, per_unit in assigned:
+        by_bulk.setdefault(bulk_name, []).append((r, per_unit))
+
+    for bulk_name, rows in by_bulk.items():
+        for r, _ in rows:
+            r["bulk_shared_by"] = len(rows)
         avail = remaining.get(bulk_name, 0.0)
-        if avail <= 0 or r["gross_order_qty"] <= 0:
+        short = [(r, pu) for r, pu in rows if r["gross_order_qty"] > 0]
+        need = sum(r["gross_order_qty"] * pu for r, pu in short)
+        if avail <= 0 or need <= 0:
             continue
-        covers = min(r["gross_order_qty"], int(avail // per_unit))
-        if covers <= 0:
-            continue
-        r["bulk_covers"] = covers
-        r["order_qty"] = r["gross_order_qty"] - covers
-        remaining[bulk_name] = avail - covers * per_unit
+        # Each size gets its share of the pool in proportion to the bulk it
+        # needs, so an oz jar isn't starved by many small jars (or vice versa).
+        ratio = min(1.0, avail / need)
+        for r, pu in short:
+            covers = min(r["gross_order_qty"], int(r["gross_order_qty"] * ratio))
+            r["bulk_covers"] = covers
+            avail -= covers * pu
+        # Rounding leftovers go to the largest remaining shortfall first.
+        for r, pu in sorted(short, key=lambda t: -(t[0]["gross_order_qty"] - t[0]["bulk_covers"])):
+            extra = min(r["gross_order_qty"] - r["bulk_covers"], int(avail // pu))
+            if extra > 0:
+                r["bulk_covers"] += extra
+                avail -= extra * pu
+        for r, _ in short:
+            r["order_qty"] = r["gross_order_qty"] - r["bulk_covers"]
+        remaining[bulk_name] = avail

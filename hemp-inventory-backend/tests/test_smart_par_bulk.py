@@ -76,12 +76,30 @@ def test_netting_shares_bulk_without_double_counting():
     apply_bulk_netting(rows, pool, recipes={})
 
     eighth, gram, gc = rows
-    # 375g: 100 x 3.5g eighths first (350g), then 25 x 1g from the 25g left.
-    assert eighth["bulk_covers"] == 100 and eighth["order_qty"] == 0
-    assert gram["bulk_covers"] == 25 and gram["order_qty"] == 25
+    # 400g needed, 375g on hand: each size gets ~93.75% of its need, the
+    # 3.5g of rounding leftover makes one more eighth. Total used == 375g.
+    assert eighth["bulk_covers"] == 94 and eighth["order_qty"] == 6
+    assert gram["bulk_covers"] == 46 and gram["order_qty"] == 4
+    assert eighth["bulk_covers"] * 3.5 + gram["bulk_covers"] * 1 == 375
+    assert eighth["bulk_shared_by"] == 2 and gram["bulk_shared_by"] == 2
     assert eighth["bulk_stock"] == 375 and eighth["bulk_unit"] == "g"
     assert gram["gross_order_qty"] == 50
     assert gc["bulk_name"] is None and gc["order_qty"] == 20
+
+
+def test_netting_does_not_starve_large_sizes():
+    rows = [
+        _row("THC FLOWER JEALOUSY SMALLS HYBRID 2 GRAMS", 148),
+        _row("THC FLOWER JEALOUSY SMALLS HYBRID 3.5 GRAMS", 104),
+        _row("THC FLOWER JEALOUSY SMALLS HYBRID 28 GRAMS", 52),
+    ]
+    apply_bulk_netting(rows, {"Bulk - Jealousy Hybrid THC Smalls Flower Grams": 525}, {})
+    two, eighth, oz = rows
+    assert two["bulk_covers"] == 50
+    assert eighth["bulk_covers"] == 25
+    assert oz["bulk_covers"] == 12 and oz["order_qty"] == 40
+    assert sum(r["bulk_covers"] * r["bulk_per_unit"] for r in rows) <= 525
+    assert all(r["bulk_shared_by"] == 3 for r in rows)
 
 
 def test_netting_prefers_saved_recipe():

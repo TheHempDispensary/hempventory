@@ -4052,9 +4052,13 @@ def _build_order_groups(results: list[dict]) -> list[dict]:
                 "grams_sold": 0.0,
                 "grams_in_stock": 0.0,
                 "grams_order": 0.0,
+                "grams_on_order": 0.0,
+                "grams_from_bulk": 0.0,
                 "each_sold": 0,
                 "each_in_stock": 0,
                 "each_order": 0,
+                "each_on_order": 0,
+                "each_from_bulk": 0,
                 "basis": "package",
             }
             groups[label] = g
@@ -4065,8 +4069,10 @@ def _build_order_groups(results: list[dict]) -> list[dict]:
         g["packages_in_stock"] += r["total_stock"]
         g["packages_par"] += r["par_level"]
         g["packages_order_qty"] += r["order_qty"]
-        g["packages_from_bulk"] += r.get("bulk_covers", 0)
-        g["packages_on_order"] += r.get("on_order_qty", 0) or 0
+        bulk_covers = r.get("bulk_covers", 0) or 0
+        on_order = r.get("on_order_qty", 0) or 0
+        g["packages_from_bulk"] += bulk_covers
+        g["packages_on_order"] += on_order
         bulk_name = r.get("bulk_name")
         if bulk_name and bulk_name not in g["_bulk_seen"]:
             g["_bulk_seen"].add(bulk_name)
@@ -4083,12 +4089,16 @@ def _build_order_groups(results: list[dict]) -> list[dict]:
             g["grams_sold"] += r["units_sold"] * per
             g["grams_in_stock"] += r["total_stock"] * per
             g["grams_order"] += r["order_qty"] * per
+            g["grams_on_order"] += on_order * per
+            g["grams_from_bulk"] += bulk_covers * per
         elif basis == "count":
             if g["basis"] != "weight":
                 g["basis"] = "count"
             g["each_sold"] += int(round(r["units_sold"] * per))
             g["each_in_stock"] += int(round(r["total_stock"] * per))
             g["each_order"] += int(round(r["order_qty"] * per))
+            g["each_on_order"] += int(round(on_order * per))
+            g["each_from_bulk"] += int(round(bulk_covers * per))
 
     out: list[dict] = []
     for g in groups.values():
@@ -4098,6 +4108,8 @@ def _build_order_groups(results: list[dict]) -> list[dict]:
             order_amount = round(g["grams_order"] / _GRAMS_PER_POUND, 2)
             sold_amount = round(g["grams_sold"] / _GRAMS_PER_POUND, 2)
             stock_amount = round(g["grams_in_stock"] / _GRAMS_PER_POUND, 2)
+            on_order_amount = round(g["grams_on_order"] / _GRAMS_PER_POUND, 2)
+            from_bulk_amount = round(g["grams_from_bulk"] / _GRAMS_PER_POUND, 2)
         elif basis == "count":
             if g["kind"] == "Flower":
                 unit = "joints"
@@ -4112,11 +4124,15 @@ def _build_order_groups(results: list[dict]) -> list[dict]:
             order_amount = g["each_order"]
             sold_amount = g["each_sold"]
             stock_amount = g["each_in_stock"]
+            on_order_amount = g["each_on_order"]
+            from_bulk_amount = g["each_from_bulk"]
         else:
             unit = "packages"
             order_amount = g["packages_order_qty"]
             sold_amount = g["packages_sold"]
             stock_amount = g["packages_in_stock"]
+            on_order_amount = g["packages_on_order"]
+            from_bulk_amount = g["packages_from_bulk"]
 
         out.append({
             "group": g["group"],
@@ -4126,6 +4142,8 @@ def _build_order_groups(results: list[dict]) -> list[dict]:
             "order_amount": order_amount,
             "sold_amount": sold_amount,
             "stock_amount": stock_amount,
+            "on_order_amount": on_order_amount,
+            "from_bulk_amount": from_bulk_amount,
             "packages_sold": g["packages_sold"],
             "packages_in_stock": g["packages_in_stock"],
             "packages_par": g["packages_par"],
