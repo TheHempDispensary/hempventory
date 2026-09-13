@@ -12,6 +12,7 @@ from app.routers import inventory_router as inv
 from app.smart_par_bulk import (
     apply_bulk_netting,
     bulk_matches_product,
+    cannabinoid_signature,
     collect_bulk_pool,
     grams_per_package,
 )
@@ -44,6 +45,40 @@ def test_bulk_matches_same_form_and_strain():
     assert not bulk_matches_product(bulk, "THC FLOWER GREEN CRACK SATIVA 3.5 GRAMS")
     # A generic bulk can't claim everything.
     assert not bulk_matches_product("Bulk - THC Flower Grams", "THC FLOWER BLUE DREAM 3.5 GRAMS")
+
+
+def test_cannabinoid_signature():
+    assert cannabinoid_signature("Bulk - Delta 8 THC 15mg Gummies") == {"delta8"}
+    assert cannabinoid_signature("CBD GUMMIES 15MG FRUIT VARIETY 1 COUNT") == {"cbd"}
+    assert cannabinoid_signature("CBD/CBG/CBN GUMMIES 30MG") == {"cbd", "cbg", "cbn"}
+    assert cannabinoid_signature("∆8 THC Tincture") == {"delta8"}
+    assert cannabinoid_signature("D9 Lemonade") == {"delta9"}
+    assert cannabinoid_signature("THC FLOWER BLUE DREAM") == {"thc"}
+    assert cannabinoid_signature("Lookah Bear Battery") == frozenset()
+
+
+def test_bulk_never_crosses_cannabinoids():
+    d8 = "Bulk - Delta 8 THC 15mg Gummies"
+    assert not bulk_matches_product(d8, "CBD GUMMIES 15MG FRUIT VARIETY 1 COUNT")
+    assert not bulk_matches_product(d8, "CBN GUMMIES 15MG FRUIT VARIETY 100 COUNT")
+    assert not bulk_matches_product(d8, "CBD/CBG/CBN GUMMIES 15MG FRUIT VARIETY 1 COUNT")
+    assert bulk_matches_product(d8, "DELTA 8 THC GUMMIES 15MG FRUIT VARIETY 10 COUNT")
+    assert not bulk_matches_product(d8, "DELTA 9 THC GUMMIES 15MG FRUIT VARIETY 10 COUNT")
+    assert not bulk_matches_product(
+        "Bulk - CBD/CBG Gelato Hybrid 1.5g Pre Rolls", "THC PRE ROLLED JOINT HYBRID GELATO"
+    )
+    # Plain "THC" products can be made from delta-labelled bulk and vice versa.
+    assert bulk_matches_product(
+        "Bulk - DELTA 8 THC WAX THREE GRAMS Indica Forbidden Fruit",
+        "THC WAX THREE GRAMS INDICA FORBIDDEN FRUIT",
+    )
+    assert bulk_matches_product(
+        "Bulk - Blue Dream Sativa THC Flower Grams", "DELTA 8 THC FLOWER BLUE DREAM SATIVA 3.5 GRAMS"
+    )
+    # A blend that contains the bulk's cannabinoid still matches.
+    assert bulk_matches_product(
+        "Bulk - Delta 9 THC 30mg Gummies", "Lights Out Delta 9 THC/CBD/CBN 30mg Gummies 10 Count"
+    )
 
 
 def test_grams_per_package():

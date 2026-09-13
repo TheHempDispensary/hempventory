@@ -32,6 +32,12 @@ _FORMS = (
 # Flower grades: bulk smalls only make smalls, ground only makes ground, etc.
 _GRADES = ("smalls", "ground", "shake", "popcorn", "bigs")
 
+# Cannabinoid words: a CBD product is never made from Delta 8 bulk even when
+# every other word lines up.
+_CANNABINOIDS = frozenset({"cbd", "cbg", "cbn", "cbc", "cbda", "thca", "thcp", "thcv", "hhc", "thc"})
+_DELTA_RE = re.compile(r"\b(?:delta|d) ?(8|9|10|11|eight|nine|ten)\b")
+_DELTA_WORDS = {"eight": "8", "nine": "9", "ten": "10"}
+
 _GRAMS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:G|GRAMS?)\b")
 _WORD_GRAMS = (("HALF GRAM", 0.5), ("ONE GRAM", 1.0), ("TWO GRAM", 2.0), ("THREE GRAM", 3.0), ("FOUR GRAM", 4.0))
 
@@ -56,9 +62,42 @@ def _grade(tokens: set[str]) -> frozenset[str]:
     return frozenset(g for g in _GRADES if g in tokens)
 
 
+def cannabinoid_signature(name: str) -> frozenset[str]:
+    """Which cannabinoid(s) a name is for: {"cbd"}, {"delta8"}, {"thc"}, ...
+    A delta number implies THC, so "Delta 8 THC" and "Delta 8" both give
+    {"delta8"}. Empty when the name doesn't say."""
+    low = re.sub(r"[^a-z0-9]+", " ", name.lower().replace("∆", " delta "))
+    sig = {t for t in low.split() if t in _CANNABINOIDS}
+    deltas = {
+        f"delta{_DELTA_WORDS.get(m.group(1), m.group(1))}"
+        for m in _DELTA_RE.finditer(low)
+    }
+    if deltas:
+        sig.discard("thc")
+        sig |= deltas
+    return frozenset(sig)
+
+
+def _cannabinoids_compatible(bulk_sig: frozenset[str], product_sig: frozenset[str]) -> bool:
+    """Every cannabinoid the bulk names must be in the product. Plain "THC"
+    on either side stands in for any delta variant (a "THC WAX" can be made
+    from "DELTA 8 THC WAX" bulk), but CBD/CBG/CBN never match THC bulk."""
+    product_has_thc = "thc" in product_sig or any(c.startswith("delta") for c in product_sig)
+    for c in bulk_sig:
+        if c in product_sig:
+            continue
+        if c == "thc" and product_has_thc:
+            continue
+        if c.startswith("delta") and "thc" in product_sig:
+            continue
+        return False
+    return True
+
+
 def bulk_matches_product(bulk: str, product: str) -> bool:
-    """A bulk feeds a product when both are the same form and every
-    distinguishing word of the bulk name appears in the product name."""
+    """A bulk feeds a product when both are the same form, grade and
+    cannabinoid, and every distinguishing word of the bulk name appears in
+    the product name."""
     form = product_form(bulk)
     if not form or form != product_form(product):
         return False
@@ -67,6 +106,8 @@ def bulk_matches_product(bulk: str, product: str) -> bool:
         return False
     product_tokens = tokenize(product)
     if _grade(bulk_tokens) != _grade(product_tokens):
+        return False
+    if not _cannabinoids_compatible(cannabinoid_signature(bulk), cannabinoid_signature(product)):
         return False
     return all(_ignorable(t) or t in product_tokens for t in bulk_tokens)
 

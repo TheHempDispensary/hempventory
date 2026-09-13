@@ -90,6 +90,30 @@ const productForm = (name: string): string | null =>
 const GRADES = ["smalls", "ground", "shake", "popcorn", "bigs"];
 const grade = (tokens: Set<string>) => GRADES.filter((g) => tokens.has(g)).join(",");
 
+// Mirrors backend `cannabinoid_signature`: {"cbd"}, {"delta8"}, {"thc"}, ... A delta
+// number implies THC, so "Delta 8 THC" and "Delta 8" both give {"delta8"}.
+const CANNABINOIDS = new Set(["cbd", "cbg", "cbn", "cbc", "cbda", "thca", "thcp", "thcv", "hhc", "thc"]);
+const DELTA_WORDS: Record<string, string> = { eight: "8", nine: "9", ten: "10" };
+const cannabinoidSignature = (name: string): Set<string> => {
+  const low = name.toLowerCase().replace(/∆/g, " delta ").replace(/[^a-z0-9]+/g, " ");
+  const sig = new Set(low.split(" ").filter((t) => CANNABINOIDS.has(t)));
+  const deltas = [...low.matchAll(/\b(?:delta|d) ?(8|9|10|11|eight|nine|ten)\b/g)].map((m) => `delta${DELTA_WORDS[m[1]] ?? m[1]}`);
+  if (deltas.length) {
+    sig.delete("thc");
+    deltas.forEach((d) => sig.add(d));
+  }
+  return sig;
+};
+
+// Every cannabinoid the bulk names must be in the product. Plain "THC" stands in for
+// any delta variant, but CBD/CBG/CBN never match THC bulk.
+const cannabinoidsCompatible = (bulkSig: Set<string>, productSig: Set<string>): boolean => {
+  const productHasThc = productSig.has("thc") || [...productSig].some((c) => c.startsWith("delta"));
+  return [...bulkSig].every(
+    (c) => productSig.has(c) || (c === "thc" && productHasThc) || (c.startsWith("delta") && productSig.has("thc")),
+  );
+};
+
 // Bulk flower/concentrate is tracked in grams; vapes, pre-rolls and edibles by the piece.
 const bulkIsWeight = (bulk: string) => {
   const f = productForm(bulk);
@@ -132,6 +156,7 @@ const bulkMatchesProduct = (bulk: string, product: string): boolean => {
   const ignorable = (t: string) => GENERIC_TOKENS.has(t) || /^\d+$/.test(t);
   if ([...bulkTokens].every(ignorable)) return false;
   if (grade(bulkTokens) !== grade(productTokens)) return false;
+  if (!cannabinoidsCompatible(cannabinoidSignature(bulk), cannabinoidSignature(product))) return false;
   return [...bulkTokens].every((t) => ignorable(t) || productTokens.has(t));
 };
 
