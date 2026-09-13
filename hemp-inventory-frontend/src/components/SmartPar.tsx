@@ -20,6 +20,7 @@ interface ParProduct {
   bulk_unit: string;
   bulk_per_unit: number;
   bulk_covers: number;
+  bulk_shared_by: number;
   note: string;
   on_order_qty: number;
   on_order_date: string | null;
@@ -41,6 +42,8 @@ interface ParGroup {
   order_amount: number;
   sold_amount: number;
   stock_amount: number;
+  on_order_amount: number;
+  from_bulk_amount: number;
   packages_order_qty: number;
   packages_from_bulk: number;
   packages_on_order: number;
@@ -281,7 +284,7 @@ export default function SmartPar() {
     let headers: string[];
     let rows: (string | number)[][];
     if (view === "groups") {
-      headers = ["Order Group", "Type", "Items", "Sold", "In Stock", "Bulk on Hand", "Pkgs From Bulk", "Pkgs On Order", "To Order", "Unit", "Notes"];
+      headers = ["Order Group", "Type", "Items", "Sold", "In Stock", "Bulk on Hand", "From Bulk", "On Order", "To Order", "Unit", "Notes"];
       rows = filteredGroups.map((g) => [
         `"${g.group}"`,
         g.kind,
@@ -289,8 +292,8 @@ export default function SmartPar() {
         g.sold_amount,
         g.stock_amount,
         `"${(g.bulk_sources || []).map((b) => `${b.name}: ${b.stock} ${b.unit}`).join("; ")}"`,
-        g.packages_from_bulk || 0,
-        g.packages_on_order || 0,
+        g.from_bulk_amount || 0,
+        g.on_order_amount || 0,
         g.order_amount,
         g.order_unit,
         `"${(g.notes || []).join(" | ").replace(/"/g, "'")}"`,
@@ -529,7 +532,7 @@ export default function SmartPar() {
                             </div>
                           ))}
                           {g.packages_from_bulk > 0 && (
-                            <div className="text-xs text-blue-500">covers {g.packages_from_bulk} pkgs</div>
+                            <div className="text-xs text-blue-500">covers {fmtAmount(g.from_bulk_amount, g.order_unit)}</div>
                           )}
                         </div>
                       ) : (
@@ -537,7 +540,7 @@ export default function SmartPar() {
                       )}
                     </td>
                     <td className="px-4 py-3 text-right text-gray-600">
-                      {g.packages_on_order > 0 ? `${g.packages_on_order} pkgs` : <span className="text-gray-300">&mdash;</span>}
+                      {g.packages_on_order > 0 ? fmtAmount(g.on_order_amount, g.order_unit) : <span className="text-gray-300">&mdash;</span>}
                     </td>
                     <td className="px-4 py-3 text-right bg-amber-50/50">
                       {g.order_amount > 0 ? (
@@ -690,7 +693,13 @@ export default function SmartPar() {
                         <div title={p.bulk_name}>
                           <span className="font-medium text-blue-700">{fmtAmount(p.bulk_stock, p.bulk_unit)}</span>
                           {p.bulk_covers > 0 && (
-                            <div className="text-xs text-blue-500 whitespace-nowrap">covers {p.bulk_covers}</div>
+                            <div className="text-xs text-blue-500 whitespace-nowrap">
+                              covers {p.bulk_covers}
+                              {p.bulk_shared_by > 1 && ` (${fmtAmount(p.bulk_covers * p.bulk_per_unit, p.bulk_unit)} of ${fmtAmount(p.bulk_stock, p.bulk_unit)})`}
+                            </div>
+                          )}
+                          {p.bulk_shared_by > 1 && (
+                            <div className="text-xs text-gray-400 whitespace-nowrap">shared by {p.bulk_shared_by} sizes</div>
                           )}
                         </div>
                       ) : (
