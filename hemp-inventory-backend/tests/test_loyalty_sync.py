@@ -388,3 +388,51 @@ async def test_lookup_matches_email_regardless_of_case(db):
     result = await lr.lookup_customer(phone=None, email="Ada@Example.COM", db=db)
     assert result["found"] is True
     assert result["customer"]["first_name"] == "Ada"
+
+
+async def test_stale_id_link_yields_to_the_phone_on_the_profile(db):
+    """A register profile linked to the wrong member (bad import) is re-pointed
+    at the member whose phone is on the profile, and only they get the points."""
+    wrong_id = await _add_customer(db, "Rebecca", "3529421541")
+    right_id = await _add_customer(db, "Walter", "3529424657")
+    await db.execute(
+        """INSERT INTO loyalty_clover_id_map
+           (loyalty_customer_id, clover_customer_id, merchant_id, location_name)
+           VALUES (?, 'CLV_W', 'MERCH_W', 'West')""",
+        (wrong_id,),
+    )
+    await db.commit()
+    FakeClover.customers = [
+        {"id": "CLV_W", "firstName": "Walter", "lastName": "Allen",
+         "phoneNumbers": {"elements": [{"phoneNumber": "+13529424657"}]}},
+    ]
+    FakeClover.orders = [_order("O1", 1598, "CLV_W")]
+
+    result = await lr._do_sync_orders(db)
+
+    assert result["points_awarded"] == 15
+    cur = await db.execute(
+        "SELECT id, points_balance FROM loyalty_customers ORDER BY id"
+    )
+    assert [tuple(r) for r in await cur.fetchall()] == [(wrong_id, 0), (right_id, 15)]
+    cur = await db.execute(
+        "SELECT loyalty_customer_id FROM loyalty_clover_id_map WHERE clover_customer_id = 'CLV_W'"
+    )
+    assert [r[0] for r in await cur.fetchall()] == [right_id]
+
+
+async def test_sync_asks_clover_for_the_card_on_each_payment(db):
+    """Card fallback needs `payments.cardTransaction` expanded or it never fires."""
+    expands: list = []
+
+    class Recording(FakeClover):
+        async def get_orders(self, limit=100, offset=0, filters=None, filter_str=None, expand=""):
+            expands.append(expand)
+            return await super().get_orders(limit, offset, filters, filter_str, expand)
+
+    lr.CloverClient = Recording
+    try:
+        await lr._do_sync_orders(db)
+    finally:
+        lr.CloverClient = FakeClover
+    assert expands and all("payments.cardTransaction" in e for e in expands)

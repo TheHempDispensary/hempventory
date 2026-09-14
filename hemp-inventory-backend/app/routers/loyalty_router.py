@@ -1399,7 +1399,7 @@ async def _fetch_recent_paid_orders(client: CloverClient, lookback_days: int) ->
             limit=limit,
             offset=offset,
             filters=["payType!=NULL", f"createdTime>={start_ms}"],
-            expand="lineItems,lineItems.discounts,customers,discounts,payments",
+            expand="lineItems,lineItems.discounts,customers,discounts,payments,payments.cardTransaction",
         )
         elements = data.get("elements", [])
         orders.extend(elements)
@@ -1616,6 +1616,28 @@ async def _do_sync_orders(
 
                     if clover_cust_id and clover_cust_id in clover_id_to_customer:
                         matched_customer = clover_id_to_customer[clover_cust_id]
+                        # A stale id link points a register profile at the wrong
+                        # member; the phone on the profile is the truth.
+                        profile_phone = _normalize_phone(clover_id_to_phone.get(clover_cust_id, ""))
+                        phone_owner = phone_to_customer.get(profile_phone) if len(profile_phone) == 10 else None
+                        if (
+                            phone_owner
+                            and phone_owner["id"] != matched_customer["id"]
+                            and len(_normalize_phone(matched_customer.get("phone"))) == 10
+                        ):
+                            await db.execute(
+                                """UPDATE loyalty_clover_id_map SET loyalty_customer_id = ?
+                                   WHERE clover_customer_id = ? AND merchant_id = ?""",
+                                (phone_owner["id"], clover_cust_id, merchant_id),
+                            )
+                            await db.execute(
+                                """INSERT OR IGNORE INTO loyalty_clover_id_map
+                                   (loyalty_customer_id, clover_customer_id, merchant_id, location_name)
+                                   VALUES (?, ?, ?, ?)""",
+                                (phone_owner["id"], clover_cust_id, merchant_id, loc_name),
+                            )
+                            clover_id_to_customer[clover_cust_id] = phone_owner
+                            matched_customer = phone_owner
                         known_first, known_last = clover_id_to_raw_name.get(clover_cust_id, ("", ""))
                         if await _adopt_real_name(
                             db, matched_customer["id"], matched_customer.get("first_name"),
