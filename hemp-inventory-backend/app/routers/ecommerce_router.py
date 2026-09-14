@@ -17,6 +17,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 from app.catalog import is_bulk_name, resolve_categories
+from app import gift_cards
 from app.database import get_db, DB_PATH
 from app.clover_client import CloverClient
 from app.routers.loyalty_router import _do_signup, _sync_balance_to_clover_quietly
@@ -315,6 +316,10 @@ async def _load_disk_cache() -> bool:
             saved_at = disk_data.get("timestamp", 0)
             age = time.time() - saved_at
             _product_cache = disk_data["data"]
+            _product_cache["products"], _product_cache["categories"] = gift_cards.add_gift_card_products(
+                _product_cache["products"], _product_cache["categories"]
+            )
+            _product_cache["total"] = len(_product_cache["products"])
             _cache_timestamp = saved_at
             _product_cache_json = json.dumps(
                 {"products": _product_cache["products"], "total": _product_cache["total"], "categories": _product_cache["categories"]}
@@ -727,12 +732,12 @@ async def _fetch_and_cache_products() -> dict:
                 deduped.append(p)
         products = deduped
 
-        products.sort(key=lambda p: p["name"])
+        products, category_list = gift_cards.add_gift_card_products(products, sorted(categories_set))
 
         result = {
             "products": products,
             "total": len(products),
-            "categories": sorted(categories_set),
+            "categories": category_list,
         }
 
         _product_cache = result
@@ -1171,6 +1176,26 @@ async def validate_promo(
 
     # Block promo codes only during a sitewide sale (loyalty rewards are still
     # allowed). Sales on select items leave the rest of the catalog eligible.
+    # Gift card codes are stored value, not promotions: they work during sales too.
+    card = await gift_cards.lookup(db, code)
+    if card:
+        if not card["is_active"]:
+            return {"valid": False, "reason": "This gift card has been deactivated"}
+        if card["balance"] <= 0:
+            return {"valid": False, "reason": "This gift card has no remaining balance"}
+        return {
+            "valid": True,
+            "gift_card": True,
+            "balance": card["balance"],
+            "discount_pct": None,
+            "discount_amount": card["balance"],
+            "code": gift_cards.format_code(card["code"]),
+            "applies_to": "all",
+            "product_ids": [],
+            "exclude_from_other_coupons": False,
+            "excluded_brands": [],
+        }
+
     for row in await _fetch_active_direct_discounts(db):
         if _is_sitewide_sale(row):
             pct = round(row["discount_pct"] * 100)
@@ -2296,6 +2321,8 @@ async def _check_realtime_stock(items: List[OrderItem], fulfillment_type: str) -
                 # Skip LeafLife items (shipped from supplier, not local stock)
                 if isinstance(item.sku, str) and item.sku.startswith("LF-"):
                     continue
+                if gift_cards.is_gift_card_sku(item.sku):
+                    continue
                 if not item.product_id and not item.sku and not item.name:
                     continue
 
@@ -2468,6 +2495,39 @@ async def create_order(
                 detail=f"The following items are only available for shipping and cannot be included in {method} orders: {names}. Please switch to 'Ship To Me' to order these products.",
             )
 
+    # Gift card line items: the denomination is fixed by the SKU, never by the client.
+    gift_card_lines: list[OrderItem] = []
+    for item in order.items:
+        if gift_cards.is_gift_card_sku(item.sku) or gift_cards.is_gift_card_sku(item.product_id):
+            amount = gift_cards.gift_card_amount(item.sku) or gift_cards.gift_card_amount(item.product_id)
+            if amount is None or item.quantity < 1:
+                raise HTTPException(status_code=400, detail=f"Invalid gift card item: {item.name}")
+            if item.price != amount:
+                print(f"[order] Correcting gift card price for {item.sku}: submitted={item.price}, expected={amount}")
+                delta = (amount - item.price) * item.quantity
+                item.price = amount
+                order.subtotal += delta
+                order.total += delta
+            gift_card_lines.append(item)
+    only_gift_cards = bool(gift_card_lines) and len(gift_card_lines) == len(order.items)
+    if gift_card_lines and not order.customer.email.strip():
+        raise HTTPException(status_code=400, detail="An email address is required so we can send your gift card code.")
+
+    # A gift card code entered in the promo field pays down the order from its balance.
+    redeem_card: Optional[dict] = None
+    if order.promo_code:
+        redeem_card = await gift_cards.lookup(db, order.promo_code)
+        if redeem_card:
+            if not redeem_card["is_active"] or redeem_card["balance"] <= 0:
+                raise HTTPException(status_code=400, detail="This gift card has no remaining balance.")
+            if order.discount > redeem_card["balance"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"This gift card only has ${redeem_card['balance']/100:.2f} remaining. Please re-apply the code and try again.",
+                )
+            if only_gift_cards:
+                raise HTTPException(status_code=400, detail="Gift cards cannot be used to buy other gift cards.")
+
     # Server-side enforcement: Promo codes and loyalty rewards cannot be stacked together.
     if order.promo_code and order.loyalty_discount > 0:
         print(f"[order] BLOCKED promo+loyalty stacking: code={order.promo_code} loyalty=${order.loyalty_discount/100:.2f} from {order.customer.email}")
@@ -2571,7 +2631,7 @@ async def create_order(
     # Server-side enforcement: Shipping orders MUST have a non-zero shipping cost.
     # Prevents customers from bypassing the shipping rate selection (e.g. via DevTools)
     # and getting free shipping on orders that should be charged.
-    if _is_shipping_fulfillment(order.fulfillment_type) and order.shipping_cost <= 0:
+    if _is_shipping_fulfillment(order.fulfillment_type) and order.shipping_cost <= 0 and not only_gift_cards:
         print(f"[order] BLOCKED shipping order with $0 shipping cost from {order.customer.email}")
         raise HTTPException(
             status_code=400,
@@ -2697,7 +2757,18 @@ async def create_order(
         print(f"[order] Sale price enforcement failed (non-fatal, proceeding with original prices): {_e}")
 
     # Process payment via Clover if a payment token is provided
-    if order.payment_token:
+    covered_by_gift_card = (
+        redeem_card is not None
+        and order.discount > 0
+        and order.subtotal + order.shipping_cost + order.tax
+            - order.discount - order.volume_discount - order.loyalty_discount <= 0
+    )
+    if covered_by_gift_card:
+        # Gift card covers the whole order — nothing to charge the card for.
+        order.total = 0
+        charge_id = f"GIFTCARD-{redeem_card['id']}"
+        payment_status = "paid"
+    elif order.payment_token:
         client_ip = request.client.host if request.client else "127.0.0.1"
         forwarded = request.headers.get("x-forwarded-for")
         if forwarded:
@@ -2948,8 +3019,35 @@ async def create_order(
         except Exception as alert_err:
             print(f"[ORDER LOST] Failed to send alert email for {order_number}: {alert_err}")
 
+    # Spend the gift card balance now that the order is on record.
+    gift_card_remaining: Optional[int] = None
+    if db_save_ok and redeem_card and order.discount > 0:
+        gift_card_remaining = await gift_cards.redeem(
+            db, redeem_card["code"], order.discount, order_number, note="Online order"
+        )
+        if gift_card_remaining is None:
+            print(f"[order] WARNING: gift card {redeem_card['id']} could not be debited ${order.discount/100:.2f} for {order_number} (balance changed)")
+        else:
+            print(f"[order] Gift card {redeem_card['id']} debited ${order.discount/100:.2f} for {order_number}, remaining ${gift_card_remaining/100:.2f}")
+
+    # Issue purchased gift cards; codes are emailed below.
+    issued_cards: list[dict] = []
+    if db_save_ok and payment_status == "paid" and gift_card_lines:
+        purchaser_name = f"{order.customer.first_name} {order.customer.last_name}".strip()
+        for line in gift_card_lines:
+            for _ in range(line.quantity):
+                try:
+                    card = await gift_cards.issue(
+                        db, line.price, purchaser_name, order.customer.email,
+                        order.customer.email, order_number,
+                    )
+                    issued_cards.append(card)
+                except Exception as issue_err:
+                    print(f"[order] FAILED to issue gift card for {order_number}: {issue_err}")
+        print(f"[order] Issued {len(issued_cards)} gift card(s) for {order_number}")
+
     # Log discount usage if a promo code was used
-    if db_save_ok and order.promo_code:
+    if db_save_ok and order.promo_code and not redeem_card:
         try:
             # Determine location name from fulfillment type
             loc_name = ""
@@ -3066,6 +3164,13 @@ async def create_order(
     )
     _keep_task(email_task)
     email_task.add_done_callback(lambda t: _log_task_error(t, "email"))
+
+    if issued_cards:
+        gift_card_task = asyncio.create_task(
+            _send_gift_card_email(smtp_settings, order, order_number, issued_cards)
+        )
+        _keep_task(gift_card_task)
+        gift_card_task.add_done_callback(lambda t: _log_task_error(t, "gift_card_email"))
 
     # Deduct stock from correct Clover location based on fulfillment type (non-blocking)
     stock_task = asyncio.create_task(
@@ -3287,6 +3392,9 @@ async def _deduct_stock_for_order(items: List[OrderItem], fulfillment_type: str 
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             for index, item in enumerate(items):
+                if gift_cards.is_gift_card_sku(item.sku):
+                    written[index] = True
+                    continue
                 clover_item_id = item.product_id
                 if not clover_item_id and not item.sku and not item.name:
                     print(f"[stock] Skipping stock deduction for '{item.name}' — no identifiers")
@@ -3590,6 +3698,57 @@ def _send_smtp_email(smtp_settings: dict[str, str], to_email: str, subject: str,
     except Exception as e:
         print(f"Failed to send email to {recipients}: {e}")
         return False
+
+
+def _gift_card_email_html(recipient_name: str, order_number: str, cards: list[dict]) -> str:
+    cards_html = "".join(
+        f"""
+        <div style="border: 2px dashed #B3D335; border-radius: 12px; padding: 20px; margin: 16px 0; text-align: center; background: #fafdf2;">
+            <div style="font-size: 14px; color: #555; text-transform: uppercase; letter-spacing: 1px;">Gift Card</div>
+            <div style="font-size: 32px; font-weight: bold; color: #231F20; margin: 6px 0;">${card['initial_amount']/100:.2f}</div>
+            <div style="font-family: monospace; font-size: 22px; letter-spacing: 2px; color: #231F20; margin: 10px 0;">{gift_cards.format_code(card['code'])}</div>
+        </div>"""
+        for card in cards
+    )
+    safe_name = html_mod.escape(recipient_name or "there")
+    return f"""
+    <html><body style="font-family: Arial, sans-serif; color: #231F20; max-width: 600px; margin: 0 auto; padding: 20px;">
+        <h2 style="color: #231F20;">Your Hemp Dispensary Gift Card{'s' if len(cards) > 1 else ''}</h2>
+        <p>Hi {safe_name},</p>
+        <p>Thanks for your order <strong>{order_number}</strong>. Here {'are your gift card codes' if len(cards) > 1 else 'is your gift card code'}:</p>
+        {cards_html}
+        <p><strong>How to use it</strong></p>
+        <ul>
+            <li>Online: enter the code in the <em>Promo Code</em> box at checkout on TheHempDispensary.com.</li>
+            <li>In store: show this email at either of our locations and we'll apply it to your purchase.</li>
+        </ul>
+        <p>Any unused balance stays on the code for your next visit. Keep this email safe &mdash; anyone with the code can use it.</p>
+        <p style="color: #777; font-size: 12px;">Questions? Reply to this email or reach us at {STORE_EMAIL}.</p>
+    </body></html>
+    """
+
+
+async def _send_gift_card_email(
+    smtp_settings: dict[str, str],
+    order: CreateOrderRequest,
+    order_number: str,
+    cards: list[dict],
+) -> None:
+    """Email purchased gift card codes to the buyer (and a copy to the store)."""
+    if not smtp_settings.get("smtp_user") or not smtp_settings.get("smtp_password"):
+        print(f"SMTP not configured — gift card codes for {order_number} NOT emailed")
+        return
+    subject = f"Your Hemp Dispensary Gift Card Code{'s' if len(cards) > 1 else ''} — {order_number}"
+    html_body = _gift_card_email_html(order.customer.first_name, order_number, cards)
+    loop = asyncio.get_running_loop()
+    sent = await loop.run_in_executor(
+        None, _send_smtp_email, smtp_settings, order.customer.email, subject, html_body
+    )
+    print(f"[order] Gift card email for {order_number} to {order.customer.email}: {'sent' if sent else 'FAILED'}")
+    await loop.run_in_executor(
+        None, _send_smtp_email, smtp_settings, STORE_EMAIL,
+        f"[Gift Card Sold] {order_number}", html_body,
+    )
 
 
 async def _send_order_emails(
@@ -4202,6 +4361,12 @@ async def update_order_status(
 
     cancellation_email_sent = False
     if new_status == "cancelled" and previous_status != "cancelled":
+        try:
+            reversed_cards = await gift_cards.reverse_order(db, order.get("order_number") or "")
+            if reversed_cards["refunded"] or reversed_cards["deactivated"]:
+                print(f"[order] Gift cards reversed for cancelled order {order.get('order_number')}: {reversed_cards}")
+        except Exception as gc_err:
+            print(f"[order] WARNING: gift card reversal failed for order {order_id}: {gc_err}")
         cancellation_email_sent = await _send_order_cancelled_email(db, order_id, order)
 
     # Checkout deducts stock in a background task that can lose its Clover call
@@ -4290,6 +4455,118 @@ async def recover_order(
 
     print(f"[recover] Manually recovered order {order_number} (id={order_id}, total=${order.total/100:.2f})")
     return {"success": True, "order_id": order_id, "order_number": order_number}
+
+
+class IssueGiftCardRequest(BaseModel):
+    amount: int  # cents
+    recipient_email: str = ""
+    purchaser_name: str = ""
+    note: str = ""
+    send_email: bool = True
+
+
+class RedeemGiftCardRequest(BaseModel):
+    amount: int  # cents
+    note: str = ""
+
+
+@router.get("/gift-cards")
+async def list_gift_cards(request: Request, db: aiosqlite.Connection = Depends(get_db)):
+    """Admin: every gift card with its remaining balance."""
+    _require_admin(request)
+    cursor = await db.execute(
+        """SELECT id, code, initial_amount, balance, purchaser_name, purchaser_email,
+                  recipient_email, order_number, is_active, created_at, last_redeemed_at
+           FROM gift_cards ORDER BY created_at DESC"""
+    )
+    rows = await cursor.fetchall()
+    return {
+        "gift_cards": [
+            {
+                "id": r[0],
+                "code": gift_cards.format_code(r[1]),
+                "initial_amount": r[2],
+                "balance": r[3],
+                "purchaser_name": r[4],
+                "purchaser_email": r[5],
+                "recipient_email": r[6],
+                "order_number": r[7],
+                "is_active": bool(r[8]),
+                "created_at": r[9],
+                "last_redeemed_at": r[10],
+            }
+            for r in rows
+        ]
+    }
+
+
+@router.get("/gift-cards/lookup")
+async def lookup_gift_card(code: str, request: Request, db: aiosqlite.Connection = Depends(get_db)):
+    """Admin: balance check for a code a customer shows at the register."""
+    _require_admin(request)
+    card = await gift_cards.lookup(db, code)
+    if not card:
+        raise HTTPException(status_code=404, detail="Gift card not found")
+    card["code"] = gift_cards.format_code(card["code"])
+    cursor = await db.execute(
+        "SELECT amount, order_number, note, created_at FROM gift_card_transactions WHERE gift_card_id = ? ORDER BY id",
+        (card["id"],),
+    )
+    card["transactions"] = [
+        {"amount": t[0], "order_number": t[1], "note": t[2], "created_at": t[3]}
+        for t in await cursor.fetchall()
+    ]
+    return card
+
+
+@router.post("/gift-cards")
+async def issue_gift_card(body: IssueGiftCardRequest, request: Request, db: aiosqlite.Connection = Depends(get_db)):
+    """Admin: issue a gift card manually (e.g. sold at the register or as a goodwill credit)."""
+    _require_admin(request)
+    if body.amount <= 0 or body.amount > 100000:
+        raise HTTPException(status_code=400, detail="Amount must be between $0.01 and $1,000")
+    card = await gift_cards.issue(
+        db, body.amount, body.purchaser_name, body.recipient_email, body.recipient_email,
+        order_number="MANUAL", note=body.note or "Issued by staff",
+    )
+    emailed = False
+    if body.send_email and body.recipient_email.strip():
+        smtp_settings = await _get_smtp_settings(db)
+        html_body = _gift_card_email_html(body.purchaser_name, "MANUAL", [card])
+        loop = asyncio.get_running_loop()
+        emailed = await loop.run_in_executor(
+            None, _send_smtp_email, smtp_settings, body.recipient_email.strip(),
+            "Your Hemp Dispensary Gift Card Code", html_body,
+        )
+    return {"success": True, "id": card["id"], "code": gift_cards.format_code(card["code"]), "balance": card["balance"], "emailed": emailed}
+
+
+@router.post("/gift-cards/{card_id}/redeem")
+async def redeem_gift_card_in_store(
+    card_id: int, body: RedeemGiftCardRequest, request: Request, db: aiosqlite.Connection = Depends(get_db)
+):
+    """Admin: deduct an in-store purchase from a gift card balance."""
+    _require_admin(request)
+    if body.amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be positive")
+    cursor = await db.execute("SELECT code, balance FROM gift_cards WHERE id = ?", (card_id,))
+    row = await cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Gift card not found")
+    remaining = await gift_cards.redeem(db, row[0], body.amount, order_number="IN-STORE", note=body.note or "In-store redemption")
+    if remaining is None:
+        raise HTTPException(status_code=400, detail=f"Insufficient balance (${row[1]/100:.2f} remaining)")
+    return {"success": True, "balance": remaining}
+
+
+@router.post("/gift-cards/{card_id}/deactivate")
+async def deactivate_gift_card(card_id: int, request: Request, db: aiosqlite.Connection = Depends(get_db)):
+    _require_admin(request)
+    cursor = await db.execute("UPDATE gift_cards SET is_active = 0 WHERE id = ?", (card_id,))
+    if cursor.rowcount != 1:
+        raise HTTPException(status_code=404, detail="Gift card not found")
+    await db.commit()
+    return {"success": True}
 
 
 def _require_admin(request: Request) -> None:
