@@ -610,6 +610,10 @@ async def _fetch_and_cache_products() -> dict:
                 continue
             sku = item.get("sku", "") or item.get("id", "")
             price = item.get("price", 0)
+            # Variable/open-price items (Clover gift cards) have no fixed price and
+            # would be sold for $0 online.
+            if item.get("priceType") == "VARIABLE" or not price or price <= 0:
+                continue
             item_categories = resolve_categories(
                 name, [c.get("name", "") for c in item.get("categories", {}).get("elements", [])]
             )

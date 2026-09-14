@@ -6,10 +6,13 @@ import aiosqlite
 import io
 import csv
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from app.auth import get_current_user
 from app.database import get_db
 from app.clover_client import CloverClient
+
+EASTERN = ZoneInfo("America/New_York")
 
 router = APIRouter(prefix="/api/timeclock", tags=["timeclock"])
 
@@ -651,12 +654,12 @@ async def sync_tips_from_clover(
                 if cid and cname:
                     clover_id_to_name[cid] = cname
 
-            # Convert date range to millisecond timestamps for Clover filter
+            # Date range is a store-local (Eastern) calendar range; the server runs in UTC.
             start_dt = datetime.strptime(range_start, "%Y-%m-%d").replace(
-                hour=0, minute=0, second=0
+                hour=0, minute=0, second=0, tzinfo=EASTERN
             )
             end_dt = datetime.strptime(range_end, "%Y-%m-%d").replace(
-                hour=23, minute=59, second=59
+                hour=23, minute=59, second=59, tzinfo=EASTERN
             )
             start_ms = int(start_dt.timestamp() * 1000)
             end_ms = int(end_dt.timestamp() * 1000)
@@ -668,6 +671,8 @@ async def sync_tips_from_clover(
             entry_tips: dict[int, float] = {}  # time_entry.id -> aggregated tip amount
 
             for payment in payments_data.get("elements", []):
+                if payment.get("result", "SUCCESS") != "SUCCESS" or payment.get("voided"):
+                    continue
                 tip_amount_cents = payment.get("tipAmount", 0)
                 if not tip_amount_cents or tip_amount_cents <= 0:
                     continue
@@ -691,7 +696,7 @@ async def sync_tips_from_clover(
                 created_ms = payment.get("createdTime", 0)
                 if not created_ms:
                     continue
-                payment_dt = datetime.fromtimestamp(created_ms / 1000.0)
+                payment_dt = datetime.fromtimestamp(created_ms / 1000.0, tz=timezone.utc)
                 payment_str = payment_dt.strftime("%Y-%m-%dT%H:%M:%S")
 
                 # Find matching time_entry
