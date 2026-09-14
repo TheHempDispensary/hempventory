@@ -1,6 +1,8 @@
 import aiosqlite
 import os
 
+from app.gift_cards import ensure_tables as _ensure_gift_card_tables
+
 DB_PATH = os.environ.get("DB_PATH", "/data/app.db")
 
 # Background syncs (Clover inventory, loyalty, orders) hold the write lock for
@@ -815,6 +817,8 @@ async def init_db():
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        await _ensure_gift_card_tables(db)
 
         # Hidden items table (items hidden from inventory view but kept for data)
         await db.execute("""
