@@ -68,15 +68,21 @@ const GENERIC_TOKENS = new Set([
   "for", "a", "in", "by", "per", "each", "hybrid", "sativa", "indica", "variety",
 ]);
 
+// Plural bulk names ("Baby Js", "Pre Rolls") tokenize like the packaged singular.
+const PLURAL_TOKENS: Record<string, string> = { js: "j", rolls: "roll", joints: "joint", blunts: "blunt" };
+
 const tokenize = (name: string): Set<string> =>
-  new Set(name.toLowerCase().replace(/[^a-z0-9]+/g, " ").split(" ").filter(Boolean));
+  new Set(
+    name.toLowerCase().replace(/[^a-z0-9]+/g, " ").split(" ").filter(Boolean)
+      .map((t) => PLURAL_TOKENS[t] ?? t),
+  );
 
 // The kind of product a name describes. A pre-roll and a jar of flower share
 // strain words but are made from different bulk, so the form has to agree
 // before names are compared. Order matters: "PRE ROLLED JOINT ... FLOWER" is a
 // pre-roll, so pre-roll is tested before flower.
 const FORMS: { form: string; test: RegExp }[] = [
-  { form: "preroll", test: /pre[\s-]?roll|\bjoint\b|\bbaby\s*j\b|\bblunt\b|\bdog\s*walker\b/ },
+  { form: "preroll", test: /pre[\s-]?roll|\bjoint\b|\bbaby\s*js?\b|\bblunt\b|\bdog\s*walker\b/ },
   { form: "vapor", test: /\bvape\b|\bcart\b|\bcartridge\b|\bdisposable\b|\bpod\b/ },
   { form: "concentrate", test: /\bdab\b|\bwax\b|\brosin\b|\bresin\b|\bshatter\b|\bbadder\b|\bconcentrate\b|\bhash\b|\bkief\b|\bmoon\s*rock/ },
   { form: "edible", test: /\bgumm|\bedible|\bchocolate|\bcookie|\bbrownie|\bcoffee|\bdrink|\bbeverage|\bsyrup|\bhoney|\bcaramel|\bchew|\bmint/ },
@@ -138,7 +144,10 @@ const bulkPerUnitFor = (product: string, bulk: string, recipePerUnit: number): n
     if (g > 0) return g;
   }
   if (recipePerUnit > 0) return recipePerUnit;
-  return weight ? 0 : 1;
+  if (weight) return 0;
+  // Count-based bulk: a multi-pack ("7 COUNT") uses that many pieces.
+  const m = product.toUpperCase().match(/(\d+)\s*(?:COUNT|CT|PACK|PK|PIECES?)\b/);
+  return m ? Math.max(Number(m[1]) || 1, 1) : 1;
 };
 
 /**
@@ -682,7 +691,12 @@ export default function Production() {
                                 <>
                                   {bulk.stock}
                                   <div className="text-xs text-gray-400 mt-0.5">
-                                    {bulk.name}{bulk.makes > 0 ? ` · makes ${bulk.makes}` : ""}
+                                    {bulk.name}
+                                    {(p.bulk_shared_by ?? 0) > 1 && p.bulk_name === bulk.name ? (
+                                      <span title={`This bulk feeds ${p.bulk_shared_by} sizes; the split is in proportion to each size's need`}>
+                                        {` · covers ${p.bulk_covers ?? 0} of ${p.needed} (shared by ${p.bulk_shared_by})`}
+                                      </span>
+                                    ) : bulk.makes > 0 ? ` · makes ${bulk.makes}` : ""}
                                     {bulk.inferred && (
                                       <span title="Matched by name — set a bulk link on a batch to pin it"> · matched by name</span>
                                     )}

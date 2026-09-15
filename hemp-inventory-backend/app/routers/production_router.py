@@ -444,6 +444,12 @@ async def production_plan(
             "already_planned": already_planned,
             "to_produce": to_produce,
             "made_in_house": sku in flags,
+            "bulk_name": p.get("bulk_name"),
+            "bulk_stock": p.get("bulk_stock", 0),
+            "bulk_unit": p.get("bulk_unit"),
+            "bulk_per_unit": p.get("bulk_per_unit", 0),
+            "bulk_covers": p.get("bulk_covers", 0),
+            "bulk_shared_by": p.get("bulk_shared_by", 0),
         })
 
     items.sort(key=lambda x: (-x["to_produce"], x["name"]))

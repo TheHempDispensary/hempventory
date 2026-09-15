@@ -12,6 +12,7 @@ from app.routers import inventory_router as inv
 from app.smart_par_bulk import (
     apply_bulk_netting,
     bulk_matches_product,
+    bulk_per_unit_for,
     cannabinoid_signature,
     collect_bulk_pool,
     grams_per_package,
@@ -155,6 +156,33 @@ def test_count_bulk_is_one_per_unit():
     assert rows[0]["bulk_unit"] == "units"
     assert rows[0]["bulk_covers"] == 75
     assert rows[0]["order_qty"] == 25
+
+
+def test_baby_js_come_from_baby_j_bulk_not_flower():
+    bulk = "Bulk - Green Crack Sativa Baby Js"
+    flower = "Bulk - Green Crack Sativa THC Smalls Flower Grams"
+    single = "THC PRE ROLLED JOINT BABY J GREEN CRACK Sativa 1 COUNT"
+    seven = "THC PRE ROLLED JOINT BABY J GREEN CRACK Sativa 7 COUNT"
+    ounce = "THC FLOWER SMALLS GREEN CRACK Sativa 28 GRAMS"
+    assert bulk_matches_product(bulk, single)
+    assert bulk_matches_product(bulk, seven)
+    assert not bulk_matches_product(flower, single)
+    assert not bulk_matches_product(bulk, ounce)
+    assert bulk_per_unit_for(single, bulk, None) == 1
+    assert bulk_per_unit_for(seven, bulk, None) == 7
+    assert bulk_per_unit_for(seven, bulk, 5.0) == 5.0
+
+
+def test_baby_j_pool_split_by_pieces():
+    rows = [
+        _row("THC PRE ROLLED JOINT BABY J GREEN CRACK Sativa 1 COUNT", 42),
+        _row("THC PRE ROLLED JOINT BABY J GREEN CRACK Sativa 7 COUNT", 13),
+        _row("THC PRE ROLLED JOINT BABY J GREEN CRACK Sativa 11 COUNT", 10),
+    ]
+    apply_bulk_netting(rows, {"Bulk - Green Crack Sativa Baby Js": 6}, recipes={})
+    assert all(r["bulk_shared_by"] == 3 for r in rows)
+    used = sum(r["bulk_covers"] * r["bulk_per_unit"] for r in rows)
+    assert 0 < used <= 6
 
 
 async def test_smart_par_nets_bulk_and_on_order(db, monkeypatch):
