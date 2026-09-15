@@ -666,9 +666,14 @@ export default function Production() {
                               {p.in_stock}
                               {p.stock_by_location && Object.keys(p.stock_by_location).length > 0 && (
                                 <div className="text-xs text-gray-400 mt-0.5">
-                                  {Object.entries(p.stock_by_location)
-                                    .map(([loc, qty]) => `${loc.replace(" Location", "").replace("Hemp Dispensary ", "")}: ${qty}`)
-                                    .join(" · ")}
+                                  {Object.entries(p.stock_by_location).map(([loc, qty], i) => (
+                                    <span key={loc}>
+                                      {i > 0 && " · "}
+                                      <span className={qty <= 0 ? "text-red-600 font-semibold" : undefined}>
+                                        {loc.replace(" Location", "").replace("Hemp Dispensary ", "")}: {qty}
+                                      </span>
+                                    </span>
+                                  ))}
                                 </div>
                               )}
                             </td>

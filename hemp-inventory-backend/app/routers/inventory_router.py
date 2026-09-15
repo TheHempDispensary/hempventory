@@ -3579,6 +3579,11 @@ _SMART_PAR_TTL = 3600  # 1 hour cache
 # store's. A floor keeps a couple of day-one sales from producing a huge PAR.
 _MIN_VELOCITY_DAYS = 14.0
 
+# Sales history window. Without an explicit clientCreatedTime filter Clover's
+# orders endpoint only returns the last ~90 days, which was silently spread
+# over the full ecommerce history (~240 days) and understated every velocity.
+_SALES_HISTORY_DAYS = 365
+
 
 def _product_days_of_data(
     first_ts: float | None, latest_ts: float, days_of_data: float
@@ -3594,18 +3599,21 @@ async def _fetch_all_clover_orders(client: CloverClient) -> list[dict]:
 
     Only paid orders are fetched (payType!=NULL) so open/unpaid tabs don't count
     as sales; deleted and refunded orders/line items are filtered out at the call
-    site so velocity matches Clover's "Sold" figures.
+    site so velocity matches Clover's "Sold" figures. The window is pinned with
+    a clientCreatedTime filter — Clover's default (unfiltered) response is
+    capped at roughly the last 90 days.
     """
     all_orders: list[dict] = []
     offset = 0
     limit = 100
+    since_ms = int((time.time() - _SALES_HISTORY_DAYS * 86400) * 1000)
     while True:
         try:
             data = await client.get_orders(
                 limit=limit,
                 offset=offset,
                 expand="lineItems",
-                filters=["payType!=NULL"],
+                filters=["payType!=NULL", f"clientCreatedTime>={since_ms}"],
             )
         except Exception as e:
             # A partial pull must never be mistaken for the full history: it
@@ -3704,7 +3712,7 @@ class _SalesTally:
                 continue
             if order.get("total", 0) < 0:
                 continue
-            order_ts = order.get("createdTime", 0) / 1000  # ms -> s
+            order_ts = (order.get("clientCreatedTime") or order.get("createdTime", 0)) / 1000  # ms -> s
             for li in (order.get("lineItems") or {}).get("elements", []):
                 # Skip refunded/returned line items to match Clover's "Sold" count
                 if li.get("refunded") or li.get("isRefund"):

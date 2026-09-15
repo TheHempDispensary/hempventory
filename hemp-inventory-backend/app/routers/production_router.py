@@ -395,9 +395,14 @@ async def production_plan(
 ):
     """What to produce, per in-house product, derived from Smart PAR.
 
-    needed        = Smart PAR order qty (par − current stock)
+    needed        = par − current stock (Smart PAR's gross order qty)
     already_planned = open batch quantity not yet finished (shown for reference)
     to_produce    = max(needed, 0)   # full need; does NOT deduct already_planned
+
+    Smart PAR's netted `order_qty` is a *purchasing* number: it subtracts bulk on
+    hand (we can make it, so don't buy it) and units marked "on order" with a
+    supplier. Neither reduces what has to be *made*, so the plan uses the gross
+    figure.
     """
     cursor = await db.execute("SELECT sku, product_name FROM production_flags")
     flag_rows = await cursor.fetchall()
@@ -421,7 +426,7 @@ async def production_plan(
     items: list[dict] = []
     for p in par_products:
         sku = p["sku"]
-        needed = int(p["order_qty"])
+        needed = int(p.get("gross_order_qty", p["order_qty"]))
         already_planned = planned_by_sku.get(sku, 0)
         # "To produce" reflects the full Smart PAR need and does NOT deduct
         # batches already planned — open batches are shown separately in the
