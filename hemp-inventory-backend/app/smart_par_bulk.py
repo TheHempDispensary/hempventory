@@ -18,7 +18,7 @@ _GENERIC_TOKENS = frozenset({
 
 # Order matters: "PRE ROLLED JOINT ... FLOWER" is a pre-roll, not flower.
 _FORMS = (
-    ("preroll", re.compile(r"pre[\s-]?roll|\bjoint\b|\bbaby\s*j\b|\bblunt\b|\bdog\s*walker\b")),
+    ("preroll", re.compile(r"pre[\s-]?roll|\bjoint\b|\bbaby\s*js?\b|\bblunt\b|\bdog\s*walker\b")),
     ("vapor", re.compile(r"\bvape\b|\bcart\b|\bcartridge\b|\bdisposable\b|\bpod\b")),
     ("concentrate", re.compile(
         r"\bdab\b|\bwax\b|\brosin\b|\bresin\b|\bshatter\b|\bbadder\b|\bconcentrate\b|\bhash\b|\bkief\b|\bmoon\s*rock"
@@ -39,11 +39,19 @@ _DELTA_RE = re.compile(r"\b(?:delta|d) ?(8|9|10|11|eight|nine|ten)\b")
 _DELTA_WORDS = {"eight": "8", "nine": "9", "ten": "10"}
 
 _GRAMS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:G|GRAMS?)\b")
+_COUNT_RE = re.compile(r"(\d+)\s*(?:COUNT|CT|PACK|PK|PIECES?)\b")
+
+# Plural bulk names ("Baby Js", "Pre Rolls") must tokenize like the packaged
+# singular so the distinguishing-word test lines up.
+_PLURAL_TOKENS = {"js": "j", "rolls": "roll", "joints": "joint", "blunts": "blunt"}
 _WORD_GRAMS = (("HALF GRAM", 0.5), ("ONE GRAM", 1.0), ("TWO GRAM", 2.0), ("THREE GRAM", 3.0), ("FOUR GRAM", 4.0))
 
 
 def tokenize(name: str) -> set[str]:
-    return set(re.sub(r"[^a-z0-9]+", " ", name.lower()).split())
+    return {
+        _PLURAL_TOKENS.get(t, t)
+        for t in re.sub(r"[^a-z0-9]+", " ", name.lower()).split()
+    }
 
 
 def product_form(name: str) -> str | None:
@@ -136,6 +144,18 @@ def grams_per_package(product_name: str) -> float:
     return 0.0
 
 
+def pieces_per_package(product_name: str) -> float:
+    """Pieces in one retail package of a count-based product ("7 COUNT" -> 7;
+    1 when the name carries no count)."""
+    m = _COUNT_RE.search(product_name.upper())
+    if m:
+        try:
+            return max(float(m.group(1)), 1.0)
+        except ValueError:
+            return 1.0
+    return 1.0
+
+
 def collect_bulk_pool(items: list[dict]) -> dict[str, float]:
     """HQ stock of every bulk item, summed across duplicate Clover records."""
     pool: dict[str, float] = {}
@@ -153,8 +173,9 @@ def collect_bulk_pool(items: list[dict]) -> dict[str, float]:
 def bulk_per_unit_for(product_name: str, bulk_name: str, recipe_per_unit: float | None) -> float:
     """Bulk consumed per finished unit. For bulk tracked in grams the weight in
     the packaged name is authoritative (a "3.5 GRAMS" jar always uses 3.5g);
-    the saved recipe value is only used when the name carries no weight, and
-    count-based bulk (pre-rolls, vapes, gummies) defaults to one piece."""
+    the saved recipe value is only used when the name carries no weight. For
+    count-based bulk (pre-rolls, vapes, gummies) the recipe wins, then a
+    multi-pack count in the name ("7 COUNT" -> 7 pieces), then one piece."""
     weight = bulk_is_weight(bulk_name)
     if weight:
         grams = grams_per_package(product_name)
@@ -162,7 +183,7 @@ def bulk_per_unit_for(product_name: str, bulk_name: str, recipe_per_unit: float 
             return grams
     if recipe_per_unit and recipe_per_unit > 0:
         return recipe_per_unit
-    return 0.0 if weight else 1.0
+    return 0.0 if weight else pieces_per_package(product_name)
 
 
 def apply_bulk_netting(

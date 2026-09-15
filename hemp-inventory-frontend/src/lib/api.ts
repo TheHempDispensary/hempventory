@@ -847,6 +847,13 @@ export interface ProductionPlanItem {
   already_planned: number;
   to_produce: number;
   made_in_house: boolean;
+  bulk_name?: string | null;
+  bulk_stock?: number;
+  bulk_unit?: "g" | "units" | null;
+  bulk_per_unit?: number;
+  /** Units this row can make from its share of a bulk split across SKUs. */
+  bulk_covers?: number;
+  bulk_shared_by?: number;
 }
 
 export interface ProductionBatch {
