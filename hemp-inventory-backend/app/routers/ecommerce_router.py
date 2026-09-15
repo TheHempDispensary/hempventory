@@ -4368,6 +4368,12 @@ async def update_order_status(
         except Exception as gc_err:
             print(f"[order] WARNING: gift card reversal failed for order {order_id}: {gc_err}")
         cancellation_email_sent = await _send_order_cancelled_email(db, order_id, order)
+        try:
+            restocked = await _restock_deducted_lines(db, order_id)
+            if restocked:
+                print(f"[order] Restocked {restocked} line(s) for cancelled order {order.get('order_number')}")
+        except Exception as rs_err:
+            print(f"[order] WARNING: restock failed for cancelled order {order_id}: {rs_err}")
 
     # Checkout deducts stock in a background task that can lose its Clover call
     # (network blip, item not yet resolvable at the pickup location). Staff moving
@@ -5272,6 +5278,64 @@ async def _restock_items(items: list, fulfillment_type: str = "shipping") -> Non
         print(f"[restock] Restock task failed: {e}")
 
 
+async def _restock_deducted_lines(db: aiosqlite.Connection, order_id: int) -> int:
+    """Put back every line of an order that has actually left the shelf, once.
+
+    Uses the per-line stock_deducted_at stamp as the guard: a line is restocked
+    only if it was deducted, and the stamp is cleared so a later cancel/refund
+    of the same order doesn't put it back twice.
+    """
+    cursor = await db.execute(
+        """SELECT oi.id, oi.product_id, oi.product_name, oi.sku, oi.price, oi.quantity,
+                  o.fulfillment_type
+           FROM ecommerce_order_items oi
+           JOIN ecommerce_orders o ON o.id = oi.order_id
+           WHERE oi.order_id = ? AND oi.stock_deducted_at IS NOT NULL""",
+        (order_id,),
+    )
+    rows = await cursor.fetchall()
+    if not rows:
+        return 0
+    items = [
+        {
+            "product_id": row[1] or "",
+            "product_name": row[2] or "",
+            "sku": row[3] or "",
+            "price": row[4] or 0,
+            "quantity": row[5] or 0,
+        }
+        for row in rows
+    ]
+    await _restock_items(items, rows[0][6] or "shipping")
+    await db.execute(
+        "UPDATE ecommerce_order_items SET stock_deducted_at = NULL WHERE order_id = ?",
+        (order_id,),
+    )
+    await db.execute(
+        "UPDATE ecommerce_orders SET stock_deducted_at = NULL WHERE id = ?",
+        (order_id,),
+    )
+    await db.commit()
+    return len(items)
+
+
+async def _restock_after_refund(
+    db: aiosqlite.Connection,
+    order_id: int,
+    refunded_items: list | None,
+    is_full_refund: bool,
+    fulfillment_type: str | None,
+) -> int:
+    """Full refund: everything deducted goes back. Item-level: just the picked items.
+    A dollar-amount partial refund returns no goods, so nothing is restocked."""
+    if is_full_refund:
+        return await _restock_deducted_lines(db, order_id)
+    if refunded_items:
+        asyncio.create_task(_restock_items(refunded_items, fulfillment_type or "shipping"))
+        return len(refunded_items)
+    return 0
+
+
 @router.post("/orders/{order_id}/refund")
 async def refund_order(
     order_id: int,
@@ -5377,16 +5441,14 @@ async def refund_order(
                         (new_status, amount, order_id),
                     )
                     await db.commit()
-                    # Restock items in background if item-level refund
-                    if refunded_items:
-                        asyncio.create_task(_restock_items(refunded_items, fulfillment_type or "shipping"))
+                    restocked = await _restock_after_refund(db, order_id, refunded_items, is_full_refund, fulfillment_type)
                     return {
                         "success": True,
                         "order_id": order_id,
                         "refund_id": "",
                         "refund_amount": amount,
                         "status": new_status,
-                        "restocked_items": len(refunded_items) if refunded_items else 0,
+                        "restocked_items": restocked,
                     }
                 raise HTTPException(
                     status_code=400,
@@ -5401,16 +5463,14 @@ async def refund_order(
                     (new_status, refund_id, amount, order_id),
                 )
                 await db.commit()
-                # Restock items in background if item-level refund
-                if refunded_items:
-                    asyncio.create_task(_restock_items(refunded_items, fulfillment_type or "shipping"))
+                restocked = await _restock_after_refund(db, order_id, refunded_items, is_full_refund, fulfillment_type)
                 return {
                     "success": True,
                     "order_id": order_id,
                     "refund_id": refund_id,
                     "refund_amount": amount,
                     "status": new_status,
-                    "restocked_items": len(refunded_items) if refunded_items else 0,
+                    "restocked_items": restocked,
                 }
             else:
                 error_msg = result.get("message") or result.get("error", {}).get("message", "Refund failed")
