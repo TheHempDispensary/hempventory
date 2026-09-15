@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import hmac
 import os
+import re
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -208,9 +209,12 @@ async def _create_shippo_shipment(
 async def _validate_shippo_address(headers: dict, address: dict) -> dict:
     """Validate a destination address with Shippo and return the result.
 
-    Returns ``{"is_valid": bool, "messages": [text, ...]}``.  Never raises —
-    if Shippo itself errors we treat the address as un-validated (valid=True)
-    so a transient validator failure can't block an otherwise-shippable order.
+    Returns ``{"is_valid": bool, "messages": [text, ...], "suggested": {...} | None}``.
+    ``suggested`` is the standardized address Shippo returned when it differs
+    from what was submitted (e.g. "Groshon Road" -> "Groshons Rd"), so the
+    admin can apply it in one click.  Never raises — if Shippo itself errors
+    we treat the address as un-validated (valid=True) so a transient validator
+    failure can't block an otherwise-shippable order.
     """
     address_data = {
         "name": address.get("name", ""),
@@ -226,14 +230,42 @@ async def _validate_shippo_address(headers: dict, address: dict) -> dict:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(f"{SHIPPO_API_URL}/addresses/", headers=headers, json=address_data)
         if resp.status_code not in (200, 201):
-            return {"is_valid": True, "messages": []}
-        validation = resp.json().get("validation_results", {})
-    except httpx.HTTPError:
-        return {"is_valid": True, "messages": []}
+            return {"is_valid": True, "messages": [], "suggested": None}
+        data = resp.json()
+        validation = data.get("validation_results", {})
+    except (httpx.HTTPError, ValueError):
+        return {"is_valid": True, "messages": [], "suggested": None}
     return {
         "is_valid": validation.get("is_valid", True),
         "messages": [m.get("text", "") for m in validation.get("messages", []) if m.get("text")],
+        "suggested": _suggested_address(address_data, data),
     }
+
+
+_SUGGESTION_FIELDS = ("street1", "street2", "city", "state", "zip")
+
+
+def _addr_key(field: str, value: str) -> str:
+    """Normalize an address field so cosmetic differences (case, punctuation,
+    ZIP+4) don't count as a correction."""
+    v = re.sub(r"[^a-z0-9 ]", "", value.strip().lower())
+    v = re.sub(r"\s+", " ", v)
+    if field == "zip":
+        v = v[:5]
+    return v
+
+
+def _suggested_address(submitted: dict, returned: dict) -> dict | None:
+    """Return Shippo's standardized address if it materially differs from the submitted one."""
+    suggested = {f: (returned.get(f) or "").strip() for f in _SUGGESTION_FIELDS}
+    if not suggested["street1"] or not suggested["city"] or not suggested["zip"]:
+        return None
+    if all(
+        _addr_key(f, suggested[f]) == _addr_key(f, submitted.get(f) or "")
+        for f in _SUGGESTION_FIELDS
+    ):
+        return None
+    return suggested
 
 
 @router.post("/create-shipment")
