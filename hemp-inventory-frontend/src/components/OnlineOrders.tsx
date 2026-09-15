@@ -21,6 +21,14 @@ interface OrderShipment {
   tracking_status: string;
 }
 
+interface SuggestedAddress {
+  street1: string;
+  street2: string;
+  city: string;
+  state: string;
+  zip: string;
+}
+
 interface ShipmentGroup {
   shipment_id: number;
   shipment_type: string;
@@ -314,6 +322,8 @@ export default function OnlineOrders() {
   const [isHazmat, setIsHazmat] = useState(false);
   const [shipmentGroups, setShipmentGroups] = useState<ShipmentGroup[]>([]);
   const [addressWarning, setAddressWarning] = useState<string[]>([]);
+  const [addressSuggestion, setAddressSuggestion] = useState<SuggestedAddress | null>(null);
+  const [applyingSuggestion, setApplyingSuggestion] = useState(false);
   const [, setIsSplitShipment] = useState(false);
   const [purchasingShipmentId, setPurchasingShipmentId] = useState<number | null>(null);
 
@@ -529,6 +539,7 @@ export default function OnlineOrders() {
     setIsSplitShipment(false);
     setShippingError("");
     setAddressWarning([]);
+    setAddressSuggestion(null);
     setLoadingRates(true);
     try {
       const res = await createShipment({
@@ -553,6 +564,7 @@ export default function OnlineOrders() {
             ? validation.messages
             : ["USPS could not verify this shipping address."]
         );
+        setAddressSuggestion(validation.suggested ?? null);
       }
 
       // Auto-buy is only attempted for a verified address; an unverified one
@@ -840,6 +852,31 @@ export default function OnlineOrders() {
       console.error("Error saving customer details:", err);
     } finally {
       setSavingCustomer(false);
+    }
+  };
+
+  // One-click apply of Shippo's standardized address (e.g. "Groshon Road" ->
+  // "Groshons Rd"), then re-fetch rates against the corrected address.
+  const handleApplySuggestedAddress = async (orderId: number, suggested: SuggestedAddress) => {
+    setApplyingSuggestion(true);
+    try {
+      const res = await updateOrderCustomer(orderId, {
+        shipping_address: suggested.street1,
+        shipping_apartment: suggested.street2,
+        shipping_city: suggested.city,
+        shipping_state: suggested.state,
+        shipping_zip: suggested.zip,
+      });
+      setOrders((prev) =>
+        prev.map((o) => (o.id === orderId ? { ...o, ...res.data } : o))
+      );
+      setAddressSuggestion(null);
+      await handleGetRates(orderId);
+    } catch (err) {
+      console.error("Error applying suggested address:", err);
+      setShippingError("Couldn't apply the suggested address. Use Edit to fix it manually.");
+    } finally {
+      setApplyingSuggestion(false);
     }
   };
 
@@ -1887,8 +1924,29 @@ export default function OnlineOrders() {
                             <ul className="list-disc ml-5 mt-1 space-y-0.5">
                               {addressWarning.map((m, i) => <li key={i}>{m}</li>)}
                             </ul>
+                            {addressSuggestion && (
+                              <div className="mt-2 flex flex-wrap items-center justify-between gap-2 bg-white border border-amber-200 rounded-md p-2">
+                                <div className="text-xs">
+                                  <p className="font-semibold text-amber-900">USPS suggests:</p>
+                                  <p className="text-gray-800">
+                                    {addressSuggestion.street1}{addressSuggestion.street2 ? `, ${addressSuggestion.street2}` : ""}
+                                  </p>
+                                  <p className="text-gray-800">
+                                    {addressSuggestion.city}, {addressSuggestion.state} {addressSuggestion.zip}
+                                  </p>
+                                </div>
+                                <button
+                                  onClick={() => handleApplySuggestedAddress(order.id, addressSuggestion)}
+                                  disabled={applyingSuggestion || loadingRates}
+                                  className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 text-white text-xs font-medium rounded-md hover:bg-amber-700 disabled:opacity-50"
+                                >
+                                  {applyingSuggestion ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <MapPin className="w-3.5 h-3.5" />}
+                                  Use this address &amp; get rates
+                                </button>
+                              </div>
+                            )}
                             <p className="mt-2 text-xs text-amber-700">
-                              USPS won't print a label to an address it can't verify. Fix it with{" "}
+                              {addressSuggestion ? "Or fix it with" : "USPS won't print a label to an address it can't verify. Fix it with"}{" "}
                               <span className="font-semibold">Edit</span> above (check the street number, city and
                               ZIP), then get rates again — or have the customer confirm their USPS-registered
                               address (rural roads sometimes use a PO Box or Rural Route number).
