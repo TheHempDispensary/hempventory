@@ -230,6 +230,29 @@ async def test_plan_reports_full_need_without_deducting_open_batches(db, monkeyp
     assert item["to_produce"] == 100
 
 
+async def test_plan_ignores_bulk_netting_and_on_order_marks(db, monkeypatch):
+    """Green Crack Smalls 28g: par 43, 9 on the shelf, 406g of smalls bulk at HQ
+    and 27 marked "on order" left Smart PAR's order_qty at 0 — but 34 still have
+    to be bagged. Production need is the gross par gap."""
+
+    async def fake_smart_par(months, user, db):
+        return {
+            "products": [{
+                "sku": "GC-28", "name": "THC FLOWER SMALLS GREEN CRACK Sativa 28 GRAMS",
+                "categories": ["Flower"], "total_stock": 9, "units_sold": 57,
+                "units_per_month": 42.7, "par_level": 43,
+                "gross_order_qty": 34, "order_qty": 0, "on_order_qty": 27,
+            }],
+            "meta": {"days_of_data": 239},
+        }
+
+    monkeypatch.setattr(pr, "smart_par", fake_smart_par)
+
+    item = (await pr.production_plan(months=1, user={}, db=db))["items"][0]
+    assert item["needed"] == 34
+    assert item["to_produce"] == 34
+
+
 def test_normalise_sales_name_ignores_strain_type():
     # A renamed title (with the strain type) matches its historical sales name.
     assert (

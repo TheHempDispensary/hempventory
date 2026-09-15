@@ -97,6 +97,34 @@ async def test_fetch_all_clover_orders_raises_on_partial_pull():
         await inv._fetch_all_clover_orders(FlakyClient())
 
 
+async def test_fetch_all_clover_orders_pins_history_window():
+    """Unfiltered, Clover only returns ~90 days; the pull must ask for the
+    full history window explicitly via clientCreatedTime."""
+    seen: list[list[str]] = []
+
+    class Client:
+        async def get_orders(self, **kw):
+            seen.append(kw["filters"])
+            return {"elements": []}
+
+    await inv._fetch_all_clover_orders(Client())
+    (filters,) = seen
+    assert "payType!=NULL" in filters
+    since = [f for f in filters if f.startswith("clientCreatedTime>=")]
+    assert len(since) == 1
+    since_ms = int(since[0].split(">=")[1])
+    expected = (time.time() - inv._SALES_HISTORY_DAYS * 86400) * 1000
+    assert abs(since_ms - expected) < 60_000
+
+
+def test_tally_uses_client_created_time_for_order_date():
+    t = inv._SalesTally({"C1"})
+    order = _order(500, {"name": "WIDGET", "unitQty": 1000, "item": {"id": "C1"}})
+    order["clientCreatedTime"] = 100_000
+    t.add_clover_orders([order])
+    assert t.product_sales("WIDGET", ["C1"]) == (1, 100)
+
+
 async def test_smart_par_uses_clover_item_id(db, monkeypatch):
     latest = time.time()
     first = latest - 30 * 86400
