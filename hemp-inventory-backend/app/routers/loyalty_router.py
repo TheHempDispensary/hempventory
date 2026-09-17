@@ -5,7 +5,7 @@ import aiosqlite
 import asyncio
 import math
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from app.auth import get_current_user
@@ -1263,6 +1263,18 @@ async def _remember_order_cards(
         )
 
 
+def _order_timestamp(order: dict) -> Optional[str]:
+    """When the ticket was rung up, in the DB's CURRENT_TIMESTAMP format (UTC).
+
+    A ticket may be credited days after the sale (a profile gets linked, staff
+    attach it), and the member's history should read in the order they shopped.
+    """
+    created = order.get("createdTime")
+    if not created:
+        return None
+    return datetime.fromtimestamp(int(created) / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _order_discounts(order: dict) -> list[dict]:
     """Every discount on a Clover order, whether applied to the whole ticket or a line."""
     discounts = list((order.get("discounts") or {}).get("elements", []) or [])
@@ -1345,6 +1357,7 @@ async def _redeem_pos_discounts(
     )
     row = await cursor.fetchone()
     balance = row[0] if row else 0
+    occurred_at = _order_timestamp(order)
 
     spent = 0
     for reward in matched:
@@ -1371,10 +1384,10 @@ async def _redeem_pos_discounts(
         )
         await db.execute(
             """INSERT INTO loyalty_transactions
-               (customer_id, type, points, description, order_id, location_name)
-               VALUES (?, 'redeem', ?, ?, ?, ?)""",
+               (customer_id, type, points, description, order_id, location_name, created_at)
+               VALUES (?, 'redeem', ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))""",
             (customer["id"], -cost,
-             f"Redeemed at register: {reward['name']}", clover_order_id, loc_name),
+             f"Redeemed at register: {reward['name']}", clover_order_id, loc_name, occurred_at),
         )
         await db.execute(
             """INSERT INTO loyalty_redemptions (customer_id, reward_id, points_spent, location_name)
@@ -1748,11 +1761,12 @@ async def _do_sync_orders(
                     (points_to_award, points_to_award, matched_customer["id"]),
                 )
                 await db.execute(
-                    """INSERT INTO loyalty_transactions (customer_id, type, points, description, order_id, location_name)
-                       VALUES (?, 'earn', ?, ?, ?, ?)""",
+                    """INSERT INTO loyalty_transactions
+                       (customer_id, type, points, description, order_id, location_name, created_at)
+                       VALUES (?, 'earn', ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))""",
                     (matched_customer["id"], points_to_award,
                      f"POS purchase ${order_dollars:.2f} at {loc_name}",
-                     order_id, loc_name),
+                     order_id, loc_name, _order_timestamp(order)),
                 )
                 await _record_synced_order(
                     db, order_id, merchant_id, loc_name, order_total, "awarded",
@@ -1950,11 +1964,11 @@ async def attach_unmatched_order(
         )
         await db.execute(
             """INSERT INTO loyalty_transactions
-               (customer_id, type, points, description, order_id, location_name)
-               VALUES (?, 'earn', ?, ?, ?, ?)""",
+               (customer_id, type, points, description, order_id, location_name, created_at)
+               VALUES (?, 'earn', ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))""",
             (customer["id"], points_awarded,
              f"POS purchase ${order_dollars:.2f} at {loc_name} (attached by staff)",
-             clover_order_id, loc_name),
+             clover_order_id, loc_name, _order_timestamp(order)),
         )
 
     await _record_synced_order(

@@ -19,6 +19,7 @@ from app.clover_client import CloverClient
 from app.routers.loyalty_router import (
     push_reward_discounts,
     _order_discounts,
+    _order_timestamp,
     _redeem_pos_discounts,
     _redemption_discount_names,
     _reward_for_discount,
@@ -52,7 +53,8 @@ async def db():
         await conn.execute(
             """CREATE TABLE loyalty_transactions (
                    id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id INTEGER, type TEXT,
-                   points INTEGER, description TEXT, order_id TEXT, location_name TEXT)"""
+                   points INTEGER, description TEXT, order_id TEXT, location_name TEXT,
+                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"""
         )
         await conn.execute(
             """CREATE TABLE loyalty_redemptions (
@@ -137,6 +139,34 @@ async def test_points_come_off_and_the_redemption_is_recorded(db):
         "SELECT type, points, order_id FROM loyalty_transactions"
     )
     assert await cursor.fetchall() == [("redeem", -100, "ORD1")]
+
+
+def test_order_timestamp_is_the_tickets_clover_time_in_utc():
+    assert _order_timestamp({"createdTime": 1789420134000}) == "2026-09-14 21:08:54"
+    assert _order_timestamp({}) is None
+
+
+@pytest.mark.asyncio
+async def test_a_late_redemption_is_dated_when_the_ticket_was_rung_up(db):
+    order = _order([{"name": "Rewards $15 off (250 pts)", "amount": -1500}])
+    order["createdTime"] = 1789420134000
+    await _redeem_pos_discounts(db, {"id": 863}, order, "ORD1", "West", REWARDS, NAMES)
+    await db.commit()
+
+    cursor = await db.execute("SELECT created_at FROM loyalty_transactions")
+    assert await cursor.fetchall() == [("2026-09-14 21:08:54",)]
+
+
+@pytest.mark.asyncio
+async def test_a_ticket_without_a_clover_time_is_dated_now(db):
+    await _redeem_pos_discounts(
+        db, {"id": 863}, _order([{"name": "Rewards", "amount": -500}]),
+        "ORD1", "East", REWARDS, NAMES,
+    )
+    await db.commit()
+
+    cursor = await db.execute("SELECT created_at FROM loyalty_transactions")
+    assert (await cursor.fetchone())[0] is not None
 
 
 @pytest.mark.asyncio
