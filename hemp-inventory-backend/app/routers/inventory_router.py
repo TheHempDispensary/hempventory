@@ -99,7 +99,7 @@ class ItemCreate(BaseModel):
     age_restriction_min_age: Optional[int] = None  # e.g. 21
     available: Optional[bool] = True
     hidden: Optional[bool] = False  # hidden from POS
-    auto_manage: Optional[bool] = False  # disabled by default – Clover auto-hides items at 0 stock, blocking POS scanning
+    auto_manage: Optional[bool] = True
     default_tax_rates: Optional[bool] = True
 
 
@@ -508,6 +508,46 @@ async def get_cached_inventory(
     return result
 
 
+@router.get("/untracked")
+async def get_untracked_items(
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Return items without stock tracking at each configured location."""
+    locations = await _get_locations(db)
+    if not locations:
+        return {"locations": [], "total_untracked": 0}
+
+    location_results = []
+    total_untracked = 0
+    for loc in locations:
+        loc_name, merchant_id, api_token = loc[1], loc[2], loc[3]
+        client = CloverClient(merchant_id, api_token)
+        data = await client.get_items()
+        items = data.get("elements", [])
+        untracked = [
+            {
+                "id": item.get("id"),
+                "name": item.get("name"),
+                "sku": item.get("sku"),
+                "stock": (item.get("itemStock") or {}).get("quantity"),
+            }
+            for item in items
+            if not item.get("autoManage")
+        ]
+        location_results.append({
+            "location": loc_name,
+            "total": len(items),
+            "untracked": untracked,
+        })
+        total_untracked += len(untracked)
+
+    return {
+        "locations": location_results,
+        "total_untracked": total_untracked,
+    }
+
+
 def _stock_status(stock: float, par: Optional[float]) -> str:
     if par is None:
         return "no_par"
@@ -709,10 +749,7 @@ async def bulk_auto_manage(
     db: aiosqlite.Connection = Depends(get_db),
 ):
     """Enable or disable autoManage on all (or selected) items across all locations.
-    WARNING: Enabling autoManage causes Clover to auto-hide items when stock=0,
-    which blocks POS scanning. When enabling, we also force available=true and hidden=false
-    to mitigate, but items may become unscannable again as stock depletes.
-    Consider using fix-pos endpoint instead to ensure all items stay scannable."""
+    When enabling, items are also made available for sale."""
     locations = await _get_locations(db)
     if not locations:
         raise HTTPException(status_code=400, detail="No locations configured")
@@ -737,16 +774,15 @@ async def bulk_auto_manage(
                     continue
 
                 update_data: dict = {}
-                if item.get("autoManage", False) != req.enable:
-                    update_data["autoManage"] = req.enable
-                # When enabling autoManage, also ensure item is visible/scannable
                 if req.enable:
+                    if not item.get("autoManage", False):
+                        update_data["autoManage"] = True
                     if not item.get("available", True):
                         update_data["available"] = True
-                    if item.get("hidden", False):
-                        update_data["hidden"] = False
                 # When disabling, also ensure items are available
                 else:
+                    if item.get("autoManage", False):
+                        update_data["autoManage"] = False
                     if not item.get("available", True):
                         update_data["available"] = True
                     if item.get("hidden", False):
@@ -791,10 +827,8 @@ async def fix_pos_scanning(
     user: dict = Depends(get_current_user),
     db: aiosqlite.Connection = Depends(get_db),
 ):
-    """Fix POS scanning issues: disable autoManage on all items and ensure
-    every item is available=true and hidden=false so they can be scanned.
-    Clover's autoManage feature auto-hides items when stock=0, which blocks
-    POS scanning. This endpoint reverses that damage."""
+    """Fix POS scanning issues by enabling stock tracking and ensuring
+    every item is available=true and hidden=false so it can be scanned."""
     locations = await _get_locations(db)
     if not locations:
         raise HTTPException(status_code=400, detail="No locations configured")
@@ -816,8 +850,8 @@ async def fix_pos_scanning(
 
             for item in items:
                 update_data: dict = {}
-                if item.get("autoManage", False):
-                    update_data["autoManage"] = False
+                if not item.get("autoManage", False):
+                    update_data["autoManage"] = True
                 if not item.get("available", True):
                     update_data["available"] = True
                 if item.get("hidden", False):
@@ -935,7 +969,7 @@ async def push_item_to_location(
         item_data["colorCode"] = source_item["colorCode"]
     item_data["isRevenue"] = source_item.get("isRevenue", True)
     item_data["hidden"] = source_item.get("hidden", False)
-    item_data["autoManage"] = source_item.get("autoManage", False)
+    item_data["autoManage"] = True
     item_data["available"] = source_item.get("available", True)
     item_data["defaultTaxRates"] = source_item.get("defaultTaxRates", True)
 
@@ -2969,7 +3003,7 @@ class ItemGroupCreate(BaseModel):
     age_restriction_min_age: Optional[int] = None
     available: Optional[bool] = True
     hidden: Optional[bool] = False
-    auto_manage: Optional[bool] = False  # disabled by default – Clover auto-hides items at 0 stock, blocking POS scanning
+    auto_manage: Optional[bool] = True
     default_tax_rates: Optional[bool] = True
 
 
@@ -3445,8 +3479,7 @@ async def add_variants_to_existing_item(
                 if req.sku_prefix:
                     option_suffix = "-".join(o["name"][:3].upper() for o in combo)
                     item_data["sku"] = f"{req.sku_prefix}-{option_suffix}"
-                # Ensure variant items are always scannable at POS
-                item_data["autoManage"] = False
+                item_data["autoManage"] = True
                 item_data["available"] = True
                 item_data["hidden"] = False
 
@@ -4738,7 +4771,7 @@ async def leaflife_import(
                 "sku": sku,
                 "available": True,
                 "hidden": False,
-                "autoManage": False,
+                "autoManage": True,
                 "isRevenue": True,
                 "defaultTaxRates": True,
                 "isAgeRestricted": True,
@@ -5135,7 +5168,7 @@ async def run_leaflife_sync(db: aiosqlite.Connection) -> dict:
                     "sku": want["sku"],
                     "available": True,
                     "hidden": False,
-                    "autoManage": False,
+                    "autoManage": True,
                     "isRevenue": True,
                     "defaultTaxRates": True,
                     "isAgeRestricted": True,
