@@ -7,6 +7,10 @@ on:
       - "hemp-inventory-backend/**"
       - ".github/workflows/deploy.yml"
 
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: false
+
 jobs:
   deploy:
     name: Deploy to Fly.io
