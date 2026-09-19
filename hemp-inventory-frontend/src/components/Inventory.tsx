@@ -1092,8 +1092,15 @@ export default function Inventory() {
       }
     } catch (err) {
       console.error("Error pushing item to location:", err);
-      const axiosError = err as { response?: { data?: { detail?: string } } };
-      const detail = axiosError?.response?.data?.detail || "Failed to create item at location";
+      const axiosError = err as {
+        response?: { data?: { detail?: string | { status?: string; location?: string } } };
+      };
+      const rawDetail = axiosError?.response?.data?.detail;
+      const detail = typeof rawDetail === "string"
+        ? rawDetail
+        : rawDetail?.status === "already_exists" && rawDetail.location
+          ? `Item already exists at ${rawDetail.location}. Edit the existing item instead of creating a duplicate.`
+          : "Failed to create item at location";
       setSaveMessage({ type: "error", text: detail });
     } finally {
       setPushingToLocation(null);
