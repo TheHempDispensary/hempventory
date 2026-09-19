@@ -361,7 +361,7 @@ export default function Production() {
       status: "planned", batch_no: null, expiration_date: null, made_by: null,
       qa_check: false, label_ordered: false, label_qty: null, notes: null,
       source: "smart_par", plan_date: etToday(), completed_at: null,
-      inventoried: false, inventoried_at: null, inventoried_qty: null,
+      inventoried: false, inventoried_at: null, inventoried_qty: null, inventory_error: null,
       sort_order: 0, created_at: "", updated_at: "",
     });
   };
@@ -409,7 +409,7 @@ export default function Production() {
     if (inv) {
       flash(inv.ok
         ? `Added ${inv.added} of "${b.product_name}" to HQ stock (${inv.previous} → ${inv.new}).${bulkMsg}`
-        : `Couldn't add "${b.product_name}" to HQ stock: ${inv.reason}`);
+        : `Couldn't add "${b.product_name}" to HQ stock: ${inv.reason} — fix the name or link a SKU in the card, then press Add to HQ stock.`);
     } else if (bulkMsg) {
       flash(`"${b.product_name}" marked Done.${bulkMsg}`);
     }
@@ -756,7 +756,7 @@ export default function Production() {
                 status: "planned", batch_no: null, expiration_date: null, made_by: null,
                 qa_check: false, label_ordered: false, label_qty: null, notes: null,
                 source: "manual", plan_date: etToday(), completed_at: null,
-                inventoried: false, inventoried_at: null, inventoried_qty: null,
+                inventoried: false, inventoried_at: null, inventoried_qty: null, inventory_error: null,
                 sort_order: 0, created_at: "", updated_at: "",
               })}
               className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium bg-green-600 text-white rounded-lg hover:bg-green-700"
@@ -771,6 +771,7 @@ export default function Production() {
               const colBatches = col.id === "done" && doneWindow !== "all"
                 ? allInCol.filter((b) => (b.completed_at || b.updated_at || "") >= doneCutoff)
                 : allInCol;
+              const notInStockCount = allInCol.filter((b) => !b.inventoried).length;
               return (
                 <div
                   key={col.id}
@@ -781,6 +782,9 @@ export default function Production() {
                   <div className="flex items-center gap-2 mb-3 px-1">
                     <Icon className={`w-4 h-4 ${col.color}`} />
                     <span className="font-semibold text-sm text-gray-700">{col.label}</span>
+                    {col.id === "done" && notInStockCount > 0 && (
+                      <span className="text-xs text-red-600">· {notInStockCount} not in stock</span>
+                    )}
                     {col.id === "done" ? (
                       <select
                         value={doneWindow}
@@ -904,7 +908,20 @@ export default function Production() {
                           {b.label_ordered && <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-700">Label</span>}
                           {b.source === "smart_par" && <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-100 text-purple-700">Smart PAR</span>}
                           {b.inventoried && <span className="inline-flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700"><Boxes className="w-2.5 h-2.5" />In HQ stock</span>}
+                          {b.status === "done" && !b.inventoried && (
+                            <span
+                              className="text-[10px] px-1.5 py-0.5 rounded bg-red-100 text-red-700"
+                              title={b.inventory_error || undefined}
+                            >
+                              Not in HQ stock
+                            </span>
+                          )}
                         </div>
+                        {b.status === "done" && !b.inventoried && b.inventory_error && (
+                          <div className="mt-1 text-xs text-red-700 truncate" title={b.inventory_error}>
+                            {b.inventory_error}
+                          </div>
+                        )}
                         {NEXT_STATUS[b.status] && (
                           <button
                             onClick={() => advance(b)}
@@ -948,7 +965,7 @@ export default function Production() {
             if (inv) {
               flash(inv.ok
                 ? `Added ${inv.added} of "${saved.product_name}" to HQ stock (${inv.previous} → ${inv.new}).${bulkMsg}`
-                : `Couldn't add "${saved.product_name}" to HQ stock: ${inv.reason}`);
+                : `Couldn't add "${saved.product_name}" to HQ stock: ${inv.reason} — fix the name or link a SKU in the card, then press Add to HQ stock.`);
             } else if (bulkMsg) {
               flash(`"${saved.product_name}" marked Done.${bulkMsg}`);
             }

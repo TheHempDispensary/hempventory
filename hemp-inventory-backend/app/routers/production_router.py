@@ -21,9 +21,23 @@ from app.smart_par_bulk import bulk_per_unit_for
 router = APIRouter(prefix="/api/production", tags=["production"])
 
 
+def _normalise_production_name(name: str) -> str:
+    """Normalise hand-typed production names for Clover matching."""
+    normalised = _normalise_sales_name(name)
+    normalised = re.sub(r"(\d+(?:\.\d+)?)g\b", r"\1 grams", normalised, flags=re.IGNORECASE)
+    normalised = re.sub(r"(\d+)ct\b", r"\1 count", normalised, flags=re.IGNORECASE)
+    normalised = re.sub(r"(\d+(?:\.\d+)?)oz\b", r"\1 oz", normalised, flags=re.IGNORECASE)
+    normalised = re.sub(r"(\d+(?:\.\d+)?)ml\b", r"\1 ml", normalised, flags=re.IGNORECASE)
+    normalised = re.sub(r"(\d+(?:\.\d+)?)\s*mg\b", r"\1mg", normalised, flags=re.IGNORECASE)
+    normalised = re.sub(r"(\d+(?:\.\d+)?)(grams?|count)\b", r"\1 \2", normalised, flags=re.IGNORECASE)
+    normalised = re.sub(r"\bgram\b", "grams", normalised, flags=re.IGNORECASE)
+    normalised = re.sub(r"\b(?:ltr|liter|litre)\b", "ltr", normalised, flags=re.IGNORECASE)
+    return " ".join(normalised.split())
+
+
 def _name_words(name: str) -> tuple:
     """Normalised words of a product name, sorted, for order-insensitive matching."""
-    return tuple(sorted(_normalise_sales_name(name).split()))
+    return tuple(sorted(_normalise_production_name(name).split()))
 
 
 async def _add_to_hq_inventory(sku: str, qty: float, name: str = "") -> dict:
@@ -48,31 +62,52 @@ async def _add_to_hq_inventory(sku: str, qty: float, name: str = "") -> dict:
     data = await client.get_items(expand="itemStock")
     elements = data.get("elements", [])
 
-    target = _normalise_sales_name(name) if name else ""
+    target = _normalise_production_name(name) if name else ""
     target_words = _name_words(name) if name else ()
 
     def _sku_hit(it: dict) -> bool:
         return bool(sku) and ((it.get("sku") or "") == sku or it.get("id") == sku)
 
     def _name_hit(it: dict) -> bool:
-        return bool(target) and _normalise_sales_name(it.get("name") or "") == target
+        return bool(target) and _normalise_production_name(it.get("name") or "") == target
 
     def _words_hit(it: dict) -> bool:
         return bool(target_words) and _name_words(it.get("name") or "") == target_words
 
+    def _superset_hit(it: dict) -> bool:
+        item_name = (it.get("name") or "").strip().lower()
+        item_words = set(_name_words(item_name))
+        target_word_set = set(target_words)
+        extra_words = item_words - target_word_set
+        excluded_extras = {
+            "bulk", "smalls", "small", "ground", "trim", "shake", "pre",
+            "rolled", "roll", "baby", "j", "js", "live", "resin", "wax",
+            "cart", "cartridge", "disposable",
+        }
+        return (
+            bool(target_word_set)
+            and bool(extra_words)
+            and target_word_set.issubset(item_words)
+            and not extra_words & excluded_extras
+            and not item_name.startswith(("bulk", "supply"))
+        )
+
     # Prefer an item that matches BOTH the stored id/SKU and the name; then an
     # exact name match; then the same words in a different order (batch titles
     # get typed by hand, e.g. "DIVINE SMALLS" vs Clover's "SMALLS DIVINE"), but
-    # only when it is unambiguous; then the SKU/id alone. Flower items
+    # only when it is unambiguous; then a safe unique superset match; then the
+    # SKU/id alone. Flower items
     # frequently have no user SKU (so the batch carries a Clover item id) and
     # some products share a duplicate SKU, which makes the SKU alone unreliable
     # — the product name is the dependable identifier, so it wins over a
     # SKU-only hit.
     word_matches = [it for it in elements if _words_hit(it)] if target_words else []
+    superset_matches = [it for it in elements if _superset_hit(it)] if target_words else []
     match = (
         next((it for it in elements if _sku_hit(it) and _name_hit(it)), None)
         or next((it for it in elements if _name_hit(it)), None)
         or (word_matches[0] if len(word_matches) == 1 else None)
+        or (superset_matches[0] if len(superset_matches) == 1 else None)
         or next((it for it in elements if _sku_hit(it)), None)
     )
     if not match:
@@ -526,6 +561,7 @@ def _batch_row(row: aiosqlite.Row) -> dict:
         "inventoried": bool(row["inventoried"]),
         "inventoried_at": row["inventoried_at"],
         "inventoried_qty": row["inventoried_qty"],
+        "inventory_error": row["inventory_error"],
         "sort_order": row["sort_order"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
@@ -612,9 +648,18 @@ async def create_batch(
             if inventory_result.get("ok"):
                 await db.execute(
                     """UPDATE production_batches
-                       SET inventoried = 1, inventoried_at = CURRENT_TIMESTAMP, inventoried_qty = ?
+                       SET inventoried = 1, inventoried_at = CURRENT_TIMESTAMP,
+                           inventoried_qty = ?, inventory_error = NULL
                        WHERE id = ?""",
                     (qty, new_id),
+                )
+                await db.commit()
+                cursor = await db.execute("SELECT * FROM production_batches WHERE id = ?", (new_id,))
+                row = await cursor.fetchone()
+            else:
+                await db.execute(
+                    "UPDATE production_batches SET inventory_error = ? WHERE id = ?",
+                    (inventory_result.get("reason", "Could not add to inventory"), new_id),
                 )
                 await db.commit()
                 cursor = await db.execute("SELECT * FROM production_batches WHERE id = ?", (new_id,))
@@ -684,6 +729,8 @@ async def update_batch(
         set_parts.append("completed_at = CURRENT_TIMESTAMP")
     elif "status" in fields and fields["status"] != "done":
         set_parts.append("completed_at = NULL")
+    if fields.get("status") == "done" and body.add_to_inventory is False:
+        set_parts.append("inventory_error = NULL")
 
     params.append(batch_id)
     await db.execute(
@@ -706,9 +753,18 @@ async def update_batch(
             if inventory_result.get("ok"):
                 await db.execute(
                     """UPDATE production_batches
-                       SET inventoried = 1, inventoried_at = CURRENT_TIMESTAMP, inventoried_qty = ?
+                       SET inventoried = 1, inventoried_at = CURRENT_TIMESTAMP,
+                           inventoried_qty = ?, inventory_error = NULL
                        WHERE id = ?""",
                     (qty, batch_id),
+                )
+                await db.commit()
+                cursor = await db.execute("SELECT * FROM production_batches WHERE id = ?", (batch_id,))
+                row = await cursor.fetchone()
+            else:
+                await db.execute(
+                    "UPDATE production_batches SET inventory_error = ? WHERE id = ?",
+                    (inventory_result.get("reason", "Could not add to inventory"), batch_id),
                 )
                 await db.commit()
                 cursor = await db.execute("SELECT * FROM production_batches WHERE id = ?", (batch_id,))
@@ -743,10 +799,16 @@ async def add_batch_to_inventory(
     qty = row["produced_qty"] or row["planned_qty"] or 0
     inv = await _add_to_hq_inventory(row["sku"] or "", qty, row["product_name"] or "")
     if not inv.get("ok"):
+        await db.execute(
+            "UPDATE production_batches SET inventory_error = ? WHERE id = ?",
+            (inv.get("reason", "Could not add to inventory"), batch_id),
+        )
+        await db.commit()
         raise HTTPException(status_code=400, detail=inv.get("reason", "Could not add to inventory"))
     await db.execute(
         """UPDATE production_batches
-           SET inventoried = 1, inventoried_at = CURRENT_TIMESTAMP, inventoried_qty = ?
+           SET inventoried = 1, inventoried_at = CURRENT_TIMESTAMP,
+               inventoried_qty = ?, inventory_error = NULL
            WHERE id = ?""",
         (qty, batch_id),
     )

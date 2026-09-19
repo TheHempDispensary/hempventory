@@ -882,6 +882,7 @@ export interface ProductionBatch {
   sort_order: number;
   created_at: string;
   updated_at: string;
+  inventory_error?: string | null;
   inventory_result?: { ok: boolean; reason?: string; previous?: number; new?: number; added?: number };
   bulk_result?: { ok: boolean; reason?: string; bulk_name?: string; previous?: number; new?: number; deducted?: number };
 }
