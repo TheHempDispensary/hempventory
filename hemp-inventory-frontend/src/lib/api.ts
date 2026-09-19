@@ -133,6 +133,8 @@ export const pushItemToLocation = (sku: string, locationId: number, initialStock
 
 export const fixPosScanning = () => api.post("/api/inventory/fix-pos");
 
+export const getUntrackedItems = () => api.get("/api/inventory/untracked");
+
 export const transferStock = (sku: string, fromLocationId: number, toLocationId: number, quantity: number, transferGroupId?: string, itemName?: string) =>
   api.post("/api/inventory/transfer-stock", { sku, from_location_id: fromLocationId, to_location_id: toLocationId, quantity, transfer_group_id: transferGroupId, item_name: itemName });
 

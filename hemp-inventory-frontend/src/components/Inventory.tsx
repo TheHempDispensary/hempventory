@@ -157,7 +157,7 @@ export default function Inventory() {
     price_type: "FIXED", cost: "", product_code: "", alternate_name: "",
     description: "", color_code: "", is_revenue: true, is_age_restricted: true,
     age_restriction_type: "Vitamin & Supplements", age_restriction_min_age: "21",
-    available: true, hidden: false, auto_manage: false, default_tax_rates: true,
+    available: true, hidden: false, auto_manage: true, default_tax_rates: true,
     effect: "", strength: "", product_type: "",
   });
 
@@ -1014,17 +1014,17 @@ export default function Inventory() {
   };
 
   const handleBulkAutoManage = async () => {
-    if (!confirm("WARNING: Enabling Auto-Manage causes Clover to auto-hide items from POS when stock reaches 0. This can block scanning!\n\nOnly enable this if you want Clover to auto-deduct stock on sales. You may need to run 'Fix POS Scanning' afterward if items become unscannable.\n\nContinue?")) return;
+    if (!confirm("Enable stock tracking (auto-deduct on sale) on all items across all locations?")) return;
     setAutoManaging(true);
     try {
       const resp = await bulkAutoManage(true);
       const data = resp.data;
-      setToast({ type: "success", text: `Auto-Manage enabled: ${data.total_updated} items updated across ${data.results?.length || 0} location(s)` });
+      setToast({ type: "success", text: `Stock tracking enabled: ${data.total_updated} items updated across ${data.results?.length || 0} location(s)` });
       setTimeout(() => setToast(null), 6000);
       await loadData();
     } catch (err) {
-      console.error("Error enabling auto-manage:", err);
-      setToast({ type: "error", text: "Failed to enable auto-manage stock." });
+      console.error("Error enabling stock tracking:", err);
+      setToast({ type: "error", text: "Failed to enable stock tracking." });
       setTimeout(() => setToast(null), 5000);
     } finally {
       setAutoManaging(false);
@@ -1069,7 +1069,7 @@ export default function Inventory() {
 
   const [fixingPos, setFixingPos] = useState(false);
   const handleFixPos = async () => {
-    if (!confirm("Fix POS Scanning: This will disable Auto-Manage and make ALL items visible/scannable at POS across all locations.\n\nThis fixes the issue where items with 0 stock can't be scanned.\n\nContinue?")) return;
+    if (!confirm("Fix POS Scanning: This will enable stock tracking and make ALL items available/visible at POS across all locations.\n\nContinue?")) return;
     setFixingPos(true);
     try {
       const resp = await fixPosScanning();
@@ -1606,7 +1606,7 @@ export default function Inventory() {
             onClick={handleFixPos}
             disabled={fixingPos}
             className="flex items-center gap-2 px-4 py-2 border border-emerald-300 bg-emerald-50 text-emerald-700 rounded-lg hover:bg-emerald-100 text-sm disabled:opacity-50 transition-colors"
-            title="Fix POS scanning issues: disable auto-manage and make all items scannable"
+            title="Fix POS scanning issues: enable stock tracking and make all items scannable"
           >
             <Package className={`w-4 h-4 ${fixingPos ? "animate-bounce" : ""}`} />
             {fixingPos ? "Fixing..." : "Fix POS Scanning"}
@@ -1615,10 +1615,10 @@ export default function Inventory() {
             onClick={handleBulkAutoManage}
             disabled={autoManaging}
             className="flex items-center gap-2 px-4 py-2 border border-blue-300 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 text-sm disabled:opacity-50 transition-colors"
-            title="WARNING: Enable auto-manage stock. May cause items to become unscannable at POS when stock reaches 0."
+            title="Enable stock tracking (auto-deduct on sale) across all locations"
           >
             <Settings className={`w-4 h-4 ${autoManaging ? "animate-spin" : ""}`} />
-            {autoManaging ? "Enabling..." : "Auto-Manage All"}
+            {autoManaging ? "Enabling..." : "Track Stock All"}
           </button>
           <button
             onClick={() => setShowTransfer(true)}
@@ -2189,7 +2189,7 @@ export default function Inventory() {
                       className="w-4 h-4 text-green-600 rounded focus:ring-green-500"
                     />
                     <div>
-                      <span className="text-sm font-medium text-gray-700">Auto-Manage Stock</span>
+                      <span className="text-sm font-medium text-gray-700">Track Stock (auto-deduct on sale)</span>
                       <p className="text-xs text-gray-400">Automatically decrement stock on each sale</p>
                     </div>
                   </label>
@@ -2763,7 +2763,7 @@ export default function Inventory() {
                       className="w-4 h-4 text-green-600 rounded focus:ring-green-500"
                     />
                     <div>
-                      <span className="text-sm font-medium text-gray-700">Auto-Manage Stock</span>
+                      <span className="text-sm font-medium text-gray-700">Track Stock (auto-deduct on sale)</span>
                       <p className="text-xs text-gray-400">Automatically reduce stock when items are sold</p>
                     </div>
                   </label>
@@ -2813,7 +2813,7 @@ export default function Inventory() {
                       className="w-4 h-4 text-green-600 rounded focus:ring-green-500"
                     />
                     <div>
-                      <span className="text-sm font-medium text-gray-700">Auto-Manage Stock</span>
+                      <span className="text-sm font-medium text-gray-700">Track Stock (auto-deduct on sale)</span>
                       <p className="text-xs text-gray-400">Automatically reduce stock when items are sold</p>
                     </div>
                   </label>
