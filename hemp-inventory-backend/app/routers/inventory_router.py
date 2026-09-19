@@ -12,6 +12,7 @@ import os
 import json
 import io
 import itertools
+import math
 import time
 import re
 import uuid
@@ -4464,14 +4465,15 @@ async def _hq_ecommerce_sales(db: aiosqlite.Connection) -> list[tuple]:
 
 
 async def _run_auto_set_par(months: float, db: aiosqlite.Connection) -> dict:
-    """Set every item's PAR level, per location, from that location's own sales velocity.
+    """Set every item's PAR level, using store averages for HQ where available.
 
     For each Clover location we tally its paid, non-refunded POS sales by Clover
     item ID (falling back to product name), derive units/day over the location's
     own order history, and store PAR = round(units_per_month * months) for each
-    item at that location. Re-running
-    recomputes from the latest sales, so as an item sells faster its PAR (and the
-    reorder/production need it drives) rises automatically.
+    item at that location. HQ instead uses half the average PAR from non-HQ
+    stores for a matching item, falling back to its own sales when no store
+    carries it. Re-running recomputes from the latest sales, so as an item sells
+    faster its PAR (and the reorder/production need it drives) rises automatically.
 
     LeafLife (LF-) items are skipped — they ship from the partner and don't sit on
     our shelves.
@@ -4491,10 +4493,10 @@ async def _run_auto_set_par(months: float, db: aiosqlite.Connection) -> dict:
     # below run concurrently and must not share the connection.
     ecommerce_sales = await _hq_ecommerce_sales(db)
 
-    async def compute_location(loc) -> tuple[list[tuple[str, int, float]], dict]:
+    async def compute_location(loc) -> tuple[list[tuple[str, int, float, str, str]], dict]:
         loc_id, loc_name, merchant_id, api_token = loc[0], loc[1], loc[2], loc[3]
         client = CloverClient(merchant_id, api_token)
-        loc_par_rows: list[tuple[str, int, float]] = []
+        loc_par_rows: list[tuple[str, int, float, str, str]] = []
 
         # 1. This location's catalog, then its own sales tallied by item ID.
         # A failed pull aborts the run: writing PAR from empty or partial
@@ -4535,7 +4537,7 @@ async def _run_auto_set_par(months: float, db: aiosqlite.Connection) -> dict:
             product_days = _product_days_of_data(first_ts, latest_ts, days_of_data)
             units_per_month = (units_sold / product_days) * 30.44
             par_level = round(units_per_month * months)
-            loc_par_rows.append((display_sku, loc_id, float(par_level)))
+            loc_par_rows.append((display_sku, loc_id, float(par_level), raw_sku, name))
             loc_items += 1
             if par_level > 0:
                 loc_with_par += 1
@@ -4548,8 +4550,33 @@ async def _run_auto_set_par(months: float, db: aiosqlite.Connection) -> dict:
         }
 
     computed = await asyncio.gather(*(compute_location(loc) for loc in locations))
-    par_rows = [row for loc_rows, _ in computed for row in loc_rows]
-    per_location_summary = [summary for _, summary in computed]
+    by_sku: dict[str, list[float]] = {}
+    by_name: dict[str, list[float]] = {}
+    for loc, (loc_rows, _) in zip(locations, computed):
+        if str(loc[2]) == str(HQ_MERCHANT_ID):
+            continue
+        for _, _, par_level, raw_sku, name in loc_rows:
+            if raw_sku:
+                by_sku.setdefault(raw_sku, []).append(par_level)
+            by_name.setdefault(name.upper(), []).append(par_level)
+
+    par_rows: list[tuple[str, int, float]] = []
+    per_location_summary = []
+    for loc, (loc_rows, summary) in zip(locations, computed):
+        is_hq = str(loc[2]) == str(HQ_MERCHANT_ID)
+        adjusted_rows = []
+        for display_sku, loc_id, par_level, raw_sku, name in loc_rows:
+            if is_hq:
+                store_pars = by_sku.get(raw_sku) if raw_sku else None
+                if not store_pars:
+                    store_pars = by_name.get(name.upper(), [])
+                if store_pars:
+                    par_level = float(math.ceil((sum(store_pars) / len(store_pars)) / 2))
+            adjusted_rows.append((display_sku, loc_id, par_level, raw_sku, name))
+            par_rows.append((display_sku, loc_id, par_level))
+        if is_hq:
+            summary["with_par"] = sum(1 for row in adjusted_rows if row[2] > 0)
+        per_location_summary.append(summary)
 
     # 3. Persist. Upsert so re-running refreshes existing PAR levels.
     await db.executemany(
@@ -4562,7 +4589,7 @@ async def _run_auto_set_par(months: float, db: aiosqlite.Connection) -> dict:
     await db.commit()
 
     return {
-        "message": f"Set PAR levels for {len(par_rows)} item/location pairs from {months}-month sales velocity",
+        "message": f"Set PAR levels for {len(par_rows)} item/location pairs from {months}-month sales velocity; HQ uses store PAR averages where available",
         "months": months,
         "total_set": len(par_rows),
         "by_location": per_location_summary,
