@@ -37,11 +37,126 @@ router = APIRouter(prefix="/api/inventory", tags=["inventory"])
 # In-memory cache for inventory data
 _inventory_cache: dict = {"items": [], "locations": [], "updated_at": 0}
 _cache_lock = asyncio.Lock()
+_create_locks: dict[str, asyncio.Lock] = {}
 
 # In-memory cache for processed images (nobg + resize results)
 # Key: (sku, w, nobg) -> (image_bytes, media_type)
 _image_cache: dict[tuple[str, int | None, int | None], tuple[bytes, str]] = {}
 _IMAGE_CACHE_MAX = 500
+
+
+def _normalise_item_name(name: str) -> str:
+    return " ".join((name or "").split()).casefold()
+
+
+def _find_existing_item(
+    items: list[dict], name: str, sku: str | None
+) -> dict | None:
+    normalized_name = _normalise_item_name(name)
+    normalized_sku = (sku or "").strip()
+    for item in items:
+        if normalized_name and _normalise_item_name(item.get("name", "")) == normalized_name:
+            return item
+        if normalized_sku and str(item.get("sku") or "").strip() == normalized_sku:
+            return item
+    return None
+
+
+def _lock_for(name: str) -> asyncio.Lock:
+    key = _normalise_item_name(name)
+    lock = _create_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _create_locks[key] = lock
+    return lock
+
+
+def _duplicate_item_value(value) -> str:
+    return str(value or "").strip()
+
+
+def _duplicate_item_stock(item: dict) -> float:
+    quantity = (item.get("itemStock") or {}).get("quantity")
+    try:
+        return float(quantity or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _duplicate_item_modified_time(item: dict) -> float:
+    try:
+        return float(item.get("modifiedTime") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _build_duplicate_group(
+    location_id: int,
+    location_name: str,
+    items: list[dict],
+) -> dict:
+    records = [
+        {
+            "id": item.get("id", ""),
+            "sku": item.get("sku"),
+            "code": item.get("code"),
+            "stock": _duplicate_item_stock(item),
+            "hidden": item.get("hidden", False),
+            "modifiedTime": item.get("modifiedTime"),
+        }
+        for item in items
+    ]
+    skus = {_duplicate_item_value(item.get("sku")) for item in items}
+    codes = {_duplicate_item_value(item.get("code")) for item in items}
+    nonblank_codes = {code for code in codes if code}
+
+    reason = None
+    eligible_items = items
+    if any(_duplicate_item_value(item.get("code")) == "CLOVER_GIFT_CARD" for item in items):
+        reason = "gift card"
+    elif len(skus) > 1 or (
+        len(codes) > 1
+        and not (len(nonblank_codes) == 1 and "" in codes)
+    ):
+        reason = "barcodes differ"
+    elif len(nonblank_codes) == 1:
+        eligible_items = [
+            item for item in items
+            if _duplicate_item_value(item.get("code")) in nonblank_codes
+        ]
+
+    mergeable = reason is None
+    keep_id = None
+    if mergeable:
+        keep_item = max(
+            eligible_items,
+            key=lambda item: (
+                _duplicate_item_stock(item),
+                _duplicate_item_modified_time(item),
+            ),
+        )
+        keep_id = keep_item.get("id", "")
+
+    return {
+        "location_id": location_id,
+        "location": location_name,
+        "name": items[0].get("name", ""),
+        "records": records,
+        "mergeable": mergeable,
+        "reason": reason,
+        "keep_id": keep_id,
+        "merged_stock": sum(
+            stock for item in items
+            if (stock := _duplicate_item_stock(item)) > 0
+        ),
+    }
+
+
+def _duplicate_item_groups(items: list[dict]) -> list[list[dict]]:
+    groups: dict[str, list[dict]] = {}
+    for item in items:
+        groups.setdefault(_normalise_item_name(item.get("name", "")), []).append(item)
+    return [group for group in groups.values() if len(group) > 1]
 
 
 async def _invalidate_cache():
@@ -568,12 +683,36 @@ async def create_item(
     db: aiosqlite.Connection = Depends(get_db),
 ):
     """Create an item and push it to specified (or all) locations."""
+    async with _lock_for(item.name):
+        return await _create_item(item, user, db)
+
+
+async def _create_item(
+    item: ItemCreate,
+    user: dict,
+    db: aiosqlite.Connection,
+):
     locations = await _get_locations(db, item.locations)
     if not locations:
         raise HTTPException(status_code=400, detail="No locations configured")
     locations = _hq_locations_for_bulk(locations, item.name)
     if not locations:
         raise HTTPException(status_code=400, detail="Bulk items can only be created at HQ")
+
+    duplicate_locations = []
+    for loc in locations:
+        client = CloverClient(loc[2], loc[3])
+        existing = await client.get_items()
+        if _find_existing_item(existing.get("elements", []), item.name, item.sku):
+            duplicate_locations.append(loc[1])
+    if duplicate_locations:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"'{item.name}' already exists at {', '.join(duplicate_locations)}. "
+                "Edit the existing item instead of creating a duplicate."
+            ),
+        )
 
     # Build per-location stock map
     stock_map: dict[int, float] = {}
@@ -914,6 +1053,9 @@ async def push_item_to_location(
     target_loc_id, target_loc_name, target_merchant_id, target_api_token = (
         target_loc[0], target_loc[1], target_loc[2], target_loc[3]
     )
+    target_client = CloverClient(target_merchant_id, target_api_token)
+    target_data = await target_client.get_items(expand="itemStock,categories,ageRestricted")
+    target_items = target_data.get("elements", [])
 
     # Get all locations to find the item in a source location
     all_locations = await _get_locations(db)
@@ -944,6 +1086,21 @@ async def push_item_to_location(
 
     if not _hq_locations_for_bulk([target_loc], source_item.get("name") or ""):
         raise HTTPException(status_code=400, detail="Bulk items only exist at HQ")
+
+    existing = _find_existing_item(
+        target_items,
+        source_item.get("name", ""),
+        source_item.get("sku") or sku,
+    )
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "status": "already_exists",
+                "location": target_loc_name,
+                "item_id": existing.get("id", ""),
+            },
+        )
 
     # Build item data from source
     item_data: dict = {
@@ -984,7 +1141,6 @@ async def push_item_to_location(
 
     # Create at target location
     try:
-        target_client = CloverClient(target_merchant_id, target_api_token)
         created = await target_client.create_item(item_data)
         clover_id = created.get("id", "")
 
@@ -1023,6 +1179,82 @@ async def push_item_to_location(
         raise HTTPException(status_code=400, detail=f"Failed to create item at {target_loc_name}: {error_detail}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create item at {target_loc_name}: {str(e)}")
+
+
+@router.get("/duplicates")
+async def get_duplicate_items(
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """List duplicate item names and whether each group can be merged."""
+    locations = await _get_locations(db)
+    duplicates = []
+    for loc in locations:
+        location_id, location_name, merchant_id, api_token = loc[0], loc[1], loc[2], loc[3]
+        client = CloverClient(merchant_id, api_token)
+        data = await client.get_items(expand="itemStock")
+        for items in _duplicate_item_groups(data.get("elements", [])):
+            duplicates.append(_build_duplicate_group(location_id, location_name, items))
+    return {"duplicates": duplicates}
+
+
+class DuplicateMergeRequest(BaseModel):
+    location_id: int
+    name: str
+    dry_run: bool = True
+
+
+@router.post("/duplicates/merge")
+async def merge_duplicate_items(
+    req: DuplicateMergeRequest,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Merge a duplicate item group after recomputing it from Clover."""
+    async with _lock_for(req.name):
+        return await _merge_duplicate_items(req, user, db)
+
+
+async def _merge_duplicate_items(
+    req: DuplicateMergeRequest,
+    user: dict,
+    db: aiosqlite.Connection,
+):
+    locations = await _get_locations(db, [req.location_id])
+    if not locations:
+        raise HTTPException(status_code=404, detail="Location not found")
+    location_id, location_name, merchant_id, api_token = locations[0]
+    client = CloverClient(merchant_id, api_token)
+    data = await client.get_items(expand="itemStock")
+    normalized_name = _normalise_item_name(req.name)
+    matching_groups = [
+        items for items in _duplicate_item_groups(data.get("elements", []))
+        if _normalise_item_name(items[0].get("name", "")) == normalized_name
+    ]
+    if not matching_groups:
+        raise HTTPException(status_code=400, detail="No duplicate items found for this name")
+
+    group = _build_duplicate_group(location_id, location_name, matching_groups[0])
+    if not group["mergeable"]:
+        raise HTTPException(status_code=400, detail=group["reason"])
+
+    keep_id = group["keep_id"]
+    deleted = [
+        record["id"] for record in group["records"]
+        if record["id"] != keep_id
+    ]
+    if not req.dry_run:
+        await client.update_item_stock(keep_id, group["merged_stock"])
+        for item_id in deleted:
+            await client.delete_item(item_id)
+        await _invalidate_cache()
+
+    return {
+        **group,
+        "deleted": deleted if not req.dry_run else [],
+        "kept": keep_id,
+        "stock_set": group["merged_stock"],
+    }
 
 
 class BulkStrainTypeRequest(BaseModel):
@@ -3204,12 +3436,39 @@ async def create_item_group(
     5. Create individual items with itemGroup.id set
     6. Associate options with each item
     """
+    async with _lock_for(req.name):
+        return await _create_item_group(req, user, db)
+
+
+async def _create_item_group(
+    req: ItemGroupCreate,
+    user: dict,
+    db: aiosqlite.Connection,
+):
     locations = await _get_locations(db)
     if not locations:
         raise HTTPException(status_code=400, detail="No locations configured")
-    locations = _hq_locations_for_bulk(locations, req.item_name)
+    locations = _hq_locations_for_bulk(locations, req.name)
     if not locations:
         raise HTTPException(status_code=400, detail="Bulk items can only be created at HQ")
+
+    duplicate_locations = []
+    for loc in locations:
+        client = CloverClient(loc[2], loc[3])
+        groups_data = await client.get_item_groups()
+        items_data = await client.get_items()
+        existing_group = _find_existing_item(groups_data.get("elements", []), req.name, None)
+        existing_item = _find_existing_item(items_data.get("elements", []), req.name, None)
+        if existing_group or existing_item:
+            duplicate_locations.append(loc[1])
+    if duplicate_locations:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"'{req.name}' already exists at {', '.join(duplicate_locations)}. "
+                "Edit the existing item instead of creating a duplicate."
+            ),
+        )
 
     # Merge duplicate attribute names (case-insensitive): combine options from attributes with the same name.
     # This prevents accidental cartesian explosion (e.g. two "Size" attributes with 3 opts each → 9 combos).
