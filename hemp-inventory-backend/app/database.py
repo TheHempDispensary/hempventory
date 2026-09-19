@@ -882,6 +882,7 @@ async def init_db():
             ("inventoried", "INTEGER DEFAULT 0"),
             ("inventoried_at", "TIMESTAMP"),
             ("inventoried_qty", "REAL"),
+            ("inventory_error", "TEXT"),
             # Manual ordering of cards within a status column (lower = higher up).
             ("sort_order", "INTEGER DEFAULT 0"),
             # Track whether the linked bulk source was already deducted for this

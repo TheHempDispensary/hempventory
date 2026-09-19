@@ -402,6 +402,85 @@ async def test_add_to_hq_inventory_skips_ambiguous_word_match(monkeypatch):
     assert "not found in HQ inventory" in res["reason"]
 
 
+def test_normalise_production_name_units():
+    assert pr._normalise_production_name("28G") == "28 grams"
+    assert pr._normalise_production_name("7g") == "7 grams"
+    assert pr._normalise_production_name("20CT") == "20 count"
+    assert pr._normalise_production_name("3.5 GRAMS ") == "3.5 grams"
+    assert pr._normalise_production_name("30MG") == "30mg"
+    assert pr._normalise_production_name("30MG") == pr._normalise_production_name("30mg")
+
+
+async def test_add_to_hq_inventory_matches_production_name_variants(monkeypatch):
+    prod = _patch_hq(monkeypatch, [
+        {"id": "GROUND28", "sku": "", "name": "THC GROUND FLOWER NERDS Hybrid 28 GRAMS",
+         "itemStock": {"quantity": 1}},
+        {"id": "GROUND7", "sku": "", "name": "THC GROUND FLOWER NERDS Hybrid 7 GRAMS",
+         "itemStock": {"quantity": 2}},
+        {"id": "BANANA", "sku": "", "name": "THC FLOWER DIVINE Banana SMALLS SATIVA 3.5 GRAMS",
+         "itemStock": {"quantity": 3}},
+        {"id": "GUMMIES", "sku": "", "name": "CBD/CBG/CBN GUMMIES 30MG FRUIT VARIETY 20 COUNT",
+         "itemStock": {"quantity": 4}},
+        {"id": "LIGHTS", "sku": "", "name": "Lights Out Delta 9 THC/CBD/CBN 30mg Gummies 10 Count",
+         "itemStock": {"quantity": 5}},
+    ])
+    cases = [
+        ("THC GROUND FLOWER NERDS Hybrid 28G", "GROUND28", 22),
+        ("THC GROUND FLOWER NERDS Hybrid 7G", "GROUND7", 27),
+        ("THC FLOWER DIVINE SMALLS SATIVA 3.5 GRAMS ", "BANANA", 1),
+        ("CBD/CBG/CBN 30MG FRUIT VARIETY GUMMIES 20CT", "GUMMIES", 1),
+    ]
+    for name, item_id, qty in cases:
+        result = await prod._add_to_hq_inventory("", qty, name)
+        assert result["ok"] is True
+        assert result["item_id"] == item_id
+        assert result["added"] == qty
+
+    unmatched = await prod._add_to_hq_inventory(
+        "", 1, "Delta 9 CBG CBN Gummies LIGHTS OUT 10CT"
+    )
+    assert unmatched["ok"] is False
+
+
+async def test_add_to_hq_inventory_rejects_unsafe_superset(monkeypatch):
+    prod = _patch_hq(monkeypatch, [
+        {"id": "SMALLS", "sku": "", "name": "THC FLOWER NERDS SMALLS Hybrid 28 GRAMS",
+         "itemStock": {"quantity": 1}},
+    ])
+    result = await prod._add_to_hq_inventory("", 1, "thc flower nerds 28 grams")
+    assert result["ok"] is False
+    assert "not found in HQ inventory" in result["reason"]
+
+
+async def test_done_inventory_error_can_be_fixed_after_rename(db, monkeypatch):
+    calls = []
+
+    async def fake_add(sku, qty, name=""):
+        calls.append(name)
+        if name == "Bad Product":
+            return {"ok": False, "reason": "Bad Product not found in HQ inventory"}
+        return {"ok": True, "previous": 0, "new": qty, "added": qty, "item_id": "GOOD"}
+
+    monkeypatch.setattr(pr, "_add_to_hq_inventory", fake_add)
+    created = await pr.create_batch(
+        pr.BatchCreate(product_name="Bad Product", planned_qty=5), user={}, db=db,
+    )
+    failed = await pr.update_batch(
+        created["id"], pr.BatchUpdate(status="done"), user={}, db=db,
+    )
+    assert failed["inventoried"] is False
+    assert failed["inventory_error"] == "Bad Product not found in HQ inventory"
+
+    renamed = await pr.update_batch(
+        created["id"], pr.BatchUpdate(product_name="Good Product"), user={}, db=db,
+    )
+    assert renamed["inventory_error"] == "Bad Product not found in HQ inventory"
+    fixed = await pr.add_batch_to_inventory(created["id"], user={}, db=db)
+    assert calls == ["Bad Product", "Good Product"]
+    assert fixed["inventoried"] is True
+    assert fixed["inventory_error"] is None
+
+
 async def test_batch_name_is_trimmed(db):
     created = await pr.create_batch(
         pr.BatchCreate(product_name="  Lemonade 2 oz  ", planned_qty=1, status="planned"),
