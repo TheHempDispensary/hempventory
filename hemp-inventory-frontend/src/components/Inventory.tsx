@@ -31,7 +31,6 @@ interface InventoryItem {
   age_restriction_min_age?: number;
   available?: boolean;
   hidden?: boolean;
-  auto_manage?: boolean;
   default_tax_rates?: boolean;
   has_image?: boolean;
   item_group_name?: string;
@@ -83,14 +82,13 @@ export default function Inventory() {
     age_restriction_min_age: string;
     available: boolean;
     hidden: boolean;
-    auto_manage: boolean;
     default_tax_rates: boolean;
   }>({
     name: "", price: "", sku: "", category: "", stocks: {}, pars: {},
     price_type: "FIXED", cost: "", product_code: "", alternate_name: "",
     description: "", color_code: "", is_revenue: true, is_age_restricted: true,
     age_restriction_type: "Vitamin & Supplements", age_restriction_min_age: "21",
-    available: true, hidden: false, auto_manage: true, default_tax_rates: true,
+    available: true, hidden: false, default_tax_rates: true,
   });
   const [addItemTab, setAddItemTab] = useState("details");
   const [addingItem, setAddingItem] = useState(false);
@@ -147,7 +145,6 @@ export default function Inventory() {
     age_restriction_min_age: string;
     available: boolean;
     hidden: boolean;
-    auto_manage: boolean;
     default_tax_rates: boolean;
     effect: string;
     strength: string;
@@ -157,7 +154,7 @@ export default function Inventory() {
     price_type: "FIXED", cost: "", product_code: "", alternate_name: "",
     description: "", color_code: "", is_revenue: true, is_age_restricted: true,
     age_restriction_type: "Vitamin & Supplements", age_restriction_min_age: "21",
-    available: true, hidden: false, auto_manage: true, default_tax_rates: true,
+    available: true, hidden: false, default_tax_rates: true,
     effect: "", strength: "", product_type: "",
   });
 
@@ -237,7 +234,6 @@ export default function Inventory() {
         age_restriction_min_age: newItem.is_age_restricted && newItem.age_restriction_min_age ? parseInt(newItem.age_restriction_min_age) : undefined,
         available: newItem.available,
         hidden: newItem.hidden,
-        auto_manage: newItem.auto_manage,
         default_tax_rates: newItem.default_tax_rates,
       });
       const results = response.data?.results || [];
@@ -253,7 +249,7 @@ export default function Inventory() {
         price_type: "FIXED", cost: "", product_code: "", alternate_name: "",
         description: "", color_code: "", is_revenue: true, is_age_restricted: true,
         age_restriction_type: "Vitamin & Supplements", age_restriction_min_age: "21",
-          available: true, hidden: false, auto_manage: true, default_tax_rates: true,
+          available: true, hidden: false, default_tax_rates: true,
         });
         setHasVariants(false);
       setVariantAttributes([{ attribute_name: "", option_names: [""] }]);
@@ -552,7 +548,6 @@ export default function Inventory() {
         age_restriction_min_age: newItem.is_age_restricted && newItem.age_restriction_min_age ? parseInt(newItem.age_restriction_min_age) : undefined,
         available: newItem.available,
         hidden: newItem.hidden,
-        auto_manage: newItem.auto_manage,
         default_tax_rates: newItem.default_tax_rates,
       });
       // Check if any locations had errors
@@ -578,7 +573,7 @@ export default function Inventory() {
         price_type: "FIXED", cost: "", product_code: "", alternate_name: "",
         description: "", color_code: "", is_revenue: true, is_age_restricted: true,
         age_restriction_type: "Vitamin & Supplements", age_restriction_min_age: "21",
-          available: true, hidden: false, auto_manage: true, default_tax_rates: true,
+          available: true, hidden: false, default_tax_rates: true,
         });
         setNewItemImageFile(null);
       setNewItemImagePreview(null);
@@ -642,7 +637,6 @@ export default function Inventory() {
       age_restriction_min_age: item.age_restriction_min_age ? item.age_restriction_min_age.toString() : "21",
       available: item.available !== undefined ? item.available : true,
       hidden: item.hidden || false,
-      auto_manage: item.auto_manage || false,
       default_tax_rates: item.default_tax_rates !== undefined ? item.default_tax_rates : true,
       effect: productAttrsMap[item.sku]?.effect || "",
       strength: productAttrsMap[item.sku]?.strength || "",
@@ -764,7 +758,6 @@ export default function Inventory() {
       updateData.is_revenue = editForm.is_revenue;
       updateData.available = editForm.available;
       updateData.hidden = editForm.hidden;
-      updateData.auto_manage = editForm.auto_manage;
       updateData.default_tax_rates = editForm.default_tax_rates;
       updateData.is_age_restricted = true;
       updateData.age_restriction_type = "Vitamin & Supplements";
@@ -2181,18 +2174,9 @@ export default function Inventory() {
                       <p className="text-xs text-gray-400">Item can be purchased by customers</p>
                     </div>
                   </label>
-                  <label className="flex items-center gap-3 px-3 py-2.5 bg-gray-50 rounded-lg cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={newItem.auto_manage}
-                      onChange={(e) => setNewItem({ ...newItem, auto_manage: e.target.checked })}
-                      className="w-4 h-4 text-green-600 rounded focus:ring-green-500"
-                    />
-                    <div>
-                      <span className="text-sm font-medium text-gray-700">Track Stock (auto-deduct on sale)</span>
-                      <p className="text-xs text-gray-400">Automatically decrement stock on each sale</p>
-                    </div>
-                  </label>
+                  <div className="px-3 py-2.5 bg-gray-50 rounded-lg">
+                    <span className="text-sm font-medium text-gray-700">Stock tracking: always on</span>
+                  </div>
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">Stock per Location</label>
                     <div className="space-y-2">
@@ -2755,18 +2739,9 @@ export default function Inventory() {
                       <p className="text-xs text-gray-400">Track this item as revenue in reports</p>
                     </div>
                   </label>
-                  <label className="flex items-center gap-3 px-3 py-2.5 bg-gray-50 rounded-lg cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={editForm.auto_manage}
-                      onChange={(e) => setEditForm({ ...editForm, auto_manage: e.target.checked })}
-                      className="w-4 h-4 text-green-600 rounded focus:ring-green-500"
-                    />
-                    <div>
-                      <span className="text-sm font-medium text-gray-700">Track Stock (auto-deduct on sale)</span>
-                      <p className="text-xs text-gray-400">Automatically reduce stock when items are sold</p>
-                    </div>
-                  </label>
+                  <div className="px-3 py-2.5 bg-gray-50 rounded-lg">
+                    <span className="text-sm font-medium text-gray-700">Stock tracking: always on</span>
+                  </div>
                 </>
               )}
 
@@ -2805,18 +2780,9 @@ export default function Inventory() {
                       <p className="text-xs text-gray-400">Item can be sold at POS</p>
                     </div>
                   </label>
-                  <label className="flex items-center gap-3 px-3 py-2.5 bg-gray-50 rounded-lg cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={editForm.auto_manage}
-                      onChange={(e) => setEditForm({ ...editForm, auto_manage: e.target.checked })}
-                      className="w-4 h-4 text-green-600 rounded focus:ring-green-500"
-                    />
-                    <div>
-                      <span className="text-sm font-medium text-gray-700">Track Stock (auto-deduct on sale)</span>
-                      <p className="text-xs text-gray-400">Automatically reduce stock when items are sold</p>
-                    </div>
-                  </label>
+                  <div className="px-3 py-2.5 bg-gray-50 rounded-lg">
+                    <span className="text-sm font-medium text-gray-700">Stock tracking: always on</span>
+                  </div>
                 </>
               )}
 

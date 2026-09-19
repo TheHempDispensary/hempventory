@@ -605,7 +605,7 @@ async def create_item(
     # Always send these boolean fields explicitly
     item_data["isRevenue"] = item.is_revenue
     item_data["hidden"] = item.hidden
-    item_data["autoManage"] = item.auto_manage
+    item_data["autoManage"] = True
     item_data["available"] = item.available
     item_data["defaultTaxRates"] = item.default_tax_rates
     # Age restriction: Clover requires ageRestrictedObj with id, name, minimumAge
@@ -738,7 +738,7 @@ async def get_age_restriction_types(
 
 
 class BulkAutoManageRequest(BaseModel):
-    enable: bool = True  # True to enable, False to disable
+    enable: bool = True  # Kept for compatibility; stock tracking is always enabled.
     skus: Optional[list[str]] = None  # None = all items
 
 
@@ -748,8 +748,13 @@ async def bulk_auto_manage(
     user: dict = Depends(get_current_user),
     db: aiosqlite.Connection = Depends(get_db),
 ):
-    """Enable or disable autoManage on all (or selected) items across all locations.
-    When enabling, items are also made available for sale."""
+    """Ensure autoManage is enabled on all (or selected) items across all locations."""
+    if req.enable is False:
+        raise HTTPException(
+            status_code=400,
+            detail="Stock tracking cannot be disabled; it is always on for every item.",
+        )
+
     locations = await _get_locations(db)
     if not locations:
         raise HTTPException(status_code=400, detail="No locations configured")
@@ -779,15 +784,6 @@ async def bulk_auto_manage(
                         update_data["autoManage"] = True
                     if not item.get("available", True):
                         update_data["available"] = True
-                # When disabling, also ensure items are available
-                else:
-                    if item.get("autoManage", False):
-                        update_data["autoManage"] = False
-                    if not item.get("available", True):
-                        update_data["available"] = True
-                    if item.get("hidden", False):
-                        update_data["hidden"] = False
-
                 if not update_data:
                     loc_updated += 1
                     continue
@@ -1634,8 +1630,6 @@ async def update_item(
         update_data["isRevenue"] = item.is_revenue
     if item.hidden is not None:
         update_data["hidden"] = item.hidden
-    if item.auto_manage is not None:
-        update_data["autoManage"] = item.auto_manage
     if item.available is not None:
         update_data["available"] = item.available
     if item.default_tax_rates is not None:
@@ -1647,12 +1641,13 @@ async def update_item(
         else:
             update_data["isAgeRestricted"] = False
 
-    has_field_updates = bool(update_data)
+    has_field_updates = bool(update_data) or item.auto_manage is not None
     has_stock_updates = bool(item.stock_updates)
     needs_age_obj = item.is_age_restricted and item.age_restriction_type
 
     if not has_field_updates and not has_stock_updates:
         raise HTTPException(status_code=400, detail="No fields to update")
+    update_data["autoManage"] = True
 
     # Build a map of location_id -> desired stock quantity
     stock_map: dict[int, float] = {}
@@ -3287,7 +3282,7 @@ async def create_item_group(
                     item_data["description"] = req.description
                 item_data["isRevenue"] = req.is_revenue
                 item_data["hidden"] = req.hidden
-                item_data["autoManage"] = req.auto_manage
+                item_data["autoManage"] = True
                 item_data["available"] = req.available
                 item_data["defaultTaxRates"] = req.default_tax_rates
 
