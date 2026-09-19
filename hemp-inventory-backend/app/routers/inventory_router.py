@@ -3754,10 +3754,10 @@ class _SalesTally:
                 self.add(li.get("name") or "", _line_item_qty(li), order_ts, item_id)
 
     def add_ecommerce_rows(self, rows: list[tuple]) -> None:
-        """Website order lines: (product_name, quantity, created_at)."""
+        """Website order lines: (product_name, quantity, created_at[, product_id])."""
         from datetime import datetime
 
-        for p_name, qty, created_at in rows:
+        for p_name, qty, created_at, *rest in rows:
             if not p_name:
                 continue
             ts = 0.0
@@ -3768,7 +3768,8 @@ class _SalesTally:
                     ).timestamp()
                 except (ValueError, TypeError):
                     pass
-            self.add(str(p_name), qty or 1, ts)
+            item_id = rest[0] if rest else None
+            self.add(str(p_name), qty or 1, ts, item_id)
 
     def product_sales(self, name: str, item_ids) -> tuple[int, float | None]:
         """(units sold, first sale ts) for a product and its Clover item IDs."""
@@ -4457,9 +4458,9 @@ _auto_par_job: dict = {
 
 
 async def _hq_ecommerce_sales(db: aiosqlite.Connection) -> list[tuple]:
-    """Website order lines (product name, qty, placed at) for HQ demand."""
+    """Website order lines (product name, qty, placed at, Clover item ID) for HQ demand."""
     cursor = await db.execute(
-        """SELECT oi.product_name, oi.quantity, eo.created_at
+        """SELECT oi.product_name, oi.quantity, eo.created_at, oi.product_id
            FROM ecommerce_order_items oi
            JOIN ecommerce_orders eo ON oi.order_id = eo.id
            WHERE eo.status NOT IN ('cancelled', 'refunded')"""

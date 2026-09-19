@@ -64,6 +64,31 @@ def test_tally_falls_back_to_name_for_unknown_item_id():
     assert units == 4
 
 
+def test_ecommerce_tally_matches_known_item_id_after_rename():
+    t = inv._SalesTally({"C1"})
+    t.add_ecommerce_rows([
+        ("OLD WIDGET NAME", 3, "2026-06-01T00:00:00", "C1"),
+    ])
+    units, _ = t.product_sales("CURRENT WIDGET NAME", ["C1"])
+    assert units == 3
+
+
+def test_ecommerce_tally_accepts_legacy_three_tuple():
+    t = inv._SalesTally({"C1"})
+    t.add_ecommerce_rows([("WIDGET", 2, "2026-06-01T00:00:00")])
+    units, _ = t.product_sales("WIDGET", ["C1"])
+    assert units == 2
+
+
+def test_ecommerce_tally_unknown_item_id_falls_back_to_name():
+    t = inv._SalesTally({"C1"})
+    t.add_ecommerce_rows([
+        ("WIDGET", 4, "2026-06-01T00:00:00", "GONE"),
+    ])
+    units, _ = t.product_sales("WIDGET", ["C1"])
+    assert units == 4
+
+
 def test_tally_skips_refunds_and_voids():
     t = inv._SalesTally({"C1"})
     t.add_clover_orders([
