@@ -4550,15 +4550,17 @@ async def _run_auto_set_par(months: float, db: aiosqlite.Connection) -> dict:
         }
 
     computed = await asyncio.gather(*(compute_location(loc) for loc in locations))
-    by_sku: dict[str, list[float]] = {}
-    by_name: dict[str, list[float]] = {}
+    by_sku: dict[str, dict[int, float]] = {}
+    by_name: dict[str, dict[int, float]] = {}
     for loc, (loc_rows, _) in zip(locations, computed):
         if str(loc[2]) == str(HQ_MERCHANT_ID):
             continue
         for _, _, par_level, raw_sku, name in loc_rows:
             if raw_sku:
-                by_sku.setdefault(raw_sku, []).append(par_level)
-            by_name.setdefault(name.upper(), []).append(par_level)
+                store_pars = by_sku.setdefault(raw_sku, {})
+                store_pars[loc[0]] = store_pars.get(loc[0], 0) + par_level
+            store_pars = by_name.setdefault(name.upper(), {})
+            store_pars[loc[0]] = store_pars.get(loc[0], 0) + par_level
 
     par_rows: list[tuple[str, int, float]] = []
     per_location_summary = []
@@ -4571,7 +4573,7 @@ async def _run_auto_set_par(months: float, db: aiosqlite.Connection) -> dict:
                 if not store_pars:
                     store_pars = by_name.get(name.upper(), [])
                 if store_pars:
-                    par_level = float(math.ceil((sum(store_pars) / len(store_pars)) / 2))
+                    par_level = float(math.ceil((sum(store_pars.values()) / len(store_pars)) / 2))
             adjusted_rows.append((display_sku, loc_id, par_level, raw_sku, name))
             par_rows.append((display_sku, loc_id, par_level))
         if is_hq:
