@@ -156,6 +156,108 @@ async def test_auto_set_par_hq_uses_average_store_par(db, monkeypatch):
     assert hq_summary["with_par"] == 1
 
 
+async def test_auto_set_par_aggregates_duplicate_names_per_store(db, monkeypatch):
+    latest = 1_700_000_000.0
+    first = latest - 30 * 86400
+    specs = [
+        ("Hemp Dispensary HQ", HQ_MERCHANT_ID, "hq-token"),
+        ("East", "M-EAST", "east-token"),
+        ("West", "M-WEST", "west-token"),
+    ]
+    locations = await _locations(db, specs)
+    catalogs = {
+        str(HQ_MERCHANT_ID): [{"id": "HQ-NAME", "sku": "", "name": "DUPLICATE NAME"}],
+        "M-EAST": [{"id": "E-NAME", "sku": "", "name": "DUPLICATE NAME"}],
+        "M-WEST": [
+            {"id": "W-NAME-1", "sku": "", "name": "DUPLICATE NAME"},
+            {"id": "W-NAME-2", "sku": "", "name": "DUPLICATE NAME"},
+        ],
+    }
+    orders = {
+        str(HQ_MERCHANT_ID): [],
+        "M-EAST": [
+            _order(first, "DUPLICATE NAME", 1, "E-NAME"),
+            _order(latest, "DUPLICATE NAME", 15, "E-NAME"),
+        ],
+        "M-WEST": [
+            _order(first, "DUPLICATE NAME", 1, "W-NAME-1"),
+            _order(latest, "DUPLICATE NAME", 9, "W-NAME-1"),
+        ],
+    }
+
+    class FakeClient:
+        def __init__(self, merchant_id, *args):
+            self.merchant_id = str(merchant_id)
+
+        async def get_items(self, expand=""):
+            return {"elements": catalogs[self.merchant_id]}
+
+    async def fake_orders(client):
+        return orders[client.merchant_id]
+
+    monkeypatch.setattr(inv, "_fetch_all_clover_orders", fake_orders)
+    monkeypatch.setattr(inv, "CloverClient", FakeClient)
+
+    await inv._run_auto_set_par(1, db)
+    hq_id = next(row[0] for row in locations if row[1] == "Hemp Dispensary HQ")
+    row = await (await db.execute(
+        "SELECT par_level FROM par_levels WHERE sku = ? AND location_id = ?",
+        ("HQ-NAME", hq_id),
+    )).fetchone()
+    assert row["par_level"] == 7
+
+
+async def test_auto_set_par_aggregates_duplicate_skus_per_store(db, monkeypatch):
+    latest = 1_700_000_000.0
+    first = latest - 30 * 86400
+    specs = [
+        ("Hemp Dispensary HQ", HQ_MERCHANT_ID, "hq-token"),
+        ("East", "M-EAST", "east-token"),
+        ("West", "M-WEST", "west-token"),
+    ]
+    locations = await _locations(db, specs)
+    catalogs = {
+        str(HQ_MERCHANT_ID): [{"id": "HQ-SKU", "sku": "S-DUP", "name": "DUPLICATE SKU"}],
+        "M-EAST": [
+            {"id": "E-SKU-1", "sku": "S-DUP", "name": "DUPLICATE SKU"},
+            {"id": "E-SKU-2", "sku": "S-DUP", "name": "DUPLICATE SKU"},
+        ],
+        "M-WEST": [{"id": "W-SKU", "sku": "S-DUP", "name": "DUPLICATE SKU"}],
+    }
+    orders = {
+        str(HQ_MERCHANT_ID): [],
+        "M-EAST": [
+            _order(first, "DUPLICATE SKU", 1, "E-SKU-1"),
+            _order(latest, "DUPLICATE SKU", 9, "E-SKU-1"),
+        ],
+        "M-WEST": [
+            _order(first, "DUPLICATE SKU", 1, "W-SKU"),
+            _order(latest, "DUPLICATE SKU", 11, "W-SKU"),
+        ],
+    }
+
+    class FakeClient:
+        def __init__(self, merchant_id, *args):
+            self.merchant_id = str(merchant_id)
+
+        async def get_items(self, expand=""):
+            return {"elements": catalogs[self.merchant_id]}
+
+    async def fake_orders(client):
+        return orders[client.merchant_id]
+
+    monkeypatch.setattr(inv, "_fetch_all_clover_orders", fake_orders)
+    monkeypatch.setattr(inv, "CloverClient", FakeClient)
+
+    await inv._run_auto_set_par(1, db)
+    hq_id = next(row[0] for row in locations if row[1] == "Hemp Dispensary HQ")
+    row = await (await db.execute(
+        "SELECT par_level FROM par_levels WHERE sku = ? AND location_id = ?",
+        ("S-DUP", hq_id),
+    )).fetchone()
+    assert row["par_level"] == 6
+
+
 async def test_auto_set_par_hq_only_item_keeps_own_sales_par(db, monkeypatch):
     latest = 1_700_000_000.0
     first = latest - 30 * 86400
