@@ -3363,6 +3363,27 @@ async def _sync_leaflife_order(order: "CreateOrderRequest", order_number: str) -
     return result
 
 
+# Clover throttles each API token to 5 requests/second (x-ratelimit-tokenlimit).
+# A multi-line order needs two calls per line, so anything past the second line
+# gets a 429 unless we back off and try again.
+_CLOVER_429_ATTEMPTS = 6
+
+
+async def _clover_request(client: httpx.AsyncClient, method: str, url: str, **kwargs) -> httpx.Response:
+    """Issue a Clover request, retrying on 429 with the server's Retry-After."""
+    resp = None
+    for attempt in range(_CLOVER_429_ATTEMPTS):
+        resp = await client.request(method, url, **kwargs)
+        if resp.status_code != 429:
+            return resp
+        try:
+            wait = float(resp.headers.get("retry-after", "1"))
+        except ValueError:
+            wait = 1.0
+        await asyncio.sleep(max(wait, 0.5) + 0.25 * attempt)
+    return resp
+
+
 async def _deduct_stock_for_order(items: List[OrderItem], fulfillment_type: str = "shipping") -> List[bool]:
     """Deduct stock from the correct Clover location based on fulfillment type.
     For pickup orders at East/West, resolves items by SKU/name since the
@@ -3414,7 +3435,8 @@ async def _deduct_stock_for_order(items: List[OrderItem], fulfillment_type: str 
                     continue
 
                 try:
-                    resp = await client.get(
+                    resp = await _clover_request(
+                        client, "GET",
                         f"{base}/item_stocks/{clover_item_id}",
                         headers=headers,
                     )
@@ -3426,7 +3448,8 @@ async def _deduct_stock_for_order(items: List[OrderItem], fulfillment_type: str 
                     current_stock = stock_data.get("quantity", 0)
                     new_stock = max(0, current_stock - item.quantity)
 
-                    update_resp = await client.post(
+                    update_resp = await _clover_request(
+                        client, "POST",
                         f"{base}/item_stocks/{clover_item_id}",
                         headers={**headers, "Content-Type": "application/json"},
                         json={"quantity": new_stock},
@@ -5253,14 +5276,17 @@ async def _restock_items(items: list, fulfillment_type: str = "shipping") -> Non
                     print(f"[restock] Skipping restock for '{name}' — no product_id")
                     continue
                 try:
-                    resp = await client.get(f"{base}/item_stocks/{clover_item_id}", headers=headers)
+                    resp = await _clover_request(
+                        client, "GET", f"{base}/item_stocks/{clover_item_id}", headers=headers
+                    )
                     if resp.status_code != 200:
                         print(f"[restock] Could not get stock for {clover_item_id} ({name}): {resp.status_code}")
                         continue
                     stock_data = resp.json()
                     current_stock = stock_data.get("quantity", 0)
                     new_stock = current_stock + qty
-                    update_resp = await client.post(
+                    update_resp = await _clover_request(
+                        client, "POST",
                         f"{base}/item_stocks/{clover_item_id}",
                         headers={**headers, "Content-Type": "application/json"},
                         json={"quantity": new_stock},
