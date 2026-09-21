@@ -4344,48 +4344,6 @@ async def _send_order_cancelled_email(
         return False
 
 
-@router.post("/orders/{order_id}/deduct-stock")
-async def deduct_order_stock(
-    order_id: int,
-    request: Request,
-    db: aiosqlite.Connection = Depends(get_db),
-):
-    """Take any of this order's lines that never left Clover off the shelf now
-    (requires admin auth). Lines already deducted are left alone."""
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Authentication required")
-
-    import jwt
-    token = auth.split(" ", 1)[1]
-    jwt_secret = os.environ.get("JWT_SECRET", "hemp-inventory-secret-key")
-    try:
-        jwt.decode(token, jwt_secret, algorithms=["HS256"])
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-    cursor = await db.execute(
-        "SELECT fulfillment_type, payment_status FROM ecommerce_orders WHERE id = ?",
-        (order_id,),
-    )
-    row = await cursor.fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="Order not found")
-    if row[1] in ("cancelled", "refunded"):
-        raise HTTPException(status_code=400, detail=f"Order is {row[1]}; nothing to deduct")
-
-    pending_before = len((await _pending_stock_lines(db, order_id))[0])
-    complete = await _deduct_order_stock_once(db, order_id, row[0] or "shipping")
-    pending_after = len((await _pending_stock_lines(db, order_id))[0])
-    return {
-        "success": True,
-        "order_id": order_id,
-        "stock_deducted": complete,
-        "lines_deducted": pending_before - pending_after,
-        "lines_pending": pending_after,
-    }
-
-
 @router.patch("/orders/{order_id}/status")
 async def update_order_status(
     order_id: int,
