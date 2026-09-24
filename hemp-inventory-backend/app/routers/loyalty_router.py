@@ -470,7 +470,7 @@ async def get_customer(
     tx_cursor = await db.execute(
         """SELECT id, type, points, description, order_id, location_name, created_at
            FROM loyalty_transactions WHERE customer_id = ?
-           ORDER BY created_at DESC LIMIT 50""",
+           ORDER BY created_at DESC LIMIT 1000""",
         (customer_id,),
     )
     txns = await tx_cursor.fetchall()
@@ -2302,7 +2302,7 @@ async def lookup_customer(
     tx_cursor = await db.execute(
         """SELECT type, points, description, created_at
            FROM loyalty_transactions WHERE customer_id = ?
-           ORDER BY created_at DESC LIMIT 50""",
+           ORDER BY created_at DESC LIMIT 1000""",
         (row[0],),
     )
     txns = await tx_cursor.fetchall()
