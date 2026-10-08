@@ -535,6 +535,7 @@ class CloverClient:
         limit: int = 100,
         offset: int = 0,
         filters: Optional[list[str]] = None,
+        expand: str = "employee",
     ) -> dict:
         """Get payments with tip amounts and employee info.
 
@@ -545,7 +546,7 @@ class CloverClient:
         # Build base query string with repeated filter params
         base_params: list[tuple[str, str]] = [
             ("limit", str(limit)),
-            ("expand", "employee"),
+            ("expand", expand),
             ("orderBy", "createdTime DESC"),
         ]
         if filters:

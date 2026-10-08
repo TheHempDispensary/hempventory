@@ -212,6 +212,22 @@ async def _scheduled_auto_par():
         print(f"[auto-sync] PAR auto-set failed: {e}")
 
 
+async def _scheduled_cash_counts():
+    """Background job: fill System Cash Count in the Weekly Cash Counts sheet from Clover."""
+    try:
+        db = await _connect_db()
+        try:
+            from app.cash_counts import fill_cash_counts
+            result = await fill_cash_counts(db)
+            print(f"[auto-sync] Cash counts: {len(result['written'])} cells filled")
+            if result["missing_tabs"]:
+                print(f"[auto-sync] Cash counts: missing tabs {', '.join(result['missing_tabs'])}")
+        finally:
+            await db.close()
+    except Exception as e:
+        print(f"[auto-sync] Cash counts failed: {e}")
+
+
 async def _scheduled_discount_use_sync():
     """Background job: pull in-store (Clover POS) discount redemptions so the
     promo "Uses" count includes register use, not just website orders."""
@@ -259,6 +275,11 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(_scheduled_split_label_recovery, "interval", minutes=15, id="split_label_recovery", replace_existing=True)
     # Recompute PAR from sales velocity once a night (heavy: pulls all orders).
     scheduler.add_job(_scheduled_auto_par, "cron", hour=5, id="auto_par", replace_existing=True)
+    # Fill the Weekly Cash Counts sheet after both stores have closed.
+    scheduler.add_job(
+        _scheduled_cash_counts, "cron", hour=3, timezone="America/New_York",
+        id="cash_counts", replace_existing=True,
+    )
     # Pull in-store discount redemptions from Clover so promo "Uses" is accurate
     # (heavy: scans orders across locations). Runs shortly after startup too.
     from datetime import datetime, timedelta
