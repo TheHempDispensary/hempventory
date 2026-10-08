@@ -916,6 +916,13 @@ async def bulk_import_clover_customers(
         if len(norm) >= 10:
             existing_phones.add(norm[-10:])
 
+    linked_cursor = await db.execute(
+        """SELECT clover_customer_id FROM loyalty_clover_id_map
+           UNION SELECT clover_customer_id FROM loyalty_customers
+           WHERE clover_customer_id IS NOT NULL AND clover_customer_id != ''"""
+    )
+    linked_clover_ids = {row[0] for row in await linked_cursor.fetchall()}
+
     total_imported = 0
     total_skipped = 0
     total_failed = 0
@@ -986,6 +993,12 @@ async def bulk_import_clover_customers(
                             )
                         except Exception:
                             pass
+                    total_skipped += 1
+                    continue
+
+                # A register profile already linked to a member (e.g. one still
+                # carrying an old phone number) belongs to that member.
+                if cc_id in linked_clover_ids:
                     total_skipped += 1
                     continue
 
@@ -1070,6 +1083,13 @@ async def _do_bulk_import_customers(db: aiosqlite.Connection) -> dict:
         if len(norm) >= 10:
             existing_phones.add(norm[-10:])
 
+    linked_cursor = await db.execute(
+        """SELECT clover_customer_id FROM loyalty_clover_id_map
+           UNION SELECT clover_customer_id FROM loyalty_customers
+           WHERE clover_customer_id IS NOT NULL AND clover_customer_id != ''"""
+    )
+    linked_clover_ids = {row[0] for row in await linked_cursor.fetchall()}
+
     total_imported = 0
     total_skipped = 0
 
@@ -1130,6 +1150,12 @@ async def _do_bulk_import_customers(db: aiosqlite.Connection) -> dict:
                             )
                         except Exception:
                             pass
+                    total_skipped += 1
+                    continue
+
+                # A register profile already linked to a member (e.g. one still
+                # carrying an old phone number) belongs to that member.
+                if cc_id in linked_clover_ids:
                     total_skipped += 1
                     continue
 
