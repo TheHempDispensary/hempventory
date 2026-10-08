@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tempfile
 import time
@@ -174,3 +175,51 @@ async def test_auto_set_par_new_item_velocity(db, monkeypatch):
     # 27 units over its own 29 days -> PAR ~28 for one month, not ~4
     assert par is not None
     assert par["par_level"] > 25
+
+
+async def test_smart_par_serves_stale_sales_and_refreshes_in_background(db, monkeypatch, tmp_path):
+    """An expired sales cache is served at once; the slow Clover pull runs behind it."""
+    latest = time.time()
+    pulls = []
+    release = asyncio.Event()
+
+    async def fake_orders(client):
+        pulls.append(client)
+        await release.wait()
+        return [{"createdTime": latest * 1000, "total": 1000,
+                 "lineItems": {"elements": [{"name": "NEW PRODUCT", "unitQty": 7000}]}}]
+
+    async def fake_locations(_db):
+        return [(1, "East", "M1", "tok"), (2, "West", "M2", "tok2")]
+
+    async def fake_sync(_db):
+        return {"items": [
+            {"name": "NEW PRODUCT", "sku": "NEW1", "categories": [], "price": 3500,
+             "locations": {"East": {"stock": 0}}},
+        ]}
+
+    monkeypatch.setattr(inv, "_fetch_all_clover_orders", fake_orders)
+    monkeypatch.setattr(inv, "_get_locations", fake_locations)
+    monkeypatch.setattr(inv, "_do_sync", fake_sync)
+    monkeypatch.setattr(inv, "_SMART_PAR_DISK_CACHE", str(tmp_path / "sales.json"))
+    stale = inv._SalesTally()
+    stale.unmatched_by_name = {"new product": 3}
+    stale.first_unmatched_by_name = {"new product": latest - 30 * 86400}
+    stale.earliest_ts = latest - 100 * 86400
+    stale.latest_ts = latest
+    monkeypatch.setitem(inv._smart_par_cache, "data", stale.to_cache())
+    monkeypatch.setitem(inv._smart_par_cache, "updated_at", time.time() - 2 * inv._SMART_PAR_TTL)
+
+    res = await asyncio.wait_for(inv.smart_par(months=1, user={}, db=db), timeout=5)
+    assert res["products"][0]["units_sold"] == 3  # served from the old data
+
+    # A second load while the pull is running does not start another one.
+    await asyncio.wait_for(inv.smart_par(months=1, user={}, db=db), timeout=5)
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.wait_for(inv._smart_par_refresh_task, timeout=5)
+    assert len(pulls) == 2  # one pull per location, run once
+
+    res = await inv.smart_par(months=1, user={}, db=db)
+    assert res["products"][0]["units_sold"] == 14  # 7 per location
+    assert (tmp_path / "sales.json").exists()

@@ -27,7 +27,7 @@ from app.catalog import (
     resolve_categories,
     strain_types_by_phrase,
 )
-from app.database import connect_db, get_db
+from app.database import DB_PATH, connect_db, get_db
 from app.clover_client import CloverClient
 from app.routers.ecommerce_router import invalidate_product_cache
 from app.smart_par_bulk import apply_bulk_netting, collect_bulk_pool
@@ -3862,6 +3862,11 @@ async def get_inventory_changes(
 
 _smart_par_cache: dict = {"data": None, "updated_at": 0}
 _SMART_PAR_TTL = 3600  # 1 hour cache
+# The year of sales history takes minutes to pull from Clover, so it is kept on
+# disk (survives deploys) and refreshed in the background, never on page load.
+_SMART_PAR_DISK_CACHE = os.path.join(os.path.dirname(DB_PATH), "smart_par_sales.json")
+_smart_par_refresh_task: Optional[asyncio.Task] = None
+_smart_par_background: set[asyncio.Task] = set()
 
 # Velocity for a product is computed over its own sales history, not the
 # store's. A floor keeps a couple of day-one sales from producing a huge PAR.
@@ -4521,6 +4526,90 @@ async def upsert_smart_par_note(
     }
 
 
+def _usable_sales_cache() -> Optional[dict]:
+    cached = _smart_par_cache["data"]
+    if cached and "sales_by_item_id" in cached:
+        return cached
+    return None
+
+
+def load_smart_par_disk_cache() -> None:
+    try:
+        with open(_SMART_PAR_DISK_CACHE) as f:
+            saved = json.load(f)
+        _smart_par_cache["data"] = saved["data"]
+        _smart_par_cache["updated_at"] = saved["updated_at"]
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"[smart-par] Disk cache load failed: {e}")
+
+
+def _save_smart_par_disk_cache() -> None:
+    tmp = _SMART_PAR_DISK_CACHE + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(_smart_par_cache, f)
+        os.replace(tmp, _SMART_PAR_DISK_CACHE)
+    except Exception as e:
+        print(f"[smart-par] Disk cache save failed: {e}")
+
+
+async def _pull_smart_par_sales(
+    known_ids: set[str], ecommerce_rows: list[tuple], locations: list
+) -> None:
+    # Each location has its own Clover token (and rate limit), so pull them
+    # concurrently. Any failure keeps the previous sales data in place.
+    orders_by_loc = await asyncio.gather(
+        *(_fetch_all_clover_orders(CloverClient(loc[2], loc[3])) for loc in locations)
+    )
+    tally = _SalesTally(known_ids)
+    for orders in orders_by_loc:
+        tally.add_clover_orders(orders)
+    tally.add_ecommerce_rows(ecommerce_rows)
+    _smart_par_cache["data"] = tally.to_cache()
+    _smart_par_cache["updated_at"] = time.time()
+    _save_smart_par_disk_cache()
+
+
+async def refresh_smart_par_sales(
+    db: aiosqlite.Connection, items: Optional[list[dict]] = None
+) -> None:
+    """Re-pull Smart PAR sales history; concurrent callers share one pull."""
+    global _smart_par_refresh_task
+    if _smart_par_refresh_task is None or _smart_par_refresh_task.done():
+        if items is None:
+            items = (await _do_sync(db)).get("items", [])
+        known_ids = {cid for item in items for cid in _item_clover_ids(item)}
+        ecommerce_rows = await _hq_ecommerce_sales(db)
+        locations = await _get_locations(db)
+        if _smart_par_refresh_task is None or _smart_par_refresh_task.done():
+            _smart_par_refresh_task = asyncio.create_task(
+                _pull_smart_par_sales(known_ids, ecommerce_rows, locations)
+            )
+    await asyncio.shield(_smart_par_refresh_task)
+
+
+async def scheduled_smart_par_refresh() -> None:
+    try:
+        db = await connect_db()
+        try:
+            await refresh_smart_par_sales(db)
+        finally:
+            await db.close()
+        print("[smart-par] Sales history refreshed")
+    except Exception as e:
+        print(f"[smart-par] Sales history refresh failed: {e}")
+
+
+def _refresh_smart_par_in_background() -> None:
+    if _smart_par_refresh_task is not None and not _smart_par_refresh_task.done():
+        return
+    task = asyncio.create_task(scheduled_smart_par_refresh())
+    _smart_par_background.add(task)
+    task.add_done_callback(_smart_par_background.discard)
+
+
 @router.get("/smart-par")
 async def smart_par(
     months: int = 1,
@@ -4558,45 +4647,20 @@ async def smart_par(
             },
         }
 
-    # ----- 2. Gather sales data (check cache first) -----
-    now = time.time()
-    cached = _smart_par_cache["data"]
-    if cached and "sales_by_item_id" not in cached:
-        cached = None
-    fresh = cached is not None and (now - _smart_par_cache["updated_at"]) < _SMART_PAR_TTL
-
-    if not fresh:
-        # 2a. Clover POS orders (all locations). Clover occasionally times out
-        # or rate-limits the (large) order pull; when that happens, keep
-        # serving the last good sales data rather than failing the request.
-        locations = await _get_locations(db)
-        orders_by_loc: list[list[dict]] = []
+    # ----- 2. Sales history (cached; refreshed in the background) -----
+    cached = _usable_sales_cache()
+    if cached is None:
         try:
-            for loc in locations:
-                client = CloverClient(loc[2], loc[3])
-                orders_by_loc.append(await _fetch_all_clover_orders(client))
+            await refresh_smart_par_sales(db, items_list)
         except (httpx.HTTPError, asyncio.TimeoutError) as e:
-            if cached is None:
-                raise HTTPException(
-                    status_code=503,
-                    detail=f"Clover didn't respond while loading sales history ({e}). Tap Refresh to try again.",
-                )
-            print(f"[smart-par] Clover order fetch failed ({e}); using cached sales data")
-            orders_by_loc = None
-
-    if fresh or orders_by_loc is None:
-        tally = _SalesTally.from_cache(cached)
-    else:
-        known_ids = {cid for item in items_list for cid in _item_clover_ids(item)}
-        tally = _SalesTally(known_ids)
-        for orders in orders_by_loc:
-            tally.add_clover_orders(orders)
-
-        # 2b. Ecommerce orders (website)
-        tally.add_ecommerce_rows(await _hq_ecommerce_sales(db))
-
-        _smart_par_cache["data"] = tally.to_cache()
-        _smart_par_cache["updated_at"] = now
+            raise HTTPException(
+                status_code=503,
+                detail=f"Clover didn't respond while loading sales history ({e}). Tap Refresh to try again.",
+            )
+        cached = _smart_par_cache["data"]
+    elif time.time() - _smart_par_cache["updated_at"] >= _SMART_PAR_TTL:
+        _refresh_smart_par_in_background()
+    tally = _SalesTally.from_cache(cached)
 
     latest_ts = tally.latest_ts
 

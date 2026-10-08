@@ -288,6 +288,13 @@ async def lifespan(app: FastAPI):
         id="discount_use_sync", replace_existing=True,
         next_run_time=datetime.now() + timedelta(minutes=2),
     )
+    # Keep Smart PAR's year of sales history warm (the pull takes minutes).
+    inventory_router.load_smart_par_disk_cache()
+    scheduler.add_job(
+        inventory_router.scheduled_smart_par_refresh, "interval", minutes=60,
+        id="smart_par_sales", replace_existing=True,
+        next_run_time=datetime.now() + timedelta(minutes=1),
+    )
     scheduler.start()
     # Run initial inventory sync in background so server starts accepting requests immediately
     asyncio.create_task(_scheduled_inventory_sync())
