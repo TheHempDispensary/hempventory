@@ -2878,6 +2878,7 @@ async def create_order(
             except Exception as e:
                 print(f"[order] Clover order creation failed (charge will still proceed): {e}")
 
+            charge_started_ms = int(time.time() * 1000)
             try:
                 print(f"[order] Charging ${order.total/100:.2f} (subtotal=${order.subtotal/100:.2f} discount=${order.discount/100:.2f} vol_disc=${order.volume_discount/100:.2f} loyalty=${order.loyalty_discount/100:.2f} ship=${order.shipping_cost/100:.2f} tax=${order.tax/100:.2f})")
                 resp = await client.post(
@@ -2894,6 +2895,9 @@ async def create_order(
                 else:
                     raw_msg = charge_result.get("message") or charge_result.get("error", {}).get("message", "")
                     print(f"[order] Clover charge failed: status={resp.status_code} raw={raw_msg} result={charge_result}")
+                    await _discard_declined_checkout_orders(
+                        client, clover_order_id, charge_result, order.total, charge_started_ms
+                    )
                     # Show user-friendly message for card declines (Clover 402)
                     if resp.status_code == 402 or "decline" in raw_msg.lower():
                         user_msg = "Your card was declined. Please check your card details or try a different payment method."
@@ -3667,6 +3671,90 @@ async def _award_loyalty_points_for_order(
     finally:
         if db is not None:
             await db.close()
+
+
+async def _declined_charge_order_ids(
+    client: httpx.AsyncClient,
+    base: str,
+    headers: dict,
+    charge_result: dict,
+    amount: int,
+    since_ms: int,
+) -> list[str]:
+    """Clover's own "ECOMM ORDER" tickets for a declined charge.
+
+    Found via the failed charge's payment when the decline names it, else by
+    amount among HQ orders opened since the charge started. Only open tickets
+    whose every payment failed are returned, so a paid order is never touched.
+    """
+    error = charge_result.get("error")
+    charge_id = (error.get("charge") if isinstance(error, dict) else None) or charge_result.get("id")
+    candidates: list[str] = []
+    if charge_id:
+        resp = await client.get(f"{base}/payments/{charge_id}", headers=headers)
+        if resp.status_code == 200:
+            order_id = (resp.json().get("order") or {}).get("id")
+            if order_id:
+                candidates.append(order_id)
+    if not candidates:
+        resp = await client.get(
+            f"{base}/orders",
+            headers=headers,
+            params=[("filter", f"clientCreatedTime>={since_ms - 60_000}"), ("limit", "100")],
+        )
+        if resp.status_code == 200:
+            candidates = [
+                o["id"] for o in resp.json().get("elements", [])
+                if o.get("title") == "ECOMM ORDER" and o.get("total") == amount and o.get("state") == "open"
+            ]
+
+    confirmed: list[str] = []
+    for order_id in candidates:
+        order_resp = await client.get(f"{base}/orders/{order_id}", headers=headers)
+        pay_resp = await client.get(f"{base}/orders/{order_id}/payments", headers=headers)
+        if order_resp.status_code != 200 or pay_resp.status_code != 200:
+            continue
+        payments = pay_resp.json().get("elements", [])
+        if (
+            order_resp.json().get("state") == "open"
+            and payments
+            and all(p.get("result") != "SUCCESS" for p in payments)
+        ):
+            confirmed.append(order_id)
+    return confirmed
+
+
+async def _discard_declined_checkout_orders(
+    client: httpx.AsyncClient,
+    record_order_id: str,
+    charge_result: dict,
+    amount: int,
+    since_ms: int,
+) -> None:
+    """Delete the HQ Clover tickets a declined card leaves open.
+
+    Both the website's record order (created before charging) and the ticket
+    Clover opens for the failed charge stay open with no successful payment,
+    piling up as unpaid orders every time a customer retries a card.
+    """
+    base = f"{CLOVER_BASE_URL}/merchants/{HQ_MERCHANT_ID}"
+    headers = {"Authorization": f"Bearer {HQ_API_TOKEN}"}
+    order_ids = [record_order_id] if record_order_id else []
+    try:
+        order_ids += await _declined_charge_order_ids(
+            client, base, headers, charge_result, amount, since_ms
+        )
+    except Exception as e:
+        print(f"[order] Could not look up declined-charge Clover order: {e}")
+    for order_id in order_ids:
+        try:
+            resp = await client.delete(f"{base}/orders/{order_id}", headers=headers)
+            if resp.status_code in (200, 204):
+                print(f"[order] Removed declined-checkout Clover order {order_id}")
+            else:
+                print(f"[order] Failed to remove declined-checkout Clover order {order_id}: {resp.status_code} {resp.text}")
+        except Exception as e:
+            print(f"[order] Failed to remove declined-checkout Clover order {order_id}: {e}")
 
 
 async def _get_smtp_settings(db: aiosqlite.Connection) -> dict[str, str]:

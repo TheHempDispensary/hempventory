@@ -212,6 +212,20 @@ async def _scheduled_auto_par():
         print(f"[auto-sync] PAR auto-set failed: {e}")
 
 
+async def _scheduled_par_alert_email():
+    """Background job: email the day's below-PAR items."""
+    try:
+        db = await _connect_db()
+        try:
+            from app.routers.alerts_router import run_alert_check
+            result = await run_alert_check(db)
+            print(f"[auto-sync] PAR alerts: {result['alerts_found']} below PAR, email_sent={result.get('email_sent')}")
+        finally:
+            await db.close()
+    except Exception as e:
+        print(f"[auto-sync] PAR alert email failed: {e}")
+
+
 async def _scheduled_cash_counts():
     """Background job: fill System Cash Count in the Weekly Cash Counts sheet from Clover."""
     try:
@@ -279,6 +293,10 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(
         _scheduled_cash_counts, "cron", hour=3, timezone="America/New_York",
         id="cash_counts", replace_existing=True,
+    )
+    scheduler.add_job(
+        _scheduled_par_alert_email, "cron", hour=7, timezone="America/New_York",
+        id="par_alert_email", replace_existing=True,
     )
     # Pull in-store discount redemptions from Clover so promo "Uses" is accurate
     # (heavy: scans orders across locations). Runs shortly after startup too.

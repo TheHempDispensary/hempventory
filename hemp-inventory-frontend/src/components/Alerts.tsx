@@ -10,6 +10,7 @@ interface Alert {
   current_stock: number;
   par_level: number;
   deficit: number;
+  units_per_month?: number;
   recommendation: string;
 }
 
@@ -225,6 +226,9 @@ export default function Alerts() {
                       <span className="text-lg text-gray-500">{alert.par_level}</span>
                     </div>
                     <p className="text-xs text-gray-400">current / par</p>
+                    {!!alert.units_per_month && (
+                      <p className="text-xs text-gray-500">~{alert.units_per_month} sold/mo</p>
+                    )}
                   </div>
                 </div>
                 <div className="mt-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg">

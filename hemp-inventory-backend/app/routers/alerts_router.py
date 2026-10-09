@@ -11,7 +11,6 @@ import aiosqlite
 
 from app.auth import get_current_user
 from app.database import get_db
-from app.clover_client import CloverClient
 
 router = APIRouter(prefix="/api/alerts", tags=["alerts"])
 DEFAULT_NOTIFICATION_EMAIL = "Support@TheHempDispensary.com"
@@ -63,52 +62,26 @@ async def check_and_notify(
     db: aiosqlite.Connection = Depends(get_db),
 ):
     """Check PAR levels and send email notifications for items below threshold."""
-    # Get notification email
+    return await run_alert_check(db)
+
+
+async def run_alert_check(db: aiosqlite.Connection) -> dict:
+    """Record current PAR alerts and email them (used by /check and the daily job)."""
+    from app.routers.par_router import build_par_alerts
+
     cursor = await db.execute("SELECT value FROM settings WHERE key = 'notification_email'")
     row = await cursor.fetchone()
-    notification_email = row[0] if row else None
+    notification_email = (
+        (row[0] if row else None)
+        or os.environ.get("NOTIFICATION_EMAIL")
+        or DEFAULT_NOTIFICATION_EMAIL
+    )
 
-    # Get all locations
-    cursor = await db.execute("SELECT id, name, merchant_id, api_token FROM locations")
-    locations = await cursor.fetchall()
-
-    # Get all PAR levels
-    cursor = await db.execute("SELECT sku, location_id, par_level FROM par_levels")
-    par_rows = await cursor.fetchall()
-    par_map: dict[tuple[str, int], float] = {(row[0], row[1]): row[2] for row in par_rows}
-
-    if not par_map:
+    cursor = await db.execute("SELECT COUNT(*) FROM par_levels")
+    if not (await cursor.fetchone())[0]:
         return {"alerts_found": 0, "message": "No PAR levels configured"}
 
-    alerts = []
-    for loc in locations:
-        loc_id, loc_name, merchant_id, api_token = loc[0], loc[1], loc[2], loc[3]
-        try:
-            client = CloverClient(merchant_id, api_token)
-            data = await client.get_items()
-            items = data.get("elements", [])
-        except Exception as e:
-            print(f"Error checking PAR for {loc_name}: {e}")
-            continue
-
-        for item in items:
-            sku = item.get("sku", "") or item.get("id", "")
-            par_level = par_map.get((sku, loc_id))
-            if par_level is None:
-                continue
-
-            item_stock = item.get("itemStock", {})
-            quantity = item_stock.get("quantity", 0) if item_stock else 0
-
-            if quantity <= par_level:
-                alerts.append({
-                    "sku": sku,
-                    "product_name": item.get("name", ""),
-                    "location_id": loc_id,
-                    "location_name": loc_name,
-                    "current_stock": quantity,
-                    "par_level": par_level,
-                })
+    alerts = await build_par_alerts(db)
 
     # Save alerts to history
     for alert in alerts:
@@ -144,8 +117,6 @@ async def _send_alert_email(db: aiosqlite.Connection, alerts: list[dict]) -> boo
     # Build HTML body
     rows_html = ""
     for alert in alerts:
-        deficit = alert["par_level"] - alert["current_stock"]
-        restock = int(deficit + alert["par_level"] * 0.5)
         rows_html += f"""
         <tr>
             <td style="padding: 8px; border: 1px solid #ddd;">{alert['product_name']}</td>
@@ -153,7 +124,8 @@ async def _send_alert_email(db: aiosqlite.Connection, alerts: list[dict]) -> boo
             <td style="padding: 8px; border: 1px solid #ddd;">{alert['location_name']}</td>
             <td style="padding: 8px; border: 1px solid #ddd; color: red; font-weight: bold;">{alert['current_stock']}</td>
             <td style="padding: 8px; border: 1px solid #ddd;">{alert['par_level']}</td>
-            <td style="padding: 8px; border: 1px solid #ddd;">{restock}</td>
+            <td style="padding: 8px; border: 1px solid #ddd;">{alert['units_per_month']:g}</td>
+            <td style="padding: 8px; border: 1px solid #ddd;">{alert['recommendation']}</td>
         </tr>
         """
 
@@ -161,7 +133,7 @@ async def _send_alert_email(db: aiosqlite.Connection, alerts: list[dict]) -> boo
     <html>
     <body style="font-family: Arial, sans-serif;">
         <h2 style="color: #dc2626;">PAR Level Alert</h2>
-        <p>The following items are at or below their PAR levels and need restocking:</p>
+        <p>The following items are at or below their PAR levels, biggest sellers first:</p>
         <table style="border-collapse: collapse; width: 100%;">
             <thead>
                 <tr style="background-color: #f3f4f6;">
@@ -170,7 +142,8 @@ async def _send_alert_email(db: aiosqlite.Connection, alerts: list[dict]) -> boo
                     <th style="padding: 8px; border: 1px solid #ddd; text-align: left;">Location</th>
                     <th style="padding: 8px; border: 1px solid #ddd; text-align: left;">Current Stock</th>
                     <th style="padding: 8px; border: 1px solid #ddd; text-align: left;">PAR Level</th>
-                    <th style="padding: 8px; border: 1px solid #ddd; text-align: left;">Suggested Restock</th>
+                    <th style="padding: 8px; border: 1px solid #ddd; text-align: left;">Sold / Month</th>
+                    <th style="padding: 8px; border: 1px solid #ddd; text-align: left;">What To Do</th>
                 </tr>
             </thead>
             <tbody>
