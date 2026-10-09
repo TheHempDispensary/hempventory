@@ -29,6 +29,10 @@ _FORMS = (
     ("flower", re.compile(r"\bflower\b|\bsmalls\b|\bshake\b|\bbud\b|\bpopcorn\b")),
 )
 
+# Baby Js are their own pre-roll stock: a full-size pre-roll bulk never makes
+# Baby Js, and Baby J bulk never makes full-size pre-rolls.
+_BABY_J_RE = re.compile(r"\bbaby\s*js?\b", re.I)
+
 # Flower grades: bulk smalls only make smalls, ground only makes ground, etc.
 _GRADES = ("smalls", "ground", "shake", "popcorn", "bigs")
 
@@ -114,6 +118,8 @@ def bulk_matches_product(bulk: str, product: str) -> bool:
         return False
     product_tokens = tokenize(product)
     if _grade(bulk_tokens) != _grade(product_tokens):
+        return False
+    if bool(_BABY_J_RE.search(bulk)) != bool(_BABY_J_RE.search(product)):
         return False
     if not _cannabinoids_compatible(cannabinoid_signature(bulk), cannabinoid_signature(product)):
         return False

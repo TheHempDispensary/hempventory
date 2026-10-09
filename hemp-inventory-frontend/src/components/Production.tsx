@@ -121,6 +121,10 @@ const FORMS: { form: string; test: RegExp }[] = [
 const productForm = (name: string): string | null =>
   FORMS.find(({ test }) => test.test(name.toLowerCase()))?.form ?? null;
 
+// Baby Js are their own pre-roll stock: a full-size pre-roll bulk never makes
+// Baby Js, and Baby J bulk never makes full-size pre-rolls.
+const isBabyJ = (name: string) => /\bbaby\s*js?\b/i.test(name);
+
 // Flower grades: bulk smalls only make smalls, ground only makes ground, etc.
 const GRADES = ["smalls", "ground", "shake", "popcorn", "bigs"];
 const grade = (tokens: Set<string>) => GRADES.filter((g) => tokens.has(g)).join(",");
@@ -194,6 +198,7 @@ const bulkMatchesProduct = (bulk: string, product: string): boolean => {
   const ignorable = (t: string) => GENERIC_TOKENS.has(t) || /^\d+$/.test(t);
   if ([...bulkTokens].every(ignorable)) return false;
   if (grade(bulkTokens) !== grade(productTokens)) return false;
+  if (isBabyJ(bulk) !== isBabyJ(product)) return false;
   if (!cannabinoidsCompatible(cannabinoidSignature(bulk), cannabinoidSignature(product))) return false;
   return [...bulkTokens].every((t) => ignorable(t) || productTokens.has(t));
 };

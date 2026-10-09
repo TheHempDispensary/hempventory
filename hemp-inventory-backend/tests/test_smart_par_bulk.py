@@ -173,6 +173,33 @@ def test_baby_js_come_from_baby_j_bulk_not_flower():
     assert bulk_per_unit_for(seven, bulk, 5.0) == 5.0
 
 
+def test_baby_js_never_come_from_full_size_pre_roll_bulk():
+    pre_roll_bulk = "Bulk - Tahoe OG Indica Pre Roll"
+    baby_j_bulk = "Bulk - Skywalker OG Indica Baby Js"
+    for size in (1, 7, 11):
+        assert not bulk_matches_product(
+            pre_roll_bulk, f"THC PRE ROLLED JOINT BABY J TAHOE OG Indica {size} COUNT"
+        )
+    assert bulk_matches_product(pre_roll_bulk, "THC PRE ROLLED JOINT INDICA TAHOE OG")
+    assert not bulk_matches_product(baby_j_bulk, "THC PRE ROLLED JOINT SKYWALKER OG Indica")
+    assert not bulk_matches_product(
+        "Bulk - Super G CBG Pre Rolls", "CBG PRE ROLLED JOINT BABY J Super G Sativa 7 COUNT"
+    )
+
+
+def test_tahoe_baby_js_get_no_bulk_from_pre_roll_pool():
+    rows = [
+        _row("THC PRE ROLLED JOINT BABY J TAHOE OG Indica 1 COUNT", 18),
+        _row("THC PRE ROLLED JOINT BABY J TAHOE OG Indica 7 COUNT", 12),
+        _row("THC PRE ROLLED JOINT INDICA TAHOE OG", 10),
+    ]
+    apply_bulk_netting(rows, {"Bulk - Tahoe OG Indica Pre Roll": 50}, recipes={})
+    assert rows[0]["bulk_name"] is None and rows[0]["order_qty"] == 18
+    assert rows[1]["bulk_name"] is None and rows[1]["order_qty"] == 12
+    assert rows[2]["bulk_name"] == "Bulk - Tahoe OG Indica Pre Roll"
+    assert rows[2]["bulk_shared_by"] == 1
+
+
 def test_baby_j_pool_split_by_pieces():
     rows = [
         _row("THC PRE ROLLED JOINT BABY J GREEN CRACK Sativa 1 COUNT", 42),
