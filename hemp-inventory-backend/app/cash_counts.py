@@ -8,7 +8,11 @@ the physical count.
 Rules:
 - Only empty System Cash Count cells are written; nothing staff typed changes.
 - Only finished days (before today, Eastern) are filled.
-- AM is cash before the 2:30 PM shift change, PM is cash from 2:30 PM on.
+- The AM/PM split comes from the HempVentory schedule (date_schedules) for that
+  store and day: PM starts when the closing shift starts (East is usually 2:30
+  PM, West Wednesdays 3:30 PM). If one budtender covers the whole day, the whole
+  day goes in the AM row and a blank PM System Cash Count is set to "N/A".
+  Days with no schedule fall back to a 2:30 PM split.
 - A PM row marked "N/A" means one budtender worked all day, so the whole day
   goes in the AM row.
 - If one shift was already entered by hand, the other gets the rest of the day,
@@ -70,22 +74,58 @@ def _net_cash_cents(payment: dict) -> int:
     return int(payment.get("amount") or 0) - sum(int(r.get("amount") or 0) for r in refunds)
 
 
-def shift_totals(payments: list[dict]) -> dict[date, tuple[int, int]]:
-    """Clover cash per Eastern day, split into (AM, PM) cents at the shift change."""
+def shift_totals(
+    payments: list[dict], shift_changes: Optional[dict[date, Optional[time]]] = None
+) -> dict[date, tuple[int, int]]:
+    """Clover cash per Eastern day, split into (AM, PM) cents at the shift change.
+
+    ``shift_changes`` maps a day to its PM start, or None when one budtender
+    worked all day (everything goes to AM). Days not listed use SHIFT_CHANGE.
+    """
+    shift_changes = shift_changes or {}
     totals: dict[date, list[int]] = {}
     for p in payments:
         if p.get("result") != "SUCCESS" or (p.get("tender") or {}).get("labelKey") != CASH_TENDER:
             continue
         ts = datetime.fromtimestamp(int(p["createdTime"]) / 1000, _EASTERN)
+        cut = shift_changes.get(ts.date(), SHIFT_CHANGE)
         slot = totals.setdefault(ts.date(), [0, 0])
-        slot[0 if ts.time() < SHIFT_CHANGE else 1] += _net_cash_cents(p)
+        slot[0 if cut is None or ts.time() < cut else 1] += _net_cash_cents(p)
     return {d: (am, pm) for d, (am, pm) in totals.items()}
 
 
-def plan_updates(rows: list[list], totals: dict[date, tuple[int, int]], today: date) -> dict[int, int]:
-    """Sheet row number -> cents to write into System Cash Count.
+def schedule_shift_changes(schedules: list[tuple]) -> dict[date, Optional[time]]:
+    """PM start per day from (date, start_time, end_time) schedule rows for one store.
+
+    The PM shift is the one that closes (latest end). If it starts with the
+    first shift of the day, one budtender worked all day and the value is None.
+    """
+    by_day: dict[date, list[tuple[time, time]]] = {}
+    for day, start, end in schedules:
+        try:
+            parsed = (time.fromisoformat(str(start).strip()), time.fromisoformat(str(end).strip()))
+            key = date.fromisoformat(str(day)[:10])
+        except ValueError:
+            continue
+        by_day.setdefault(key, []).append(parsed)
+    changes: dict[date, Optional[time]] = {}
+    for day, shifts in by_day.items():
+        first_start = min(start for start, _ in shifts)
+        closing_start = max(shifts, key=lambda s: (s[1], s[0]))[0]
+        changes[day] = closing_start if closing_start > first_start else None
+    return changes
+
+
+def plan_updates(
+    rows: list[list],
+    totals: dict[date, tuple[int, int]],
+    today: date,
+    single_shift_days: frozenset = frozenset(),
+) -> dict[int, object]:
+    """Sheet row number -> cents (or "N/A") to write into System Cash Count.
 
     ``rows`` are the tab's values from column A to E (row 1 is the header).
+    ``single_shift_days`` are days one budtender covered alone.
     """
     shifts: dict[date, dict[str, tuple[int, list]]] = {}
     for i, row in enumerate(rows):
@@ -112,6 +152,11 @@ def plan_updates(rows: list[list], totals: dict[date, tuple[int, int]], today: d
             continue
 
         pm_blank = _is_blank(pm[1][3])
+        if day in single_shift_days and pm_blank:
+            updates[pm[0]] = "N/A"
+            if am_blank:
+                updates[am[0]] = day_cents
+            continue
         if am_blank and pm_blank:
             updates[am[0]] = am_cents
             updates[pm[0]] = pm_cents
@@ -179,6 +224,15 @@ async def _fetch_payments(merchant_id: str, api_token: str, start: date, end: da
     return data.get("elements", [])
 
 
+async def _shift_changes(db, location: str, start: date, end: date) -> dict[date, Optional[time]]:
+    cursor = await db.execute(
+        "SELECT date, start_time, end_time FROM date_schedules"
+        " WHERE UPPER(location) = UPPER(?) AND date BETWEEN ? AND ?",
+        (location, start.isoformat(), end.isoformat()),
+    )
+    return schedule_shift_changes([tuple(r) for r in await cursor.fetchall()])
+
+
 def _months_to_fill(today: date) -> list[date]:
     first = today.replace(day=1)
     previous = (first - timedelta(days=1)).replace(day=1)
@@ -209,9 +263,13 @@ async def fill_cash_counts(db, today: Optional[date] = None, dry_run: bool = Fal
             if not days:
                 continue
             payments = await _fetch_payments(merchant_id, api_token, min(days), max(days))
-            for row_number, cents in sorted(plan_updates(rows, shift_totals(payments), today).items()):
-                data.append({"range": f"'{tab}'!{SYSTEM_COL}{row_number}", "values": [[round(cents / 100, 2)]]})
-                written.append({"tab": tab, "row": row_number, "amount": round(cents / 100, 2)})
+            changes = await _shift_changes(db, name, min(days), max(days))
+            single = frozenset(d for d, cut in changes.items() if cut is None)
+            updates = plan_updates(rows, shift_totals(payments, changes), today, single)
+            for row_number, value in sorted(updates.items()):
+                amount = round(value / 100, 2) if isinstance(value, int) else value
+                data.append({"range": f"'{tab}'!{SYSTEM_COL}{row_number}", "values": [[amount]]})
+                written.append({"tab": tab, "row": row_number, "amount": amount})
 
     if data and not dry_run:
         await asyncio.to_thread(_write_sync, data)
