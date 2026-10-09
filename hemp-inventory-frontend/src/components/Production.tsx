@@ -8,7 +8,7 @@ import {
   updateProductionBatch, deleteProductionBatch, getCachedInventory, addBatchToInventory,
   reorderProductionBatches, getBulkItems, getBulkRecipes, upsertBulkRecipe, deleteBulkRecipe,
   type ProductionPlanItem, type ProductionBatch, type BatchPayload, type BulkItem,
-  type BulkRecipe,
+  type BulkRecipe, type BatchPriority,
 } from "../lib/api";
 import { etToday, formatDateOnly, matchesSearch } from "../lib/utils";
 
@@ -20,6 +20,19 @@ const STATUS_COLUMNS: { id: ProductionBatch["status"]; label: string; icon: type
   { id: "ready", label: "Ready", icon: PackageCheck, color: "text-amber-600" },
   { id: "done", label: "Done", icon: CheckCircle2, color: "text-green-600" },
 ];
+
+// Days of stock left (at the current Smart PAR sales rate) that make a card
+// urgent / high priority. Anything out of stock at a store is urgent.
+const URGENT_DAYS = 7;
+const HIGH_DAYS = 14;
+
+const PRIORITIES: { id: BatchPriority; label: string; badge: string; rank: number }[] = [
+  { id: "urgent", label: "Urgent", badge: "bg-red-600 text-white", rank: 0 },
+  { id: "high", label: "High", badge: "bg-orange-500 text-white", rank: 1 },
+  { id: "normal", label: "Normal", badge: "bg-gray-200 text-gray-700", rank: 2 },
+  { id: "low", label: "Low", badge: "bg-gray-100 text-gray-500", rank: 3 },
+];
+const PRIORITY_BY_ID = Object.fromEntries(PRIORITIES.map((p) => [p.id, p])) as Record<BatchPriority, (typeof PRIORITIES)[number]>;
 
 const NEXT_STATUS: Record<ProductionBatch["status"], ProductionBatch["status"] | null> = {
   planned: "in_production",
@@ -222,7 +235,7 @@ export default function Production() {
     setDragId(null);
     setDragOverId(null);
     if (draggedId == null || draggedId === targetId) return;
-    const colItems = batches.filter((b) => b.status === status);
+    const colItems = columnItems(status);
     const others = batches.filter((b) => b.status !== status);
     const fromIdx = colItems.findIndex((b) => b.id === draggedId);
     if (fromIdx < 0) return; // dragged card is in a different column — ignore
@@ -243,7 +256,7 @@ export default function Production() {
   // reliable, cross-browser alternative to native drag (which iOS/Safari and
   // some setups don't fire). dir = -1 (up) or +1 (down).
   const moveCard = async (status: ProductionBatch["status"], id: number, dir: -1 | 1) => {
-    const colItems = batches.filter((b) => b.status === status);
+    const colItems = columnItems(status);
     const others = batches.filter((b) => b.status !== status);
     const idx = colItems.findIndex((b) => b.id === id);
     const swap = idx + dir;
@@ -495,6 +508,43 @@ export default function Production() {
     }
     return map;
   }, [bulkItems, bulkRecipes, plan, batches]);
+
+  const planItemByKey = useMemo(() => {
+    const m = new Map<string, ProductionPlanItem>();
+    for (const p of plan) {
+      if (p.sku) m.set(p.sku, p);
+      m.set(normName(p.name), p);
+    }
+    return m;
+  }, [plan]);
+
+  // Auto priority from how long current stock lasts at the Smart PAR sales
+  // rate; out of stock at any store is always urgent.
+  const autoPriority = (b: ProductionBatch): { level: BatchPriority; daysLeft: number | null; outAt: string[] } => {
+    const item = (b.sku ? planItemByKey.get(b.sku) : undefined) ?? planItemByKey.get(normName(b.product_name));
+    const byLocation: [string, number][] = item
+      ? Object.entries(item.stock_by_location || {}).map(([loc, qty]) => [shortLocation(loc), qty])
+      : (b.sku ? stockBySku.get(b.sku)?.byLocation : undefined) ?? [];
+    const outAt = byLocation.filter(([, qty]) => qty <= 0).map(([loc]) => loc);
+    const perDay = item ? item.units_per_month / 30.44 : 0;
+    const daysLeft = perDay > 0 ? Math.max(item!.in_stock, 0) / perDay : null;
+    let level: BatchPriority = "normal";
+    if (outAt.length > 0 || (daysLeft !== null && daysLeft < URGENT_DAYS)) level = "urgent";
+    else if (daysLeft !== null && daysLeft < HIGH_DAYS) level = "high";
+    return { level, daysLeft, outAt };
+  };
+  const priorityOf = (b: ProductionBatch): BatchPriority => b.priority || autoPriority(b).level;
+
+  // Cards in a column, top to bottom. Open columns put the highest priority
+  // first; the manual order (drag / arrows) applies within each priority.
+  const columnItems = (status: ProductionBatch["status"]) => {
+    const items = batches.filter((b) => b.status === status);
+    if (status === "done") return items;
+    return items
+      .map((b, i) => ({ b, i, rank: PRIORITY_BY_ID[priorityOf(b)].rank }))
+      .sort((x, y) => x.rank - y.rank || x.i - y.i)
+      .map(({ b }) => b);
+  };
 
   const toggleSort = (field: SortField) => {
     if (field === sortField) {
@@ -767,7 +817,7 @@ export default function Production() {
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
             {STATUS_COLUMNS.map((col) => {
               const Icon = col.icon;
-              const allInCol = batches.filter((b) => b.status === col.id);
+              const allInCol = columnItems(col.id);
               const colBatches = col.id === "done" && doneWindow !== "all"
                 ? allInCol.filter((b) => (b.completed_at || b.updated_at || "") >= doneCutoff)
                 : allInCol;
@@ -816,6 +866,13 @@ export default function Production() {
                     {colBatches.map((b, idx) => {
                       const stock = b.sku ? stockBySku.get(b.sku) : undefined;
                       const bulk = bulkByProduct.get(normName(b.product_name));
+                      const isOpen = b.status !== "done";
+                      const auto = isOpen ? autoPriority(b) : null;
+                      const prio = isOpen ? PRIORITY_BY_ID[b.priority || auto!.level] : null;
+                      const sameRank = (other?: ProductionBatch) =>
+                        !isOpen || (!!other && PRIORITY_BY_ID[priorityOf(other)].rank === prio!.rank);
+                      const qtyToMake = b.produced_qty || b.planned_qty || 0;
+                      const bulkShort = isOpen && !!bulk && bulk.perUnit > 0 && bulk.makes < qtyToMake;
                       return (
                       <div
                         key={b.id}
@@ -839,7 +896,7 @@ export default function Production() {
                             <span className="shrink-0 flex flex-col -my-0.5">
                               <button
                                 onClick={() => moveCard(col.id, b.id, -1)}
-                                disabled={idx === 0}
+                                disabled={idx === 0 || !sameRank(colBatches[idx - 1])}
                                 title="Move up"
                                 className="text-gray-300 hover:text-green-600 disabled:opacity-30 disabled:hover:text-gray-300 leading-none"
                               >
@@ -847,16 +904,26 @@ export default function Production() {
                               </button>
                               <button
                                 onClick={() => moveCard(col.id, b.id, 1)}
-                                disabled={idx === colBatches.length - 1}
+                                disabled={idx === colBatches.length - 1 || !sameRank(colBatches[idx + 1])}
                                 title="Move down"
                                 className="text-gray-300 hover:text-green-600 disabled:opacity-30 disabled:hover:text-gray-300 leading-none"
                               >
                                 <ChevronDown className="w-3.5 h-3.5" />
                               </button>
                             </span>
-                            <button onClick={() => setEditing(b)} className="text-left font-medium text-sm text-gray-900 hover:text-green-700">
-                              {b.product_name}
-                            </button>
+                            <div className="min-w-0">
+                              {prio && (
+                                <span
+                                  className={`inline-block mb-0.5 text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded ${prio.badge}`}
+                                  title={b.priority ? "Priority set by staff (Edit to change or reset to auto)" : "Auto priority from days of stock left"}
+                                >
+                                  {prio.label}{b.priority ? " · set" : ""}
+                                </span>
+                              )}
+                              <button onClick={() => setEditing(b)} className="block text-left font-medium text-sm text-gray-900 hover:text-green-700">
+                                {b.product_name}
+                              </button>
+                            </div>
                           </div>
                           <div className="flex items-center gap-1 shrink-0">
                             <button onClick={() => setEditing(b)} title="Edit / rename / add note" className="text-gray-300 hover:text-green-600">
@@ -868,6 +935,18 @@ export default function Production() {
                           </div>
                         </div>
                         <div className="text-xs text-gray-500 mt-1 space-y-0.5">
+                          {auto && (auto.outAt.length > 0 || auto.daysLeft !== null) && (
+                            <div className={prio && prio.rank <= 1 ? "text-red-700 font-medium" : ""}>
+                              {auto.outAt.length > 0 && `Out at ${auto.outAt.join(", ")}`}
+                              {auto.outAt.length > 0 && auto.daysLeft !== null && " · "}
+                              {auto.daysLeft !== null && `~${Math.floor(auto.daysLeft)} days of stock left`}
+                            </div>
+                          )}
+                          {bulkShort && (
+                            <div className="text-red-700 bg-red-50 border border-red-200 rounded px-1.5 py-1">
+                              {bulk!.stock <= 0 ? "No bulk on hand" : `Bulk only makes ${bulk!.makes} of ${qtyToMake}`}
+                            </div>
+                          )}
                           {b.size && <div>Size: {b.size}</div>}
                           {b.plan_date && <div>Working: {formatDateOnly(b.plan_date)}</div>}
                           {stock && (
@@ -1100,6 +1179,7 @@ function BatchModal({ batch, products, onClose, onSaved }: {
       label_qty: form.label_qty,
       notes: form.notes,
       plan_date: form.plan_date,
+      priority: form.priority || "",
       add_to_inventory: addToInventory,
     };
     // Persist the packaged->bulk link before finishing so the deduction on
@@ -1211,6 +1291,17 @@ function BatchModal({ batch, products, onClose, onSaved }: {
               <label className={label}>Status</label>
               <select className={input} value={form.status} onChange={(e) => set("status", e.target.value as ProductionBatch["status"])}>
                 {STATUS_COLUMNS.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className={label}>Priority</label>
+              <select
+                className={input}
+                value={form.priority || ""}
+                onChange={(e) => set("priority", (e.target.value || null) as BatchPriority | null)}
+              >
+                <option value="">Auto (from days of stock left)</option>
+                {PRIORITIES.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
               </select>
             </div>
             <div>

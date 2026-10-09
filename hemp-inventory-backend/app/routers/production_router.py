@@ -212,6 +212,17 @@ async def _deduct_bulk_once(db, batch_id: int, row, qty: float) -> Optional[dict
 
 # Valid batch lifecycle stages.
 _STATUSES = {"planned", "in_production", "ready", "done"}
+_PRIORITIES = {"urgent", "high", "normal", "low"}
+
+
+def _clean_priority(value: Optional[str]) -> Optional[str]:
+    """Normalise a manual priority; blank means "auto" (stored as NULL)."""
+    v = (value or "").strip().lower()
+    if not v:
+        return None
+    if v not in _PRIORITIES:
+        raise HTTPException(status_code=400, detail=f"Invalid priority '{value}'")
+    return v
 
 # Item names copied from the two production Google Sheets, used only to
 # pre-seed the "made in-house" flag against the live catalog. Matching is
@@ -516,6 +527,7 @@ class BatchCreate(BaseModel):
     notes: Optional[str] = None
     source: str = "manual"
     plan_date: Optional[str] = None
+    priority: Optional[str] = None
     add_to_inventory: Optional[bool] = None
 
 
@@ -534,6 +546,8 @@ class BatchUpdate(BaseModel):
     label_qty: Optional[int] = None
     notes: Optional[str] = None
     plan_date: Optional[str] = None
+    # Manual priority override; "" resets the card to auto priority.
+    priority: Optional[str] = None
     # When a batch first becomes 'done', its output is added to HQ Clover stock.
     # Set False to skip (e.g. moving stock rather than making new units).
     add_to_inventory: Optional[bool] = None
@@ -563,6 +577,7 @@ def _batch_row(row: aiosqlite.Row) -> dict:
         "inventoried_qty": row["inventoried_qty"],
         "inventory_error": row["inventory_error"],
         "sort_order": row["sort_order"],
+        "priority": row["priority"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -620,18 +635,19 @@ async def create_batch(
     # Hand-typed titles often carry stray whitespace, which then shows up
     # verbatim in "'NAME ' not found in HQ inventory" errors.
     body.product_name = (body.product_name or "").strip()
+    priority = _clean_priority(body.priority)
     completed_expr = "CURRENT_TIMESTAMP" if body.status == "done" else "NULL"
     cursor = await db.execute(
         f"""INSERT INTO production_batches
            (sku, product_name, size, planned_qty, produced_qty, status, batch_no,
             expiration_date, made_by, qa_check, label_ordered, label_qty, notes,
-            source, plan_date, completed_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {completed_expr})""",
+            source, plan_date, priority, completed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {completed_expr})""",
         (
             body.sku, body.product_name, body.size, body.planned_qty, body.produced_qty,
             body.status, body.batch_no, body.expiration_date, body.made_by,
             int(body.qa_check), int(body.label_ordered), body.label_qty, body.notes,
-            body.source, body.plan_date,
+            body.source, body.plan_date, priority,
         ),
     )
     await db.commit()
@@ -702,6 +718,8 @@ async def update_batch(
         fields["qa_check"] = int(body.qa_check)
     if body.label_ordered is not None:
         fields["label_ordered"] = int(body.label_ordered)
+    if body.priority is not None:
+        fields["priority"] = _clean_priority(body.priority)
 
     # Renaming a batch to a different product must not keep the previous
     # product's SKU. Production repurposes a card (e.g. Blue Dream -> Green

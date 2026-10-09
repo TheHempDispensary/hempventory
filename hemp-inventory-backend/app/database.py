@@ -888,6 +888,9 @@ async def init_db():
             # Track whether the linked bulk source was already deducted for this
             # batch, so finishing/re-saving a batch can't deduct bulk twice.
             ("bulk_deducted", "INTEGER DEFAULT 0"),
+            # Manual priority override (urgent/high/normal/low); NULL = auto
+            # priority from days of stock left.
+            ("priority", "TEXT"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE production_batches ADD COLUMN {_col} {_decl}")

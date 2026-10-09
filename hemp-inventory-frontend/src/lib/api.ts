@@ -858,6 +858,8 @@ export interface ProductionPlanItem {
   bulk_shared_by?: number;
 }
 
+export type BatchPriority = "urgent" | "high" | "normal" | "low";
+
 export interface ProductionBatch {
   id: number;
   sku: string | null;
@@ -880,6 +882,8 @@ export interface ProductionBatch {
   inventoried_at: string | null;
   inventoried_qty: number | null;
   sort_order: number;
+  /** Manual priority override; null = auto from days of stock left. */
+  priority?: BatchPriority | null;
   created_at: string;
   updated_at: string;
   inventory_error?: string | null;
@@ -917,6 +921,8 @@ export interface BatchPayload {
   notes?: string | null;
   source?: string;
   plan_date?: string | null;
+  /** "" resets the card to auto priority. */
+  priority?: BatchPriority | "";
   add_to_inventory?: boolean;
 }
 

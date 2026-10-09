@@ -2,6 +2,7 @@
 from Smart PAR, and batch tracking CRUD."""
 import aiosqlite
 import pytest
+from fastapi import HTTPException
 
 from app.database import DB_PATH, init_db
 from app.routers import production_router as pr
@@ -491,3 +492,30 @@ async def test_batch_name_is_trimmed(db):
         created["id"], pr.BatchUpdate(product_name="Lemonade 4 oz "), user={}, db=db,
     )
     assert updated["product_name"] == "Lemonade 4 oz"
+
+
+async def test_batch_priority_override_set_and_cleared(db):
+    created = await pr.create_batch(
+        pr.BatchCreate(product_name="Lemonade 2 oz", planned_qty=5, status="planned", priority="High"),
+        user={}, db=db,
+    )
+    assert created["priority"] == "high"
+
+    auto = await pr.create_batch(pr.BatchCreate(product_name="Auto", planned_qty=1), user={}, db=db)
+    assert auto["priority"] is None
+
+    # Editing other fields leaves the override alone; "" resets to auto.
+    kept = await pr.update_batch(created["id"], pr.BatchUpdate(notes="x"), user={}, db=db)
+    assert kept["priority"] == "high"
+    urgent = await pr.update_batch(created["id"], pr.BatchUpdate(priority="urgent"), user={}, db=db)
+    assert urgent["priority"] == "urgent"
+    cleared = await pr.update_batch(created["id"], pr.BatchUpdate(priority=""), user={}, db=db)
+    assert cleared["priority"] is None
+
+
+async def test_batch_rejects_bad_priority(db):
+    with pytest.raises(HTTPException):
+        await pr.create_batch(pr.BatchCreate(product_name="X", priority="asap"), user={}, db=db)
+    created = await pr.create_batch(pr.BatchCreate(product_name="Y"), user={}, db=db)
+    with pytest.raises(HTTPException):
+        await pr.update_batch(created["id"], pr.BatchUpdate(priority="asap"), user={}, db=db)
