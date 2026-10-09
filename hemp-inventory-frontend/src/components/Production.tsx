@@ -34,6 +34,22 @@ const PRIORITIES: { id: BatchPriority; label: string; badge: string; rank: numbe
 ];
 const PRIORITY_BY_ID = Object.fromEntries(PRIORITIES.map((p) => [p.id, p])) as Record<BatchPriority, (typeof PRIORITIES)[number]>;
 
+type AutoPriority = { level: BatchPriority; daysLeft: number | null; outAt: string[] };
+// Auto priority from how long current stock lasts at the Smart PAR sales
+// rate; out of stock at any store is always urgent.
+const stockPriority = (byLocation: [string, number][], item?: ProductionPlanItem): AutoPriority => {
+  const outAt = byLocation.filter(([, qty]) => qty <= 0).map(([loc]) => loc);
+  const perDay = item ? item.units_per_month / 30.44 : 0;
+  const daysLeft = perDay > 0 ? Math.max(item!.in_stock, 0) / perDay : null;
+  let level: BatchPriority = "normal";
+  if (outAt.length > 0 || (daysLeft !== null && daysLeft < URGENT_DAYS)) level = "urgent";
+  else if (daysLeft !== null && daysLeft < HIGH_DAYS) level = "high";
+  return { level, daysLeft, outAt };
+};
+
+const planItemFor = (byKey: Map<string, ProductionPlanItem>, b: ProductionBatch) =>
+  (b.sku ? byKey.get(b.sku) : undefined) ?? byKey.get(normName(b.product_name));
+
 const NEXT_STATUS: Record<ProductionBatch["status"], ProductionBatch["status"] | null> = {
   planned: "in_production",
   in_production: "ready",
@@ -184,7 +200,7 @@ const bulkMatchesProduct = (bulk: string, product: string): boolean => {
 
 type DoneWindow = "7" | "30" | "all";
 
-type SortField = "name" | "in_stock" | "units_per_month" | "needed" | "already_planned" | "to_produce" | "bulk";
+type SortField = "priority" | "name" | "in_stock" | "units_per_month" | "needed" | "already_planned" | "to_produce" | "bulk";
 
 // "Hemp Dispensary East Location" -> "East"
 const shortLocation = (name: string) =>
@@ -220,8 +236,8 @@ export default function Production() {
     return d.toISOString().slice(0, 19).replace("T", " ");
   }, [doneWindow]);
 
-  const [sortField, setSortField] = useState<SortField>("to_produce");
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [sortField, setSortField] = useState<SortField>("priority");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
 
   const dragIdRef = useRef<number | null>(null);
   const [dragId, setDragId] = useState<number | null>(null);
@@ -520,20 +536,42 @@ export default function Production() {
 
   // Auto priority from how long current stock lasts at the Smart PAR sales
   // rate; out of stock at any store is always urgent.
-  const autoPriority = (b: ProductionBatch): { level: BatchPriority; daysLeft: number | null; outAt: string[] } => {
-    const item = (b.sku ? planItemByKey.get(b.sku) : undefined) ?? planItemByKey.get(normName(b.product_name));
+  const autoPriority = (b: ProductionBatch): AutoPriority => {
+    const item = planItemFor(planItemByKey, b);
     const byLocation: [string, number][] = item
       ? Object.entries(item.stock_by_location || {}).map(([loc, qty]) => [shortLocation(loc), qty])
       : (b.sku ? stockBySku.get(b.sku)?.byLocation : undefined) ?? [];
-    const outAt = byLocation.filter(([, qty]) => qty <= 0).map(([loc]) => loc);
-    const perDay = item ? item.units_per_month / 30.44 : 0;
-    const daysLeft = perDay > 0 ? Math.max(item!.in_stock, 0) / perDay : null;
-    let level: BatchPriority = "normal";
-    if (outAt.length > 0 || (daysLeft !== null && daysLeft < URGENT_DAYS)) level = "urgent";
-    else if (daysLeft !== null && daysLeft < HIGH_DAYS) level = "high";
-    return { level, daysLeft, outAt };
+    return stockPriority(byLocation, item);
   };
   const priorityOf = (b: ProductionBatch): BatchPriority => b.priority || autoPriority(b).level;
+
+  // A priority staff set on an open board card carries over to its Plan row,
+  // so both screens agree. Several such cards: the most urgent wins.
+  const manualPriorityByPlanKey = useMemo(() => {
+    const m = new Map<string, BatchPriority>();
+    for (const b of batches) {
+      if (b.status === "done" || !b.priority) continue;
+      const item = planItemFor(planItemByKey, b);
+      if (!item) continue;
+      const key = planKey(item);
+      const cur = m.get(key);
+      if (!cur || PRIORITY_BY_ID[b.priority].rank < PRIORITY_BY_ID[cur].rank) m.set(key, b.priority);
+    }
+    return m;
+  }, [batches, planItemByKey]);
+
+  const planPriority = useMemo(() => {
+    const m = new Map<string, { level: BatchPriority; manual: boolean; auto: AutoPriority }>();
+    for (const p of plan) {
+      const auto = stockPriority(
+        Object.entries(p.stock_by_location || {}).map(([loc, qty]) => [shortLocation(loc), qty]),
+        p,
+      );
+      const manual = manualPriorityByPlanKey.get(planKey(p));
+      m.set(planKey(p), { level: manual || auto.level, manual: !!manual, auto });
+    }
+    return m;
+  }, [plan, manualPriorityByPlanKey]);
 
   // Cards in a column, top to bottom. Open columns put the highest priority
   // first; the manual order (drag / arrows) applies within each priority.
@@ -551,7 +589,7 @@ export default function Production() {
       setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     } else {
       setSortField(field);
-      setSortDir(field === "name" ? "asc" : "desc");
+      setSortDir(field === "name" || field === "priority" ? "asc" : "desc");
     }
   };
 
@@ -560,14 +598,21 @@ export default function Production() {
       ? plan.filter((p) => matchesSearch(planSearch, p.name, p.sku))
       : [...plan];
     const value = (p: ProductionPlanItem): number =>
-      sortField === "bulk" ? (bulkByProduct.get(normName(p.name))?.stock ?? -1) : Number(p[sortField]);
+      sortField === "bulk" ? (bulkByProduct.get(normName(p.name))?.stock ?? -1)
+        : sortField === "priority" ? PRIORITY_BY_ID[planPriority.get(planKey(p))?.level ?? "normal"].rank
+        : Number(p[sortField]);
     const dir = sortDir === "asc" ? 1 : -1;
     return rows.sort((a, b) => {
       if (sortField === "name") return dir * a.name.localeCompare(b.name);
+      if (sortField === "priority") {
+        const diff = value(a) - value(b);
+        if (diff !== 0) return dir * diff;
+        return b.to_produce - a.to_produce || a.name.localeCompare(b.name);
+      }
       const diff = value(a) - value(b);
       return diff !== 0 ? dir * diff : a.name.localeCompare(b.name);
     });
-  }, [plan, planSearch, sortField, sortDir, bulkByProduct]);
+  }, [plan, planSearch, sortField, sortDir, bulkByProduct, planPriority]);
 
   const selectablePlan = useMemo(
     () => filteredPlan.filter((p) => p.to_produce > 0),
@@ -692,6 +737,7 @@ export default function Production() {
                               title="Select all"
                             />
                           </th>
+                          <SortHeader field="priority" label="Priority" sortField={sortField} sortDir={sortDir} onSort={toggleSort} />
                           <SortHeader field="name" label="Product" sortField={sortField} sortDir={sortDir} onSort={toggleSort} />
                           <SortHeader field="in_stock" label="In Stock" align="right" sortField={sortField} sortDir={sortDir} onSort={toggleSort} />
                           <SortHeader field="bulk" label="Bulk On Hand" align="right" sortField={sortField} sortDir={sortDir} onSort={toggleSort} />
@@ -705,6 +751,8 @@ export default function Production() {
                       <tbody className="divide-y divide-gray-100">
                         {filteredPlan.map((p) => {
                           const bulk = bulkByProduct.get(normName(p.name));
+                          const pp = planPriority.get(planKey(p));
+                          const prio = pp ? PRIORITY_BY_ID[pp.level] : null;
                           return (
                           <tr key={planKey(p)} className={`hover:bg-gray-50 ${selected.has(planKey(p)) ? "bg-green-50/60" : ""}`}>
                             <td className="px-4 py-3">
@@ -715,6 +763,25 @@ export default function Production() {
                                   onChange={() => toggleSelect(planKey(p))}
                                   className="w-4 h-4 accent-green-600"
                                 />
+                              )}
+                            </td>
+                            <td className="px-4 py-3">
+                              {prio && pp && (
+                                <>
+                                  <span
+                                    className={`inline-block text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded whitespace-nowrap ${prio.badge}`}
+                                    title={pp.manual ? "Priority set by staff on the board card" : "Auto priority from days of stock left"}
+                                  >
+                                    {prio.label}{pp.manual ? " · set" : ""}
+                                  </span>
+                                  {(pp.auto.outAt.length > 0 || pp.auto.daysLeft !== null) && (
+                                    <div className="text-xs text-gray-400 mt-0.5 whitespace-nowrap">
+                                      {pp.auto.outAt.length > 0 && `Out at ${pp.auto.outAt.join(", ")}`}
+                                      {pp.auto.outAt.length > 0 && pp.auto.daysLeft !== null && " · "}
+                                      {pp.auto.daysLeft !== null && `~${Math.floor(pp.auto.daysLeft)} days left`}
+                                    </div>
+                                  )}
+                                </>
                               )}
                             </td>
                             <td className="px-4 py-3">
@@ -784,7 +851,7 @@ export default function Production() {
                           );
                         })}
                         {filteredPlan.length === 0 && (
-                          <tr><td colSpan={9} className="px-4 py-8 text-center text-gray-500">Nothing to produce right now.</td></tr>
+                          <tr><td colSpan={10} className="px-4 py-8 text-center text-gray-500">Nothing to produce right now.</td></tr>
                         )}
                       </tbody>
                     </table>
